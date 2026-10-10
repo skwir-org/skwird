@@ -11,7 +11,7 @@ notifications and answered over a local socket in milliseconds. Every
 answer says how far it can be trusted.
 
 It is a general tool: a command line, and a protocol any program can
-speak (file managers, launchers, editors). bibli, a file manager, is
+speak (file managers, launchers, editors). skwir, a file manager, is
 its first client, and the reason several decisions below exist.
 
 It borrows from two MIT-licensed projects, with credit where code is
@@ -29,7 +29,7 @@ taken:
 It does none of these:
 
 - **Search inside files.** Not for now (open question 4).
-- **Types by extension.** Clients type files; bibli uses the desktop's
+- **Types by extension.** Clients type files; skwir uses the desktop's
   MIME database.
 - **A query language in the protocol.** Queries are data; the command
   line's syntax compiles to them.
@@ -172,7 +172,7 @@ are a bounded extra for the folders that change most (open question 2).
 
 It is not enough to leave them out of answers: they are never read into
 the index. skwird honours what marks them itself:
-- a `.private` file in a folder (bibli's convention);
+- a `.private` file in a folder (skwir's convention);
 - default exclusions (`~/.ssh`, `~/.gnupg`, keyrings);
 - a user's own exclusions.
 
@@ -185,7 +185,7 @@ Each entry comes with its device and inode, and its folder's. That lets
 a client:
 - tell a file from its names (hard links);
 - follow a rename;
-- keep what belongs to the file by the file (bibli's ADR-049).
+- keep what belongs to the file by the file (skwir's ADR-049).
 
 The cost is 8 bytes per entry; the device is one per filesystem's index.
 
@@ -285,7 +285,7 @@ measures them.
    the user's client registers them over the socket, with the user's
    credentials, and the service keeps them per user.
 4. **Content search:** whether a trigram index belongs in skwird or in
-   each client. bibli measured one: 11% of the text, 5 to 175 times
+   each client. skwir measured one: 11% of the text, 5 to 175 times
    faster than scanning.
 5. **Names:** their exact meaning (Unicode case folding and
    normalization), and fuzzy scoring.

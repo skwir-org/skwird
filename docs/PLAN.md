@@ -18,7 +18,7 @@ What decides how much each system needs a service:
   btrfs filesystem, and from which subvolumes the events come
   (`skwird-bench fanotify`, as root).
 
-Measured so far, 2026-10-10, on bibli's synthetic `deep1m` tree (btrfs,
+Measured so far, 2026-10-10, on skwir's synthetic `deep1m` tree (btrfs,
 warm, 20 threads, an idle machine):
 - **Walk:** 1,011,113 entries in 11,111 folders. 243 ms reading names,
   846 ms stat-ing every entry.
