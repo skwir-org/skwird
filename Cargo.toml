@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/bench"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+libc = "0.2.189"
+
+[workspace.lints.rust]
+# Only a module that speaks to the system allows it, with SAFETY comments
+# (AGENTS.md, "Unsafe").
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
+[profile.release]
+debug = 1

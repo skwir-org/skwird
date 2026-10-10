@@ -1,0 +1,52 @@
+# skwird
+
+An index of file names for Linux, macOS and Windows, kept current by
+the system's change notifications and answered over a local socket in
+milliseconds. Every answer says how far it can be trusted: live, checked
+at a time, a snapshot as of a time, or not covered and why. A program
+that asks it can therefore skip walking the disk where skwird proves it
+knows, and walk only where it does not.
+
+It runs in one of three ways, with the same engine and protocol:
+
+- a **system service**, covering every user's files and answering each
+  asker only what they could list;
+- a **user service**, covering one user's files;
+- **on demand**, started by its first client and ending a minute after
+  its last.
+
+**Status:** design. Only the measurement tool is built. Read
+`docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the phases.
+
+## Measuring
+
+`skwird-bench` measures what an index would cost on a real tree. It
+prints counts, sizes and times, never a name or a path, so its output
+can be shared.
+
+```
+cargo build --release
+target/release/skwird-bench walk ~            # the crawl, and the index's size
+target/release/skwird-bench check ~ --cold    # proving names current, cold then warm
+sudo target/release/skwird-bench fanotify ~ --seconds 30   # can a system service watch it all?
+```
+
+`check --cold` asks you to drop the caches before each cold pass, which
+slows the machine for a while afterwards.
+
+## Building
+
+Stable Rust 1.85 or later. `cargo test`, and `cargo clippy --all-targets
+-- -D warnings` before a change is done.
+
+## Credits
+
+The index's layout, and much of what skwird will do on macOS, come from
+[fsearch](https://github.com/noahdunnagan/fsearch). Its Linux port,
+[fsearch-crossplatform](https://github.com/threehymns/fsearch-crossplatform),
+showed what watching a home folder with inotify takes. Both are
+MIT-licensed; code taken from them keeps their notices.
+
+## License
+
+MIT or Apache-2.0, at your choice (`LICENSE-MIT`, `LICENSE-APACHE`).
