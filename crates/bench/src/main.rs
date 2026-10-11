@@ -10,6 +10,7 @@ use std::process::ExitCode;
 mod check;
 #[cfg(target_os = "linux")]
 mod fanotify;
+#[cfg(unix)]
 mod said;
 #[cfg(unix)]
 mod walk;
@@ -119,8 +120,13 @@ fn main() -> ExitCode {
 }
 
 #[cfg(not(unix))]
-fn run(_: &Args) -> Result<(), String> {
-    Err("skwird-bench measures Unix filesystems so far; Windows comes with phase 4".into())
+fn run(args: &Args) -> Result<(), String> {
+    match args.command.as_str() {
+        "walk" | "check" | "fanotify" => {
+            Err("skwird-bench measures Unix filesystems so far; Windows comes with phase 4".into())
+        }
+        _ => Err(USAGE.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -152,7 +158,7 @@ fn walk_options(args: &Args, stat_files: bool) -> walk::Options {
 #[cfg(unix)]
 fn print_walk(walked: &walk::Walked, args: &Args) {
     use said::{bytes, count};
-    println!("filesystem: {}", walk::fs_name(walked.fs_type));
+    println!("filesystem: {}", walked.fs);
     println!(
         "entries: {} ({} folders, {} files, {} links, {} other)",
         count(walked.entries()),

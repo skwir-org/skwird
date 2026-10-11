@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Dev, Dir, FileType, Mode, OFlags};
 
 pub struct Options {
     pub threads: usize,
@@ -60,8 +60,8 @@ pub struct Walked {
     /// Every folder walked, the root first.
     pub list: Vec<Folder>,
     pub took: Duration,
-    /// The root filesystem's type (`statfs`'s `f_type`).
-    pub fs_type: u64,
+    /// The root filesystem's name, as `fs_name` gives it.
+    pub fs: String,
 }
 
 impl Walked {
@@ -93,7 +93,7 @@ struct Queue {
     turn: Condvar,
     /// Every folder queued, by device and inode: a bind mount of a folder
     /// above, on the same filesystem, would otherwise be walked forever.
-    seen: Mutex<HashSet<(u64, u64)>>,
+    seen: Mutex<HashSet<(Dev, u64)>>,
 }
 
 impl Queue {
@@ -123,7 +123,7 @@ pub fn walk(root: &Path, opts: &Options) -> Result<Walked, String> {
     let start = Instant::now();
     let fd = open(root).map_err(|e| format!("cannot open the root: {e}"))?;
     let own = rustix::fs::fstat(&fd).map_err(|e| format!("cannot stat the root: {e}"))?;
-    let fs_type = rustix::fs::fstatfs(&fd).map_or(0, |s| s.f_type as u64);
+    let fs = rustix::fs::fstatfs(&fd).map_or_else(|_| "unknown".into(), |s| fs_name(&s));
     drop(fd);
     let queue = Queue {
         state: Mutex::new((vec![root.to_path_buf()], 0)),
@@ -139,7 +139,7 @@ pub fn walk(root: &Path, opts: &Options) -> Result<Walked, String> {
     let took = start.elapsed();
     let mut walked = Walked {
         took,
-        fs_type,
+        fs,
         folders: 1,
         ..Walked::default()
     };
@@ -173,7 +173,7 @@ fn open(dir: &Path) -> rustix::io::Result<rustix::fd::OwnedFd> {
     )
 }
 
-fn work(queue: &Queue, root_dev: u64, opts: &Options) -> Share {
+fn work(queue: &Queue, root_dev: Dev, opts: &Options) -> Share {
     let mut share = Share::default();
     while let Some(dir) = queue.next() {
         let mut found = Vec::new();
@@ -186,9 +186,9 @@ fn work(queue: &Queue, root_dev: u64, opts: &Options) -> Share {
 /// Read one folder: count its entries, and queue its folders.
 fn read(
     dir: &Path,
-    root_dev: u64,
+    root_dev: Dev,
     opts: &Options,
-    seen: &Mutex<HashSet<(u64, u64)>>,
+    seen: &Mutex<HashSet<(Dev, u64)>>,
     share: &mut Share,
     found: &mut Vec<PathBuf>,
 ) {
@@ -274,8 +274,9 @@ fn fnv(bytes: &[u8]) -> u64 {
 }
 
 /// A filesystem's name by its `statfs` magic, or the number.
-pub fn fs_name(magic: u64) -> String {
-    match magic {
+#[cfg(target_os = "linux")]
+pub fn fs_name(fs: &rustix::fs::StatFs) -> String {
+    match fs.f_type as u64 {
         0x9123_683e => "btrfs".into(),
         0xef53 => "ext4".into(),
         0x5846_5342 => "xfs".into(),
@@ -290,6 +291,25 @@ pub fn fs_name(magic: u64) -> String {
         0 => "unknown".into(),
         other => format!("{other:#x}"),
     }
+}
+
+/// A filesystem's name as macOS gives it (`f_fstypename`): its `f_type`
+/// numbers are not Linux's.
+#[cfg(target_vendor = "apple")]
+pub fn fs_name(fs: &rustix::fs::StatFs) -> String {
+    let name: Vec<u8> = fs
+        .f_fstypename
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    String::from_utf8_lossy(&name).into_owned()
+}
+
+/// A filesystem's name, which the other systems' `statfs` is not read for.
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+pub fn fs_name(_: &rustix::fs::StatFs) -> String {
+    "unknown on this system".into()
 }
 
 #[cfg(test)]
