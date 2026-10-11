@@ -3,31 +3,48 @@
 # default, kept in one file you can share: it holds counts, sizes and
 # times, never a name or a path.
 #
-#   tools/measure.sh [--no-root] [FOLDER]
+#   tools/measure.sh [--no-root] [--only walk|check|fanotify] [FOLDER]
 #
 # It asks for your password once (sudo), to drop the caches before each
 # cold pass (the machine is slower for a while after) and to try
-# fanotify, which only root may use on a whole filesystem. --no-root
-# skips both: warm passes only, no fanotify. It takes a few minutes; an
-# idle machine gives the fairest numbers.
+# fanotify, which only root may use on a whole filesystem. On a btrfs
+# subvolume, fanotify also mounts the filesystem's top-level subvolume,
+# read-only and attached nowhere, for the seconds it listens. --no-root
+# skips both: warm passes only, no fanotify. --only runs one step. It
+# takes a few minutes; an idle machine gives the fairest numbers.
 set -euo pipefail
 
+usage='tools/measure.sh [--no-root] [--only walk|check|fanotify] [FOLDER]'
 use_root=1
+only=
 folder=$HOME
-for arg in "$@"; do
-    case $arg in
+while [ $# -gt 0 ]; do
+    case $1 in
     --no-root) use_root=0 ;;
+    --only)
+        case ${2:-} in
+        walk | check | fanotify) only=$2 ;;
+        *)
+            echo "--only takes walk, check or fanotify ($usage)" >&2
+            exit 2
+            ;;
+        esac
+        shift
+        ;;
     -h | --help)
-        sed -n '2,12s/^# \{0,1\}//p' "$0"
+        sed -n '2,14s/^# \{0,1\}//p' "$0"
         exit 0
         ;;
     -*)
-        echo "unknown option $arg (tools/measure.sh [--no-root] [FOLDER])" >&2
+        echo "unknown option $1 ($usage)" >&2
         exit 2
         ;;
-    *) folder=$arg ;;
+    *) folder=$1 ;;
     esac
+    shift
 done
+# Whether a step runs: every step, or the one --only names.
+want() { [ -z "$only" ] || [ "$only" = "$1" ]; }
 if [ "$(id -u)" = 0 ]; then
     # As root, the home folder and the cache would be root's.
     echo "Run it as yourself: it asks for sudo when it needs it." >&2
@@ -116,42 +133,48 @@ disk() {
     echo "disk: $(disk)"
     echo "load before: $(cut -d' ' -f1-3 /proc/loadavg)"
 
-    if [ "$use_root" = 1 ]; then
-        section "walk, names only, cold"
-        if dropped; then run "$bench" walk "$root"; fi
-    fi
-    section "walk, names only, warm"
-    run "$bench" walk "$root"
-    if [ "$use_root" = 1 ]; then
-        section "walk, every entry stat-ed, cold"
-        if dropped; then run "$bench" walk "$root" --stat; fi
-    fi
-    section "walk, every entry stat-ed, warm"
-    run "$bench" walk "$root" --stat
-
-    section "check of every folder's change time"
-    if [ "$use_root" = 1 ]; then
-        run "$bench" check "$root" --runs 2 --drop-with "$drop"
-    else
-        run "$bench" check "$root" --runs 2
+    if want walk; then
+        if [ "$use_root" = 1 ]; then
+            section "walk, names only, cold"
+            if dropped; then run "$bench" walk "$root"; fi
+        fi
+        section "walk, names only, warm"
+        run "$bench" walk "$root"
+        if [ "$use_root" = 1 ]; then
+            section "walk, every entry stat-ed, cold"
+            if dropped; then run "$bench" walk "$root" --stat; fi
+        fi
+        section "walk, every entry stat-ed, warm"
+        run "$bench" walk "$root" --stat
     fi
 
-    section "fanotify"
-    if [ "$use_root" = 1 ]; then
-        probes=(--probe "$probe")
-        legend="1 = a folder in your cache"
-        n=1
-        for dir in /var/tmp /tmp; do
-            if [ -d "$dir" ]; then
-                n=$((n + 1))
-                probes+=(--probe "$dir")
-                legend="$legend, $n = $dir"
-            fi
-        done
-        echo "probes: $legend"
-        run sudo -n "$bench" fanotify "$root" --seconds 2 "${probes[@]}"
-    else
-        echo "not tried: it needs sudo"
+    if want check; then
+        section "check of every folder's change time"
+        if [ "$use_root" = 1 ]; then
+            run "$bench" check "$root" --runs 2 --drop-with "$drop"
+        else
+            run "$bench" check "$root" --runs 2
+        fi
+    fi
+
+    if want fanotify; then
+        section "fanotify"
+        if [ "$use_root" = 1 ]; then
+            probes=(--probe "$probe")
+            legend="1 = a folder in your cache"
+            n=1
+            for dir in /var/tmp /tmp; do
+                if [ -d "$dir" ]; then
+                    n=$((n + 1))
+                    probes+=(--probe "$dir")
+                    legend="$legend, $n = $dir"
+                fi
+            done
+            echo "probes: $legend"
+            run sudo -n "$bench" fanotify "$root" --seconds 2 "${probes[@]}"
+        else
+            echo "not tried: it needs sudo"
+        fi
     fi
 
     echo

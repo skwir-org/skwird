@@ -1,7 +1,8 @@
 # skwird's design
 
-Status: design, 2026-10-10. Only `skwird-bench` (phase 0, `docs/PLAN.md`)
-is built. Each decision says why, so that it can be revisited knowingly.
+Status: design, 2026-10-10, revised on 2026-10-11 by phase 0's numbers.
+Only `skwird-bench` (phase 0, `docs/PLAN.md`) is built. Each decision
+says why, so that it can be revisited knowingly.
 
 ## What skwird is
 
@@ -109,12 +110,18 @@ concerned, until that subtree is read again.
 - **The check** proves names current without any watch. A folder's
   change time moves whenever its entries change. So comparing each
   folder's change time with the one stored, for equality, finds every
-  folder to read again. It is not a comparison against a timestamp with
-  a margin, as fsearch-crossplatform does with modification times:
-  `tar` and `rsync -a` set those back after filling a folder, and
-  cannot set a change time. This holds only where change times tell:
-  local filesystems, not network shares or FUSE. It proves names, not
-  attributes: a file's size changes no folder's time.
+  folder to read again. Two rules keep this sound. The time stored is
+  read before the folder's entries, so a change during the read leaves
+  a time that differs. And change times can be coarse: a second change
+  within one tick of the clock can leave the time as it was, so a
+  folder read within a tick of its last change is read again at the
+  next check, as git does with its "racily clean" entries. It is not a
+  comparison against a timestamp with a margin, as fsearch-crossplatform
+  does with modification times: `tar` and `rsync -a` set those back
+  after filling a folder, and cannot set a change time. This holds only
+  where change times tell: local filesystems, not network shares or
+  FUSE. It proves names, not attributes: a file's size changes no
+  folder's time.
 - **Answers are exact for covered facts under covered roots.** Clients
   still check what they show (a stat), so a stale result costs one
   check. The guarantee is about results missing.
@@ -130,12 +137,17 @@ skwird uses what it was given and reports the coverage that results.
 
 | | As a user | With privileges |
 |---|---|---|
-| Linux | `getdents64` walk. inotify needs one watch per folder, about 1 KB of kernel memory each, within `max_user_watches`. No history across restarts: the check (2) catches up | fanotify on whole filesystems (`FAN_MARK_FILESYSTEM`, `FAN_REPORT_DFID_NAME`: Linux 5.9 or later, `CAP_SYS_ADMIN`). No watch per folder, every user's files. Still no history across a reboot |
+| Linux | `getdents64` walk. inotify needs one watch per folder, about 1 KB of kernel memory each, within `max_user_watches`. No history across restarts: the check (2) catches up | fanotify on whole filesystems (`FAN_MARK_FILESYSTEM`, `FAN_REPORT_DFID_NAME`: Linux 5.9 or later, `CAP_SYS_ADMIN`). No watch per folder, every user's files. Still no history across a reboot. Refused through a btrfs subvolume (open question 6) |
 | macOS | `getattrlistbulk` walk. FSEvents keeps a history on disk, so a restart replays what changed | Root adds little; Full Disk Access decides what can be read |
 | Windows | `FindFirstFileEx` walk. `ReadDirectoryChangesW` watches a whole tree with one handle. No history | The volume's file table to crawl and its change journal (USN) to catch up after a restart, as Everything does. Needs administrator rights and NTFS |
 
 As a user on Linux, the check is the base mechanism, and inotify watches
 are a bounded extra for the folders that change most (open question 2).
+Phase 0 measured why, on a home of 5.8 million entries in 652,336
+folders. A watch per folder would take more than the user's whole limit
+of 524,288 watches. The check proved every folder current in 1.9 s from
+a cold cache and in 52 ms warm, where a walk took 10 to 13 s cold and 1
+to 2.7 s warm.
 
 ### 4. A system service answers only what the asker could list
 
@@ -235,7 +247,11 @@ skwird adds:
 The index is a cache: a wrong version or a damaged file is rebuilt.
 
 `skwird-bench walk` estimates its size: 33 bytes per entry, 16 per
-distinct name plus its bytes, and 40 per folder.
+distinct name plus its bytes, and 40 per folder. For the home phase 0
+measured, 341 MB for 5.8 million entries. Its distinct names were 44% of
+its entries, so a query scores fewer than half as many names as entries,
+and storing each name once cost no more than storing every entry's
+(124 MB either way).
 
 ### 9. Every system
 
@@ -289,7 +305,16 @@ measures them.
    faster than scanning.
 5. **Names:** their exact meaning (Unicode case folding and
    normalization), and fuzzy scoring.
-6. **fanotify on btrfs subvolumes:** `skwird-bench fanotify` asks.
+6. **fanotify on btrfs subvolumes:** Linux 6.18 refuses a mark of the
+   whole filesystem through a subvolume (`EXDEV`: the subvolume's
+   filesystem id is not its superblock's), and the home phase 0 measured
+   is one. The way to try: mark the filesystem through its top-level
+   subvolume, mounted read-only and detached (`fsmount`, attached to no
+   folder). fanotify accepts a mark through a detached mount and hears
+   changes made there (tried on a tmpfs, in a user namespace). Untried
+   on btrfs: whether events from every subvolume are then heard, with
+   which filesystem id, and whether their handles open. If not, a system
+   service on btrfs needs another way: marks per folder, or the check.
 7. **Windows:** whether NTFS folder times can serve as the check; ReFS;
    how fast the file table reads.
 8. **Removable and network volumes:** indexed unasked, or asked first.

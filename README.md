@@ -31,8 +31,11 @@ tools/measure.sh
 
 It asks for your password once: to drop the caches before each cold
 pass, which slows the machine for a while afterwards, and to try
-fanotify, which only root may use on a whole filesystem. `--no-root`
-skips both. It builds the tool first when cargo is at hand.
+fanotify, which only root may use on a whole filesystem. In a btrfs
+subvolume, fanotify also mounts the filesystem's top-level subvolume,
+read-only and attached nowhere, for the seconds it listens. `--no-root`
+skips both, and `--only walk|check|fanotify` runs one step. It builds
+the tool first when cargo is at hand.
 
 The tool's commands, run by hand:
 

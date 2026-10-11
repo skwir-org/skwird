@@ -17,7 +17,7 @@ mod walk;
 const USAGE: &str = "\
 usage: skwird-bench walk ROOT [--threads N] [--stat] [--cross-mounts]
        skwird-bench check ROOT [--threads N] [--runs N] [--cold] [--drop-with CMD]
-       skwird-bench fanotify PATH [--seconds N] [--probe DIR]...
+       skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
 
 walk      read every folder under ROOT as skwird's crawl would, and size
           the index it would keep (--stat: stat every entry, as an index
@@ -27,10 +27,13 @@ check     what proving that index current costs where nothing watched:
           asks you to drop the caches before each cold pass; --drop-with
           CMD: runs CMD with sh to drop them instead, and implies --cold)
 fanotify  whether a system service could watch the whole filesystem
-          holding PATH (root only; --seconds N: listen that long and say
-          which filesystems the events came from; --probe DIR: first
-          make, rename and remove a file of its own in DIR, and say
-          whether each of those was heard)
+          holding FOLDER (root only). Refused in a btrfs subvolume, it
+          tries through the filesystem's top-level subvolume, mounted
+          read-only and attached nowhere while it runs. --seconds N:
+          listen that long and say which filesystems the events came
+          from; --probe DIR: first make, rename and remove a file of its
+          own in DIR, and say whether each of those was heard and
+          whether its folder's handle opens
 
 It prints counts, sizes and times, never a name or a path.";
 
