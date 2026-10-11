@@ -16,7 +16,11 @@ What decides how much each system needs a service:
   threads (`skwird-bench check`, `--cold`).
 - **fanotify.** Whether this kernel lets a system service watch a whole
   btrfs filesystem, and from which subvolumes the events come
-  (`skwird-bench fanotify`, as root).
+  (`skwird-bench fanotify`, as root, with probes: folders where it makes,
+  renames and removes a file of its own and says whether it heard them).
+
+`tools/measure.sh` runs all three on a folder, cold and warm, and keeps
+the output in one file.
 
 Measured so far, 2026-10-10, on skwir's synthetic `deep1m` tree (btrfs,
 warm, 20 threads, an idle machine):

@@ -16,18 +16,21 @@ mod walk;
 
 const USAGE: &str = "\
 usage: skwird-bench walk ROOT [--threads N] [--stat] [--cross-mounts]
-       skwird-bench check ROOT [--threads N] [--runs N] [--cold]
-       skwird-bench fanotify PATH [--seconds N]
+       skwird-bench check ROOT [--threads N] [--runs N] [--cold] [--drop-with CMD]
+       skwird-bench fanotify PATH [--seconds N] [--probe DIR]...
 
 walk      read every folder under ROOT as skwird's crawl would, and size
           the index it would keep (--stat: stat every entry, as an index
           of sizes and times needs)
 check     what proving that index current costs where nothing watched:
           every folder's change time, on 1, 8 and all threads (--cold:
-          asks you to drop the caches before each pass)
+          asks you to drop the caches before each cold pass; --drop-with
+          CMD: runs CMD with sh to drop them instead, and implies --cold)
 fanotify  whether a system service could watch the whole filesystem
           holding PATH (root only; --seconds N: listen that long and say
-          which filesystems the events came from)
+          which filesystems the events came from; --probe DIR: first
+          make, rename and remove a file of its own in DIR, and say
+          whether each of those was heard)
 
 It prints counts, sizes and times, never a name or a path.";
 
@@ -39,7 +42,11 @@ struct Args {
     stat: bool,
     cross_mounts: bool,
     cold: bool,
+    /// A command that drops the caches, run with `sh -c` before each cold pass.
+    drop_with: Option<String>,
     seconds: u64,
+    /// Folders where `fanotify` makes, renames and removes a file of its own.
+    probes: Vec<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -53,7 +60,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
         stat: false,
         cross_mounts: false,
         cold: false,
+        drop_with: None,
         seconds: 0,
+        probes: Vec::new(),
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -67,6 +76,16 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--stat" => parsed.stat = true,
             "--cross-mounts" => parsed.cross_mounts = true,
             "--cold" => parsed.cold = true,
+            "--drop-with" => {
+                parsed.drop_with = Some(it.next().ok_or("--drop-with takes a command")?.clone());
+                parsed.cold = true;
+            }
+            "--probe" => {
+                let dir = it.next().ok_or("--probe takes a folder")?;
+                parsed.probes.push(
+                    std::fs::canonicalize(dir).map_err(|e| format!("cannot reach a probe: {e}"))?,
+                );
+            }
             "-h" | "--help" => return Err(USAGE.into()),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
@@ -111,7 +130,7 @@ fn run(args: &Args) -> Result<(), String> {
         }
         "check" => check(args),
         #[cfg(target_os = "linux")]
-        "fanotify" => fanotify::probe(&args.path, args.seconds),
+        "fanotify" => fanotify::probe(&args.path, args.seconds, &args.probes),
         #[cfg(not(target_os = "linux"))]
         "fanotify" => Err("fanotify is Linux's".into()),
         _ => Err(USAGE.into()),
@@ -155,6 +174,12 @@ fn print_walk(walked: &walk::Walked, args: &Args) {
         },
         count(walked.unreadable)
     );
+    if walked.again > 0 {
+        println!(
+            "walked once: {} folders reached again through a bind mount",
+            count(walked.again)
+        );
+    }
     println!(
         "walk: {} on {} threads, {}",
         said::time(walked.took),
@@ -227,6 +252,17 @@ fn check(args: &Args) -> Result<(), String> {
     };
     if args.cold {
         let drop_caches = || -> Result<(), String> {
+            if let Some(command) = &args.drop_with {
+                let ran = std::process::Command::new("sh")
+                    .args(["-c", command])
+                    .status()
+                    .map_err(|e| format!("cannot run the command that drops the caches: {e}"))?;
+                return if ran.success() {
+                    Ok(())
+                } else {
+                    Err(format!("the command that drops the caches failed ({ran})"))
+                };
+            }
             println!(
                 "  drop the caches now (sync; echo 3 | sudo tee /proc/sys/vm/drop_caches), then press Enter"
             );
@@ -236,12 +272,22 @@ fn check(args: &Args) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             Ok(())
         };
-        for &n in &threads {
+        // A cache that could not be dropped ends the cold passes, not the
+        // check: the warm ones still run.
+        let cold = |n: usize| -> Result<(check::Checked, check::Checked), String> {
             drop_caches()?;
             let path = check::by_path(&walked.list, n);
             drop_caches()?;
-            let parent = check::by_parent(&groups, n);
-            row("cold", n, &path, &parent);
+            Ok((path, check::by_parent(&groups, n)))
+        };
+        for &n in &threads {
+            match cold(n) {
+                Ok((path, parent)) => row("cold", n, &path, &parent),
+                Err(why) => {
+                    println!("cold passes skipped: {why}");
+                    break;
+                }
+            }
         }
     }
     for run in 1..=args.runs {

@@ -22,17 +22,25 @@ It runs in one of three ways, with the same engine and protocol:
 
 `skwird-bench` measures what an index would cost on a real tree. It
 prints counts, sizes and times, never a name or a path, so its output
-can be shared.
+can be shared. One script runs all of it on your home folder (or the
+folder you name) and keeps the output in one file:
 
 ```
-cargo build --release
+tools/measure.sh
+```
+
+It asks for your password once: to drop the caches before each cold
+pass, which slows the machine for a while afterwards, and to try
+fanotify, which only root may use on a whole filesystem. `--no-root`
+skips both. It builds the tool first when cargo is at hand.
+
+The tool's commands, run by hand:
+
+```
 target/release/skwird-bench walk ~            # the crawl, and the index's size
 target/release/skwird-bench check ~ --cold    # proving names current, cold then warm
 sudo target/release/skwird-bench fanotify ~ --seconds 30   # can a system service watch it all?
 ```
-
-`check --cold` asks you to drop the caches before each cold pass, which
-slows the machine for a while afterwards.
 
 ## Building
 

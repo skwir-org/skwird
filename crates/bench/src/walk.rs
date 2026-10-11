@@ -4,7 +4,7 @@
 //! check compares, and their device, which tells a mount) and, with
 //! `--stat`, for every entry, as an index of sizes and times needs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ pub struct Walked {
     pub unreadable: u64,
     /// Folders of another filesystem, not walked into.
     pub mounts: u64,
+    /// Folders reached a second time (through a bind mount), walked once.
+    pub again: u64,
     /// Every folder walked, the root first.
     pub list: Vec<Folder>,
     pub took: Duration,
@@ -78,6 +80,7 @@ struct Share {
     name_bytes: u64,
     unreadable: u64,
     mounts: u64,
+    again: u64,
     /// Names by their hash, with their length.
     names: HashMap<u64, u16>,
     list: Vec<Folder>,
@@ -88,6 +91,9 @@ struct Share {
 struct Queue {
     state: Mutex<(Vec<PathBuf>, usize)>,
     turn: Condvar,
+    /// Every folder queued, by device and inode: a bind mount of a folder
+    /// above, on the same filesystem, would otherwise be walked forever.
+    seen: Mutex<HashSet<(u64, u64)>>,
 }
 
 impl Queue {
@@ -122,6 +128,7 @@ pub fn walk(root: &Path, opts: &Options) -> Result<Walked, String> {
     let queue = Queue {
         state: Mutex::new((vec![root.to_path_buf()], 0)),
         turn: Condvar::new(),
+        seen: Mutex::new(HashSet::from([(own.st_dev, own.st_ino)])),
     };
     let shares: Vec<Share> = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..opts.threads.max(1))
@@ -149,6 +156,7 @@ pub fn walk(root: &Path, opts: &Options) -> Result<Walked, String> {
         walked.name_bytes += share.name_bytes;
         walked.unreadable += share.unreadable;
         walked.mounts += share.mounts;
+        walked.again += share.again;
         walked.list.extend(share.list);
         names.extend(share.names);
     }
@@ -169,14 +177,21 @@ fn work(queue: &Queue, root_dev: u64, opts: &Options) -> Share {
     let mut share = Share::default();
     while let Some(dir) = queue.next() {
         let mut found = Vec::new();
-        read(&dir, root_dev, opts, &mut share, &mut found);
+        read(&dir, root_dev, opts, &queue.seen, &mut share, &mut found);
         queue.done(found);
     }
     share
 }
 
 /// Read one folder: count its entries, and queue its folders.
-fn read(dir: &Path, root_dev: u64, opts: &Options, share: &mut Share, found: &mut Vec<PathBuf>) {
+fn read(
+    dir: &Path,
+    root_dev: u64,
+    opts: &Options,
+    seen: &Mutex<HashSet<(u64, u64)>>,
+    share: &mut Share,
+    found: &mut Vec<PathBuf>,
+) {
     let Ok(listing) = open(dir).and_then(Dir::new) else {
         share.unreadable += 1;
         return;
@@ -219,6 +234,10 @@ fn read(dir: &Path, root_dev: u64, opts: &Options, share: &mut Share, found: &mu
                 };
                 if st.st_dev != root_dev && !opts.cross_mounts {
                     share.mounts += 1;
+                    continue;
+                }
+                if !seen.lock().unwrap().insert((st.st_dev, st.st_ino)) {
+                    share.again += 1;
                     continue;
                 }
                 let path = dir.join(OsStr::from_bytes(bytes));

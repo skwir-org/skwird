@@ -8,13 +8,18 @@
 //! `fanotify_mark(2)` documents `EXDEV` for a path in a subvolume whose id is
 //! not its superblock's. What is asked here is whether this kernel refuses
 //! the mark, and which filesystem ids the events heard come with.
+//!
+//! A probe is a folder where the probe makes, renames and removes a file of
+//! its own (`.skwird-probe-PID-N`) once the mark is set: its events are
+//! told from everything else the filesystem does by their names, so the
+//! answer for each probe is whether its own three changes were heard.
 #![allow(unsafe_code)] // fanotify has no safe binding; each call says why it is sound.
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::said;
@@ -25,13 +30,124 @@ struct Heard {
     /// Events by the filesystem id they came with, in the order first heard.
     per_fs: BTreeMap<usize, u64>,
     ids: Vec<u64>,
+    /// Events read; fanotify merges changes to one name into one event.
+    events: u64,
     made: u64,
     removed: u64,
     moved: u64,
     overflows: u64,
+    /// The probes' own changes heard, by probe.
+    probes: BTreeMap<usize, Seen>,
 }
 
-pub fn probe(path: &Path, seconds: u64) -> Result<(), String> {
+/// One probe's own changes heard, and the filesystem ids they came with.
+#[derive(Default)]
+struct Seen {
+    made: bool,
+    moved: bool,
+    removed: bool,
+    ids: Vec<u64>,
+}
+
+/// A probe's changes made, and where they were made.
+struct Probe {
+    /// Why the changes could not be made, if they could not.
+    failed: Option<String>,
+    /// The folder's filesystem id, as `statvfs` gives it.
+    fsid: Option<u64>,
+    /// How its filesystem stands to the marked path's.
+    relation: String,
+}
+
+impl Probe {
+    fn make(index: usize, dir: &Path, prefix: &str, marked: &Path, own: u64) -> Probe {
+        let fsid = rustix::fs::statvfs(dir).ok().map(|s| s.f_fsid);
+        let (here, there) = (mounted_from(dir), mounted_from(marked));
+        let relation = match (&here, &there, fsid) {
+            (Some(a), Some(b), Some(id)) if a == b && id == own => {
+                "the path's own filesystem id".into()
+            }
+            (Some(a), Some(b), Some(_)) if a == b => {
+                "the same filesystem, another filesystem id (a subvolume of its own)".into()
+            }
+            (Some((kind, _)), _, _) => format!("another filesystem ({kind})"),
+            _ => "a filesystem mountinfo does not say".into(),
+        };
+        let first = dir.join(format!("{prefix}{index}"));
+        let second = dir.join(format!("{prefix}{index}-moved"));
+        let failed = std::fs::write(&first, b"")
+            .and_then(|()| std::fs::rename(&first, &second))
+            .and_then(|()| std::fs::remove_file(&second))
+            .err()
+            .map(|e| e.to_string());
+        if failed.is_some() {
+            let _ = std::fs::remove_file(&first);
+            let _ = std::fs::remove_file(&second);
+        }
+        Probe {
+            failed,
+            fsid,
+            relation,
+        }
+    }
+}
+
+/// The filesystem a folder is on, as mountinfo names it: its type and
+/// where it is mounted from (the device, the same for every subvolume of
+/// one btrfs filesystem).
+fn mounted_from(dir: &Path) -> Option<(String, String)> {
+    let dir = std::fs::canonicalize(dir).ok()?;
+    let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mut best: Option<(usize, String, String)> = None;
+    for line in info.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let (Some(point), Some(kind), Some(source)) = (
+            before.split(' ').nth(4),
+            after.split(' ').next(),
+            after.split(' ').nth(1),
+        ) else {
+            continue;
+        };
+        let point = unescape(point);
+        if !dir.starts_with(&point) {
+            continue;
+        }
+        // The deepest mount holding the folder; of two at one place, the
+        // later, which hides the other.
+        let depth = point.components().count();
+        if best.as_ref().is_none_or(|(d, ..)| depth >= *d) {
+            best = Some((depth, kind.to_owned(), source.to_owned()));
+        }
+    }
+    best.map(|(_, kind, source)| (kind, source))
+}
+
+/// A mountinfo field as the path it stands for: `\040` is a space.
+fn unescape(field: &str) -> PathBuf {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(|b| (b'0'..=b'7').contains(b)));
+        match (bytes[i], octal) {
+            (b'\\', Some(d)) => {
+                out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
+                i += 4;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
+pub fn probe(path: &Path, seconds: u64, probes: &[PathBuf]) -> Result<(), String> {
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     println!("kernel: {}", release.trim());
     let fs = rustix::fs::statfs(path).map_err(|e| format!("cannot statfs the path: {e}"))?;
@@ -39,6 +155,44 @@ pub fn probe(path: &Path, seconds: u64) -> Result<(), String> {
         .map_err(|e| format!("cannot statvfs the path: {e}"))?
         .f_fsid;
     println!("filesystem: {}", crate::walk::fs_name(fs.f_type as u64));
+    let Some(fd) = mark(path)? else {
+        return Ok(());
+    };
+    println!("mark: accepted, the whole filesystem holding the path is watched");
+    let prefix = format!(".skwird-probe-{}-", std::process::id());
+    let made: Vec<Probe> = probes
+        .iter()
+        .enumerate()
+        .map(|(i, dir)| Probe::make(i, dir, &prefix, path, own))
+        .collect();
+    let seconds = if probes.is_empty() {
+        seconds
+    } else {
+        seconds.max(1)
+    };
+    if seconds == 0 {
+        return Ok(());
+    }
+    if probes.is_empty() {
+        println!(
+            "listening {seconds} s: make, rename and remove a file in each subvolume or \
+             filesystem you care about, the path's own included"
+        );
+    } else {
+        println!(
+            "listening {seconds} s, a file made, renamed and removed in each of {} probes",
+            probes.len()
+        );
+    }
+    let heard = listen(&fd, Duration::from_secs(seconds), &prefix)?;
+    report(&heard, &made, own);
+    Ok(())
+}
+
+/// A fanotify group told to report every name made, removed or moved on
+/// the whole filesystem holding `path`, or `None` once said why it was
+/// refused.
+fn mark(path: &Path) -> Result<Option<OwnedFd>, String> {
     // SAFETY: fanotify_init takes two words of flags and returns a new
     // descriptor or -1; no memory is shared with the kernel.
     let raw = unsafe {
@@ -79,41 +233,37 @@ pub fn probe(path: &Path, seconds: u64) -> Result<(), String> {
             c_path.as_ptr(),
         )
     };
-    if marked < 0 {
-        let e = std::io::Error::last_os_error();
-        // Since Linux 5.13 anyone may make a group that reports names, but
-        // only a holder of CAP_SYS_ADMIN may mark a whole filesystem.
-        if e.raw_os_error() == Some(libc::EPERM) {
-            return Err(
-                "a mark of a whole filesystem needs root (CAP_SYS_ADMIN): run this with sudo"
-                    .into(),
-            );
-        }
-        println!(
-            "mark: refused, {}",
-            match e.raw_os_error() {
-                Some(libc::EXDEV) => format!(
-                    "the path is in a subvolume whose filesystem id is not its superblock's ({e}): \
-                     mark the filesystem's top, or each subvolume needs another way"
-                ),
-                Some(libc::ENODEV | libc::EOPNOTSUPP) =>
-                    format!("this filesystem cannot report file handles ({e})"),
-                _ => format!("{e}"),
-            }
+    if marked == 0 {
+        return Ok(Some(fd));
+    }
+    let e = std::io::Error::last_os_error();
+    // Since Linux 5.13 anyone may make a group that reports names, but
+    // only a holder of CAP_SYS_ADMIN may mark a whole filesystem.
+    if e.raw_os_error() == Some(libc::EPERM) {
+        return Err(
+            "a mark of a whole filesystem needs root (CAP_SYS_ADMIN): run this with sudo".into(),
         );
-        return Ok(());
-    }
-    println!("mark: accepted, the whole filesystem holding the path is watched");
-    if seconds == 0 {
-        return Ok(());
     }
     println!(
-        "listening {seconds} s: make, rename and remove a file in each subvolume or \
-         filesystem you care about, the path's own included"
+        "mark: refused, {}",
+        match e.raw_os_error() {
+            Some(libc::EXDEV) => format!(
+                "the path is in a subvolume whose filesystem id is not its superblock's ({e}): \
+                 mark the filesystem's top, or each subvolume needs another way"
+            ),
+            Some(libc::ENODEV | libc::EOPNOTSUPP) =>
+                format!("this filesystem cannot report file handles ({e})"),
+            _ => format!("{e}"),
+        }
     );
-    let heard = listen(&fd, Duration::from_secs(seconds))?;
+    Ok(None)
+}
+
+/// What was heard, then whether each probe's own changes were.
+fn report(heard: &Heard, made: &[Probe], own: u64) {
     println!(
-        "heard: {} made, {} removed, {} moved, {} overflows",
+        "heard: {} events, holding {} made, {} removed, {} moved; {} overflows",
+        said::count(heard.events),
         said::count(heard.made),
         said::count(heard.removed),
         said::count(heard.moved),
@@ -130,7 +280,27 @@ pub fn probe(path: &Path, seconds: u64) -> Result<(), String> {
     if !heard.ids.contains(&own) {
         println!("  nothing heard with the path's own filesystem id");
     }
-    Ok(())
+    for (i, probe) in made.iter().enumerate() {
+        let said = match (&probe.failed, heard.probes.get(&i)) {
+            (Some(why), _) => format!("could not make its file ({why})"),
+            (None, None) => "none of its 3 changes heard".into(),
+            (None, Some(seen)) => {
+                let count = [seen.made, seen.moved, seen.removed]
+                    .iter()
+                    .filter(|&&b| b)
+                    .count();
+                let ids = if seen.ids.iter().all(|id| Some(*id) == probe.fsid) {
+                    "with its own filesystem id"
+                } else if seen.ids.iter().all(|id| *id == own) {
+                    "with the path's filesystem id"
+                } else {
+                    "with another filesystem id"
+                };
+                format!("{count} of its 3 changes heard, {ids}")
+            }
+        };
+        println!("  probe {}: {}: {said}", i + 1, probe.relation);
+    }
 }
 
 /// A filesystem id's two words as `statvfs` gives them: the first low.
@@ -138,10 +308,15 @@ fn fsid([low, high]: [i32; 2]) -> u64 {
     u64::from(low as u32) | (u64::from(high as u32) << 32)
 }
 
-fn listen(fd: &OwnedFd, how_long: Duration) -> Result<Heard, String> {
+/// The probe a name is one of: `PREFIX7` and `PREFIX7-moved` are probe 7's.
+fn probe_of(name: &[u8], prefix: &str) -> Option<usize> {
+    let rest = name.strip_prefix(prefix.as_bytes())?;
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()
+}
+
+fn listen(fd: &OwnedFd, how_long: Duration, prefix: &str) -> Result<Heard, String> {
     let meta_len = size_of::<libc::fanotify_event_metadata>();
-    let header_len = size_of::<libc::fanotify_event_info_header>();
-    let fid_len = size_of::<libc::fanotify_event_info_fid>();
     let mut heard = Heard::default();
     let mut buf = vec![0u8; 64 * 1024];
     let deadline = Instant::now() + how_long;
@@ -157,64 +332,21 @@ fn listen(fd: &OwnedFd, how_long: Duration) -> Result<Heard, String> {
             }
             return Err(format!("reading events: {e}"));
         }
-        let n = n as usize;
+        let read = &buf[..n as usize];
         let mut at = 0;
-        while at + meta_len <= n {
+        while at + meta_len <= read.len() {
             // SAFETY: `meta_len` bytes from `at` are within what read wrote;
             // read_unaligned copies them whatever their alignment.
             let meta: libc::fanotify_event_metadata =
-                unsafe { std::ptr::read_unaligned(buf.as_ptr().add(at).cast()) };
+                unsafe { std::ptr::read_unaligned(read.as_ptr().add(at).cast()) };
             if meta.vers != libc::FANOTIFY_METADATA_VERSION {
                 return Err(format!("fanotify metadata of version {}", meta.vers));
             }
             let end = at + meta.event_len as usize;
-            if (meta.event_len as usize) < meta_len || end > n {
+            if (meta.event_len as usize) < meta_len || end > read.len() {
                 break;
             }
-            if meta.mask & libc::FAN_Q_OVERFLOW != 0 {
-                heard.overflows += 1;
-            }
-            if meta.mask & libc::FAN_CREATE != 0 {
-                heard.made += 1;
-            }
-            if meta.mask & libc::FAN_DELETE != 0 {
-                heard.removed += 1;
-            }
-            if meta.mask & (libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO) != 0 {
-                heard.moved += 1;
-            }
-            let mut info = at + meta.metadata_len as usize;
-            while info + header_len <= end {
-                // SAFETY: within the event, as above.
-                let header: libc::fanotify_event_info_header =
-                    unsafe { std::ptr::read_unaligned(buf.as_ptr().add(info).cast()) };
-                if header.len == 0 {
-                    break;
-                }
-                let names_a_file = matches!(
-                    header.info_type,
-                    libc::FAN_EVENT_INFO_TYPE_FID
-                        | libc::FAN_EVENT_INFO_TYPE_DFID_NAME
-                        | libc::FAN_EVENT_INFO_TYPE_DFID
-                );
-                if names_a_file && info + fid_len <= end {
-                    // SAFETY: within the event, as above.
-                    let fid: libc::fanotify_event_info_fid =
-                        unsafe { std::ptr::read_unaligned(buf.as_ptr().add(info).cast()) };
-                    let id = fsid(fid.fsid.val);
-                    let i = heard
-                        .ids
-                        .iter()
-                        .position(|known| *known == id)
-                        .unwrap_or_else(|| {
-                            heard.ids.push(id);
-                            heard.ids.len() - 1
-                        });
-                    *heard.per_fs.entry(i).or_default() += 1;
-                    break;
-                }
-                info += header.len as usize;
-            }
+            event(&read[at..end], &meta, prefix, &mut heard);
             if meta.fd >= 0 {
                 // SAFETY: an event's descriptor is the reader's to close.
                 drop(unsafe { OwnedFd::from_raw_fd(meta.fd) });
@@ -223,4 +355,109 @@ fn listen(fd: &OwnedFd, how_long: Duration) -> Result<Heard, String> {
         }
     }
     Ok(heard)
+}
+
+/// One event, `bytes` from its metadata to its end: counted, its
+/// filesystem id kept, and a probe's own change noted.
+fn event(bytes: &[u8], meta: &libc::fanotify_event_metadata, prefix: &str, heard: &mut Heard) {
+    let header_len = size_of::<libc::fanotify_event_info_header>();
+    let fid_len = size_of::<libc::fanotify_event_info_fid>();
+    let moved = meta.mask & (libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO) != 0;
+    heard.events += 1;
+    heard.overflows += u64::from(meta.mask & libc::FAN_Q_OVERFLOW != 0);
+    heard.made += u64::from(meta.mask & libc::FAN_CREATE != 0);
+    heard.removed += u64::from(meta.mask & libc::FAN_DELETE != 0);
+    heard.moved += u64::from(moved);
+    let mut info = meta.metadata_len as usize;
+    while info + header_len <= bytes.len() {
+        // SAFETY: `header_len` bytes from `info` are within the event.
+        let header: libc::fanotify_event_info_header =
+            unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(info).cast()) };
+        let record_end = (info + header.len as usize).min(bytes.len());
+        if header.len == 0 {
+            break;
+        }
+        let names_a_file = matches!(
+            header.info_type,
+            libc::FAN_EVENT_INFO_TYPE_FID
+                | libc::FAN_EVENT_INFO_TYPE_DFID_NAME
+                | libc::FAN_EVENT_INFO_TYPE_DFID
+        );
+        if !names_a_file || info + fid_len > record_end {
+            info += header.len as usize;
+            continue;
+        }
+        // SAFETY: `fid_len` bytes from `info` are within the record.
+        let fid: libc::fanotify_event_info_fid =
+            unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(info).cast()) };
+        let id = fsid(fid.fsid.val);
+        let i = heard
+            .ids
+            .iter()
+            .position(|known| *known == id)
+            .unwrap_or_else(|| {
+                heard.ids.push(id);
+                heard.ids.len() - 1
+            });
+        *heard.per_fs.entry(i).or_default() += 1;
+        let name = (header.info_type == libc::FAN_EVENT_INFO_TYPE_DFID_NAME)
+            .then(|| name_after_handle(&bytes[info + fid_len..record_end]))
+            .flatten();
+        if let Some(p) = name.and_then(|name| probe_of(name, prefix)) {
+            let seen = heard.probes.entry(p).or_default();
+            seen.made |= meta.mask & libc::FAN_CREATE != 0;
+            seen.moved |= moved;
+            seen.removed |= meta.mask & libc::FAN_DELETE != 0;
+            if !seen.ids.contains(&id) {
+                seen.ids.push(id);
+            }
+        }
+        break;
+    }
+}
+
+/// The name a record holds after its folder's handle: the handle's length
+/// (4 bytes) and type (4), its bytes, then the name ending with a NUL.
+fn name_after_handle(record: &[u8]) -> Option<&[u8]> {
+    let length = u32::from_ne_bytes(record.get(..4)?.try_into().ok()?) as usize;
+    let name = record.get(8 + length..)?;
+    Some(&name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mountinfo's escapes read back as the path they stand for.
+    #[test]
+    fn a_mount_point_reads_as_its_path() {
+        assert_eq!(
+            unescape("/run/media/a\\040b"),
+            PathBuf::from("/run/media/a b")
+        );
+        assert_eq!(unescape("/plain"), PathBuf::from("/plain"));
+        assert_eq!(unescape("/odd\\x"), PathBuf::from("/odd\\x"));
+    }
+
+    /// The name a record holds is read after its folder's handle.
+    #[test]
+    fn a_name_is_read_after_its_folders_handle() {
+        let mut record = Vec::new();
+        record.extend_from_slice(&3u32.to_ne_bytes());
+        record.extend_from_slice(&1i32.to_ne_bytes());
+        record.extend_from_slice(&[9, 9, 9]);
+        record.extend_from_slice(b"a b.txt\0\0\0");
+        assert_eq!(name_after_handle(&record), Some(&b"a b.txt"[..]));
+        assert_eq!(name_after_handle(&record[..6]), None, "cut short");
+    }
+
+    /// A probe's names are told from any other.
+    #[test]
+    fn a_probe_is_known_by_its_names() {
+        let prefix = ".skwird-probe-42-";
+        assert_eq!(probe_of(b".skwird-probe-42-3", prefix), Some(3));
+        assert_eq!(probe_of(b".skwird-probe-42-12-moved", prefix), Some(12));
+        assert_eq!(probe_of(b".skwird-probe-41-3", prefix), None);
+        assert_eq!(probe_of(b"notes.txt", prefix), None);
+    }
 }
