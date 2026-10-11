@@ -116,5 +116,5 @@ and idle CPU are measured and become budgets.
 
 - Content search, if decided (DESIGN, open question 4).
 - Packages: deb, rpm, AUR, Nix, Homebrew, winget.
-- A development shell (a Nix flake) and CI once there are crates to
-  check on three systems.
+- CI once there are crates to check on three systems. The development
+  shell (`flake.nix`) already carries the Windows and macOS targets.

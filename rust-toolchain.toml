@@ -1,0 +1,7 @@
+# The Rust every check runs: the flake's dev shell reads this channel and
+# rustup follows it, so a new release's lints arrive only with the commit
+# that moves it. The oldest Rust that builds skwird is `rust-version` in
+# Cargo.toml.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

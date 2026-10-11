@@ -47,8 +47,9 @@ sudo target/release/skwird-bench fanotify ~ --seconds 30   # can a system servic
 
 ## Building
 
-Stable Rust 1.85 or later. `cargo test`, and `cargo clippy --all-targets
--- -D warnings` before a change is done.
+Stable Rust 1.85 or later. `nix develop`, or direnv, gives the Rust that
+`rust-toolchain.toml` pins and shellcheck. `cargo test`, and `cargo
+clippy --all-targets -- -D warnings` before a change is done.
 
 ## Credits
 
