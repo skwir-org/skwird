@@ -1,6 +1,7 @@
 # skwird's design
 
-Status: design, 2026-10-10, revised on 2026-10-11 by phase 0's numbers.
+Status: design, 2026-10-10, revised on 2026-10-11 by phase 0's numbers
+and on 2026-10-20 by what fsearch and its Linux port changed since.
 Only `skwird-bench` (phase 0, `docs/PLAN.md`) is built. Each decision
 says why, so that it can be revisited knowingly.
 
@@ -19,13 +20,16 @@ It borrows from two MIT-licensed projects, with credit where code is
 taken:
 
 - [fsearch](https://github.com/noahdunnagan/fsearch) (macOS):
-  - the index layout and name interning;
+  - the index layout (8);
   - the overlay of changes over a base;
-  - FSEvents replay.
+  - FSEvents replay, of events the system dropped as well.
 - [fsearch-crossplatform](https://github.com/threehymns/fsearch-crossplatform):
   - a Linux walker with `getdents64`;
-  - inotify watching per folder;
-  - catching up by folder times after a restart.
+  - inotify watching per folder.
+
+The bugs both fixed are lessons too, recorded below where they apply.
+Both were last read on 2026-10-20, at fsearch 0.2.1 (`88e63fd`) and
+fsearch-crossplatform `8857eec`.
 
 It does none of these:
 
@@ -55,8 +59,10 @@ How clients find an engine, in this order:
 4. otherwise it does without (a client must work without skwird).
 
 There is one engine per scope: one for the system, one per user, held
-by a lock. A user's engine that finds the system service covering its
-roots live (2) leaves them to it.
+by a lock. A second engine blocks on the lock and takes over when the
+first exits, even during its first crawl; it does not poll the lock, as
+fsearch's followers do every 10 seconds (10). A user's engine that
+finds the system service covering its roots live (2) leaves them to it.
 
 The engine's crates can be embedded by other programs. Clients are
 supported through the protocol only, for four reasons:
@@ -65,9 +71,10 @@ supported through the protocol only, for four reasons:
   and a socket mode that must behave alike.
 - **One set of watches per scope.** In fsearch-crossplatform, an
   application linking the engine follows the daemon's index but
-  installs its own watches: one inotify watch per folder per process.
-  Its README counts 465k watches for one developer's home, against a
-  limit of 524k, so two processes do not fit.
+  installs its own watches: one inotify watch per folder per process,
+  installed again each time the daemon saves its index. Its README
+  counts 465k watches for one developer's home, against a limit of
+  524k, so two processes do not fit.
 - **Clients stay light.** The index's memory, its crawls and its calls
   into the system (fanotify, FSEvents, the change journal) stay out of
   their processes, and a crawl stuck on a sleeping disk stalls no
@@ -89,8 +96,9 @@ says one of:
 - **Checked at T**: every folder was compared with the index at T.
 - **As of T**: a snapshot, such as an index just loaded, or plocate's
   database.
-- **Not covered**, and why: excluded, permission denied, a network
-  share, a watch limit reached, a mount below the root.
+- **Not covered**, and why: excluded, permission denied, a read that
+  failed, a network share, a watch limit reached, a mount below the
+  root.
 
 The kinds of fact are:
 - **names** (and kinds: file, folder, link, other);
@@ -101,6 +109,15 @@ Coverage is never overstated. An overflow, a failed watch, a mount
 appearing or a folder denied lowers it at once, for the subtree
 concerned, until that subtree is read again.
 
+- **A failed read is not an empty folder.** A folder that cannot be
+  read, or whose listing fails part-way, is not covered, and what the
+  index held under it stays, as of when it was read. fsearch and its
+  port both did otherwise: a folder refused with `EACCES` was indexed as
+  empty, and a listing cut short by an error was taken as complete.
+- **A dropped event ends "live"** until the replay or the reread is
+  done. Where the system keeps a history (FSEvents, the change journal),
+  the position kept to resume from is never past an event not yet
+  applied.
 - **The barrier** makes "live" mean up to now. The client asks for a
   sync. skwird creates a cookie file in a folder of its own that shares
   the notification queue, and answers once it hears it. Where the
@@ -110,24 +127,48 @@ concerned, until that subtree is read again.
 - **The check** proves names current without any watch. A folder's
   change time moves whenever its entries change. So comparing each
   folder's change time with the one stored, for equality, finds every
-  folder to read again. Two rules keep this sound. The time stored is
-  read before the folder's entries, so a change during the read leaves
-  a time that differs. And change times can be coarse: a second change
-  within one tick of the clock can leave the time as it was, so a
-  folder read within a tick of its last change is read again at the
-  next check, as git does with its "racily clean" entries. It is not a
-  comparison against a timestamp with a margin, as fsearch-crossplatform
-  does with modification times: `tar` and `rsync -a` set those back
-  after filling a folder, and cannot set a change time. This holds only
-  where change times tell: local filesystems, not network shares or
-  FUSE. It proves names, not attributes: a file's size changes no
-  folder's time.
+  folder to read again. Three rules keep this sound:
+  - The time stored is read before the folder's entries, so a change
+    during the read leaves a time that differs.
+  - Change times can be coarse: a second change within one tick of the
+    clock can leave the time as it was, so a folder read within a tick
+    of its last change is read again at the next check, as git does
+    with its "racily clean" entries.
+  - The folder's device and inode are compared too. The check goes by
+    path, which phase 0 found fastest, and a path follows a link in any
+    of its folders (`O_NOFOLLOW` guards only the last name). A folder
+    replaced, or reached through a link put in place of a folder above
+    it, is then another folder, and is read again. A folder is read
+    through its parent's handle, or by a path that may hold no link
+    (`openat2` with `RESOLVE_NO_SYMLINKS` on Linux, `O_NOFOLLOW_ANY` on
+    macOS), so another folder's names are never indexed under its path.
+    A path longer than the system allows is checked through its
+    parent's handle as well.
+
+  It is not a comparison against a timestamp with a margin, as fsearch
+  does with modification times (every folder changed since 120 seconds
+  before its last sync), and its port with it: `tar` and `rsync -a` set
+  those back after filling a folder, and cannot set a change time. This
+  holds only where change times tell: local filesystems, not network
+  shares or FUSE. It proves names, not attributes: a file's size changes
+  no folder's time.
+- **Watch, then read.** A folder is watched before it is read or
+  checked, so a change between the two is heard. fsearch-crossplatform
+  catches up first and watches after, and misses what changes in
+  between.
 - **Answers are exact for covered facts under covered roots.** Clients
   still check what they show (a stat), so a stale result costs one
   check. The guarantee is about results missing.
 - **The index reaches what a walk reaches.** Hidden names are indexed
   (clients filter them), links are never followed, and each mount below
-  a root is reported, covered or not.
+  a root is reported, covered or not. A mount is told by its mount id
+  (`statx`, Linux 5.8), not by its device: each btrfs subvolume has a
+  device of its own and is no mount, and a bind mount keeps its
+  filesystem's device. fsearch-crossplatform tells mounts by device, so
+  it skips subvolumes and walks through bind mounts. The crawl, the
+  check and a reread share one test, which holds at the mount's own
+  folder as well: fsearch once crawled a whole volume when a change was
+  reported on its mount point.
 
 ### 3. Privileges are detected, and become coverage
 
@@ -137,7 +178,7 @@ skwird uses what it was given and reports the coverage that results.
 
 | | As a user | With privileges |
 |---|---|---|
-| Linux | `getdents64` walk. inotify needs one watch per folder, about 1 KB of kernel memory each, within `max_user_watches`. No history across restarts: the check (2) catches up | fanotify on whole filesystems (`FAN_MARK_FILESYSTEM`, `FAN_REPORT_DFID_NAME`: Linux 5.9 or later, `CAP_SYS_ADMIN`). No watch per folder, every user's files. Still no history across a reboot. Refused through a btrfs subvolume (open question 6) |
+| Linux | `getdents64` walk. inotify needs one watch per folder, about 1 KB of kernel memory each, within `max_user_watches`. No history across restarts: the check (2) catches up | fanotify on whole filesystems (`FAN_MARK_FILESYSTEM`, `FAN_REPORT_DFID_NAME`: Linux 5.9 or later, `CAP_SYS_ADMIN`). No watch per folder, every user's files. Still no history across a reboot. On btrfs, mark through a detached read-only mount of the top-level subvolume (below) |
 | macOS | `getattrlistbulk` walk. FSEvents keeps a history on disk, so a restart replays what changed | Root adds little; Full Disk Access decides what can be read |
 | Windows | `FindFirstFileEx` walk. `ReadDirectoryChangesW` watches a whole tree with one handle. No history | The volume's file table to crawl and its change journal (USN) to catch up after a restart, as Everything does. Needs administrator rights and NTFS |
 
@@ -148,6 +189,23 @@ folders. A watch per folder would take more than the user's whole limit
 of 524,288 watches. The check proved every folder current in 1.9 s from
 a cold cache and in 52 ms warm, where a walk took 10 to 13 s cold and 1
 to 2.7 s warm.
+
+On btrfs, a mark of the whole filesystem through a subvolume is refused
+(`EXDEV`): a subvolume's filesystem id is not its superblock's. The
+service then marks through the top-level subvolume (id 5), mounted
+read-only and detached, attached to no folder. Phase 0 tried it on
+Linux 6.18.55. The mark was accepted. Three probes, each in a subvolume
+with a filesystem id of its own, made, renamed and removed a file, and
+all nine changes were heard. The events came with the mark's
+filesystem id, not the subvolume's, so an event's filesystem id cannot
+tell its subvolume: the service keeps each event's folder handle and
+opens it through the detached mount. Every handle opened to its own
+folder, by device and inode.
+
+That shows the way works, on one kernel and one filesystem; it does not
+prove live coverage. A mount, a mark or a handle that fails lowers
+coverage, and phase 3 tests an overflow, a mount or subvolume appearing,
+and a handle that does not open.
 
 ### 4. A system service answers only what the asker could list
 
@@ -191,6 +249,13 @@ the index. skwird honours what marks them itself:
 A client cannot widen what is indexed. How a system service learns a
 user's exclusions is open (question 3).
 
+An exclusion, like a root, is resolved once to the folder it names, and
+compared as that folder (its identity, or its range in the index),
+never as the spelling of a path. In fsearch, an exclusion written with a
+trailing slash excluded nothing, an empty one excluded everything, and
+`/h/m` was taken to hold `/h/me`. In skwird the first would index a
+private folder.
+
 ### 6. Answers carry identity
 
 Each entry comes with its device and inode, and its folder's. That lets
@@ -199,7 +264,11 @@ a client:
 - follow a rename;
 - keep what belongs to the file by the file (skwir's ADR-049).
 
-The cost is 8 bytes per entry; the device is one per filesystem's index.
+The cost is 8 bytes per entry. The device is kept once per subvolume,
+for its range of the index, not once per filesystem: each btrfs
+subvolume has a device of its own and numbers its inodes from the same
+start (every subvolume's top folder is inode 256), so a filesystem's
+device and an inode do not name one file.
 
 ### 7. The engine knows names, not types; queries are data
 
@@ -227,31 +296,51 @@ The cost is 8 bytes per entry; the device is one per filesystem's index.
 
 fsearch's layout, with what skwird needs on top.
 
-From fsearch:
-- one file per filesystem, mapped into memory;
+From fsearch (0.2):
+- a file mapped into memory and read in place;
 - entries in folder blocks, depth first, so a folder's whole subtree is
   one range;
-- each distinct name stored once with a mask of its letters, so a query
-  scores names, not entries;
+- each distinct name stored once, so a query scores names, not entries.
+  Which names can match is answered 64 names at a time, from bitmaps of
+  what each name holds (classes of letters, the starts of words), before
+  any name is read;
+- each array packed at the bits its largest value needs, and sizes and
+  times in runs of 64 from a base;
+- zones: for each 1,024 entries, the largest size, the range of times
+  and the kinds present, so a query on size or time skips most of the
+  index;
 - a base, and an overlay of changes with tombstones.
 
 skwird adds:
+- one file per filesystem, where fsearch keeps one for all and does not
+  cross a mount;
 - each entry's inode;
 - each folder's change time, owner, group, mode and ACL flag;
 - each filesystem's identity (its UUID where the system gives one), so
   a removable drive's index survives being unplugged;
+- the overlay keyed by folder and name, not by path, so removing a
+  folder removes everything under it. fsearch's tables keyed by path
+  kept a removed folder's new files searchable, until 0.2.1;
 - changes written as segments merged in the background, never the whole
-  index rewritten. fsearch-crossplatform rewrites everything when its
-  overlay grows: about 280 MB for 7.7M entries.
+  index rewritten. fsearch rewrites everything after 50,000 changes or
+  12 hours, about 280 MB by its own estimate, and its port does the
+  same.
 
-The index is a cache: a wrong version or a damaged file is rebuilt.
+The index is a cache: a damaged file, or one of another version or
+layout, is rebuilt. Its header records every array's width, so two
+layouts never pass for one: the port keeps kinds in 4 bits on macOS and
+5 on Linux under one version, on the promise that the two files never
+meet. A save that fails keeps the index in memory, and its "as
+of" stays at the last save that succeeded: fsearch reloaded the older
+file and lost every change since, until 0.2.1.
 
-`skwird-bench walk` estimates its size: 33 bytes per entry, 16 per
-distinct name plus its bytes, and 40 per folder. For the home phase 0
-measured, 341 MB for 5.8 million entries. Its distinct names were 44% of
-its entries, so a query scores fewer than half as many names as entries,
-and storing each name once cost no more than storing every entry's
-(124 MB either way).
+`skwird-bench walk` estimates its size, every field at its full width:
+33 bytes per entry, 16 per distinct name plus its bytes, and 40 per
+folder. For the home phase 0 measured, 341 MB for 5.8 million entries.
+Packing as fsearch does should shrink it; phase 1 measures it. Its
+distinct names were 44% of its entries, so a query scores fewer than
+half as many names as entries, and storing each name once cost no more
+than storing every entry's (124 MB either way).
 
 ### 9. Every system
 
@@ -273,7 +362,9 @@ measures them.
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`
   for the system service, `$XDG_RUNTIME_DIR/skwird/socket` for a user's
   engine. A named pipe on Windows: `\\.\pipe\skwird`, and one per user
-  named by its SID.
+  named by its SID. A socket path longer than the system allows (108
+  bytes on Linux, 104 on macOS) is an error that says so, not the crash
+  it was in fsearch.
 - **Framing.** JSON lines at first, for readability; each message has
   an id.
 - **Messages:**
@@ -304,17 +395,15 @@ measures them.
    each client. skwir measured one: 11% of the text, 5 to 175 times
    faster than scanning.
 5. **Names:** their exact meaning (Unicode case folding and
-   normalization), and fuzzy scoring.
-6. **fanotify on btrfs subvolumes:** Linux 6.18 refuses a mark of the
-   whole filesystem through a subvolume (`EXDEV`: the subvolume's
-   filesystem id is not its superblock's), and the home phase 0 measured
-   is one. The way to try: mark the filesystem through its top-level
-   subvolume, mounted read-only and detached (`fsmount`, attached to no
-   folder). fanotify accepts a mark through a detached mount and hears
-   changes made there (tried on a tmpfs, in a user namespace). Untried
-   on btrfs: whether events from every subvolume are then heard, with
-   which filesystem id, and whether their handles open. If not, a system
-   service on btrfs needs another way: marks per folder, or the check.
+   normalization), and fuzzy scoring. fsearch keeps names as the disk
+   has them and searches each query in both its composed and decomposed
+   forms (NFC and NFD), a way to meet normalization without changing
+   names.
+6. **fanotify on btrfs subvolumes:** answered by phase 0, as far as a
+   trial goes (decision 3). A mark through the top-level subvolume,
+   mounted read-only and detached, heard the changes made in three
+   subvolumes on Linux 6.18.55, and their folder handles opened. Phase
+   3's tests decide whether it holds live.
 7. **Windows:** whether NTFS folder times can serve as the check; ReFS;
    how fast the file table reads.
 8. **Removable and network volumes:** indexed unasked, or asked first.

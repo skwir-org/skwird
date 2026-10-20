@@ -49,6 +49,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - **Blocking.** A stat can block on a sleeping disk or a dead network
   share: crawls and checks run on threads of their own and can be
   cancelled; nothing that answers a client waits on one.
+- **Locks and pools.** Never hand work to a thread pool while holding a
+  lock or initialising a once-cell. A pool thread that waits on it can
+  pick up another task that waits on the same, until every thread is
+  parked: fsearch 0.2 deadlocked so.
 - **Fix structurally.** When a symptom returns or a fix needs
   hand-kept constants, find the invariant being broken, make it
   impossible, and write the rule here.

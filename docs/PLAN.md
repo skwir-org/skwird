@@ -56,17 +56,34 @@ Measured on 2026-10-11, on a developer's home, by `tools/measure.sh`
   with `EXDEV`. The home is a btrfs subvolume, whose filesystem id is
   not its superblock's. The probes did not run.
 
+Tried again on 2026-10-11, as root (`skwird-bench` at 2fd2c66, Linux
+6.18.55, the same machine):
+- **fanotify:** the mark through the home was refused with `EXDEV`, as
+  before. The mark through the top-level subvolume, mounted read-only
+  and detached, was accepted.
+- **Probes:** three, each in a subvolume with a filesystem id other
+  than the mark's. All nine of their changes (a file made, renamed and
+  removed in each) were heard, with the mark's filesystem id. Each
+  event's folder handle opened, through the detached mount, to its own
+  folder, by device and inode.
+- **Queue:** 17 events in two seconds, no overflow. The count includes
+  what the machine did meanwhile. It measures no sustained load, and no
+  recovery from an overflow.
+
+On 2026-10-20 the walk learned to tell a mount by its mount id, not its
+device (DESIGN 2). The home measured had no folder of another device
+below it, so its numbers stand.
+
 **Done when:** a real home (and a cold cache) is measured, fanotify is
 tried as root, and the design is revised where the numbers say so.
-Done on 2026-10-11, but for one question: fanotify was refused on a
-btrfs subvolume, and whether a mark through the filesystem's top-level
-subvolume hears every subvolume is not measured (DESIGN, open question
-6).
+Done on 2026-10-11. fanotify's way through btrfs is tried, not proven
+live: that is phase 3's (DESIGN 3).
 
 ## Phase 1: Linux, a user's engine, started by its first client
 
 - **Crates:**
-  - `skwird-index`: the format, and queries on it;
+  - `skwird-index`: the format, and queries on it, with fsearch 0.2's
+    packed arrays and zones (DESIGN 8);
   - `skwird-crawl`: the Linux walker;
   - `skwird-proto`: the messages, and a client;
   - `skwird`: the program, which serves and is the command line.
@@ -77,25 +94,54 @@ subvolume hears every subvolume is not measured (DESIGN, open question
   - a change made while the engine was down;
   - a folder whose times `tar` set back;
   - a folder changed again within a tick of being read;
-  - a mount below the root;
-  - a folder denied;
-  - a name added during the crawl.
+  - a mount below the root, a bind mount of the same filesystem (made
+    in a user namespace), and a reread that starts at a mount;
+  - a btrfs subvolume below the root: walked, with a device of its own;
+  - a folder denied, then made readable: not covered, then read at the
+    next check;
+  - a listing that fails part-way: not covered, never empty;
+  - a name added during the crawl;
+  - a folder, or a folder above it, replaced by a link: another
+    folder's names never appear under its path;
+  - a folder that gains entries, then is removed or replaced by a file:
+    nothing under it remains;
+  - a tree deeper than 256 folders, its paths longer than the system
+    allows;
+  - an exclusion written with a trailing slash, a doubled slash, or
+    through a link: it excludes its folder, and only it.
+- **Tests of the engine:**
+  - after every batch of changes, each entry's parent is a folder in
+    the index;
+  - queries made at once answer as queries made one by one;
+  - the first engine exits during its first crawl, and the second takes
+    over;
+  - a save that fails keeps the index, and its "as of";
+  - a socket path too long is an error that says so.
 
 **Done when:** a name query of a home tree gives what a walk would,
-after a restart as well; and the memory, the time to the first answer
-and idle CPU are measured and become budgets.
+after a restart as well; and the memory, the time to the first answer,
+idle CPU and the index's size (against `skwird-bench`'s estimate) are
+measured, and the first three become budgets.
 
 ## Phase 2: Linux, a user service
 
 - A systemd user unit.
-- inotify for a bounded set of folders.
+- inotify for a bounded set of folders, read through rustix. A wrapper
+  can pass an overflow on as an ordinary event: `notify` does, and
+  fsearch-crossplatform misses it.
+- Each folder watched before it is read or checked (DESIGN 2).
 - The sync barrier (cookies).
 - The `changes` journal.
+- Tests, without root: an overflow (a queue left unread while more
+  files are made than `max_queued_events`) lowers coverage at once; a
+  change made while the watches are being installed is not missed.
 
 ## Phase 3: Linux, the system service
 
-- fanotify on whole filesystems. On btrfs it is refused through a
-  subvolume (phase 0), so it waits on DESIGN's open question 6.
+- fanotify on whole filesystems. On btrfs, use a detached read-only
+  top-level mount when marking through a subvolume is refused (DESIGN 3).
+- Coverage tests for queue overflow, mount and subvolume changes, and
+  handle resolution failures; phase 0 establishes feasibility only.
 - Answers filtered per asker (DESIGN 4).
 - The sandboxed unit.
 - Tests that need root run in a virtual machine, never on the
@@ -109,7 +155,16 @@ and idle CPU are measured and become budgets.
 
 ## Phase 5: macOS
 
-- `getattrlistbulk` and FSEvents, from fsearch.
+- `getattrlistbulk` and FSEvents, from fsearch:
+  - events the system dropped, replayed from its log;
+  - the position kept never past a gap;
+  - the callback at user-initiated priority, which cut fsearch's drops
+    under load;
+  - the stream torn down in fsearch's order (stop, invalidate while
+    still scheduled, release).
+- Folders macOS asks consent for (Desktop, Documents, Music and others):
+  not covered, for want of consent, and tried again at each start, as
+  fsearch does, since no event follows a consent given.
 - A LaunchAgent, and a LaunchDaemon for the system scope.
 
 ## Later

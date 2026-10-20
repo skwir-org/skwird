@@ -220,13 +220,15 @@ fn print_walk(walked: &walk::Walked, args: &Args) {
     );
 }
 
-/// The index skwird would keep for what was walked, in fsearch's layout
-/// with what skwird adds (docs/DESIGN.md, "The index"): per entry its
-/// name's number, parent, kind, size, modification time and inode (29
-/// bytes) and its place in its name's list of entries (4); per distinct
-/// name its bytes, their offset and its letter mask (12) and its list's
-/// offset (4); per folder its range, parent, change time, owner, group
-/// and mode (40). An estimate, until the index is built.
+/// The index skwird would keep for what was walked, in fsearch 0.1's
+/// layout with what skwird adds (docs/DESIGN.md, "The index"), every
+/// field at its full width: per entry its name's number, parent, kind,
+/// size, modification time and inode (29 bytes) and its place in its
+/// name's list of entries (4); per distinct name its bytes, their offset
+/// and its letter mask (12) and its list's offset (4); per folder its
+/// range, parent, change time, owner, group and mode (40). fsearch 0.2
+/// packs each array at the bits its largest value needs. An estimate,
+/// until the index is built.
 #[cfg(unix)]
 fn estimate(walked: &walk::Walked) -> (u64, u64, u64) {
     (
