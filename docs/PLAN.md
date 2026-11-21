@@ -316,6 +316,23 @@ committed then.
      user's cache (6.9 million entries, 274 MB). It was stopped, and
      everything it wrote removed. AGENTS.md, "Shell hygiene", now says
      how every run is kept to its own folders.
+   - **A gap found after, and closed** (2026-11-21, from the review of
+     fsearch 0.2.2). Exclusions were applied as events only: a client's
+     registration purged its folder, and a withdrawal read it again.
+     Nothing held a loaded index to the list. A line added to the user's
+     file, while an engine ran or while none did, left the folder's
+     names indexed and answered until its parent was next read: rule 3
+     broken. A purge or a readmission cut short by a kill was lost, and
+     a folder taken back while no engine ran stayed excluded for good.
+     Now the keeper derives the excluded folders from the list at each
+     open and each change, and the engine reads the user's file again
+     at each sync (DESIGN 5). Tests pass, each failing without the fix:
+     - an exclusion added while no engine ran holds from the next open,
+       no byte of the folder's names left on disk;
+     - one taken back is read at the next refresh, even with a kill
+       between;
+     - the engine purges a folder named in the user's file from the next
+       sync, and, written while no engine ran, before its first answer.
    - Not done here: **the crawl is not yet streamed into the build**:
      the first build of a large home holds the crawl whole (1.2 GB for
      2.9 million entries in step 2). Step 6 measures it against the
@@ -418,7 +435,9 @@ committed then.
   through a link: it excludes its folder, and only it;
 - a folder a client registers after it was indexed: purged, its log
   entries too, and not covered: excluded;
-- a token from before a rebuild: too old.
+- a token from before a rebuild: too old;
+- an exclusion added, or taken back, while no engine ran or with a kill
+  between: held from the next open.
 
 **Tests of the engine:**
 - after every batch of changes, each entry's parent is a folder in the
@@ -430,7 +449,9 @@ committed then.
 - a socket path too long is an error that says so;
 - a sync after a change made through the engine's back answers with
   the change;
-- two clients register folders, and each removes only its own.
+- two clients register folders, and each removes only its own;
+- a folder the user's file names is purged from the next sync, and,
+  written while no engine ran, before the first answer.
 
 **Done when:** a name query of a home tree gives what a walk would,
 after a restart as well; and the memory, the time to the first answer,

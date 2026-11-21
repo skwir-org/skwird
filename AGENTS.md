@@ -56,6 +56,11 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - **Fix structurally.** When a symptom returns or a fix needs
   hand-kept constants, find the invariant being broken, make it
   impossible, and write the rule here.
+- **What follows from a list is derived from it again.** It is not kept
+  up by the events that changed the list alone: an event can come while
+  no engine runs, or be cut short by a kill. The folders an index holds
+  as excluded are derived from the exclusions at each open and each
+  change (DESIGN 5).
 - **Decisions.** A choice that closes a door is recorded in
   `docs/DESIGN.md` with its reason; `docs/PLAN.md` says honestly what
   each phase did and did not do.

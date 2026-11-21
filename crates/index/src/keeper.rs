@@ -4,6 +4,12 @@
 //! written; asked what changed since a token; purged of a folder made
 //! private.
 //!
+//! The folders it holds as excluded are always those its root's
+//! exclusions name: made to hold to them when it is opened and whenever
+//! they change ([`Keeper::set_exclusions`]), never only by the events
+//! that changed them. An exclusion added or taken back while no engine
+//! ran, or one whose purge a kill cut short, holds from the next open.
+//!
 //! A save that fails leaves the index in memory as it is, and what is on
 //! disk as it was: the last manifest, the files it names and the log, so
 //! that a start after it replays to where the log ends. A log that cannot
@@ -12,8 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-use skwird_crawl::{Cancel, Entry, Error, Options, Root, Time, Why, crawl_all};
+use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Why, crawl_all};
 
+use crate::block::{FolderId, State};
 use crate::index::Index;
 use crate::log::{self, Log, Op, Record, Token};
 use crate::store::{self, Mark};
@@ -42,11 +49,28 @@ pub struct TooOld;
 /// How an index was opened.
 #[derive(Debug)]
 pub enum Opened {
-    /// Read back, and its log replayed past what its chunks hold.
-    Loaded { replayed: usize },
+    /// Read back, its log replayed past what its chunks hold, and made to
+    /// hold to its root's exclusions.
+    Loaded {
+        replayed: usize,
+        reconciled: Reconciled,
+    },
     /// Built anew from a crawl: there was none, or what there was could
     /// not be read (why).
     Built { because: Option<String> },
+}
+
+/// What making an index hold to its exclusions did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    /// Folders the exclusions name that the index held: purged.
+    pub purged: usize,
+    /// Folders the index held as excluded that the exclusions no longer
+    /// name: not covered, not read yet, until the next refresh reads them.
+    pub readmitted: usize,
+    /// The purge could not be saved: the index in memory is without the
+    /// folders' names, and the next save writes it so.
+    pub unsaved: bool,
 }
 
 /// The index of one root, its log, and where they are kept.
@@ -107,7 +131,15 @@ impl Keeper {
                         // The journal cannot go on from a log not found.
                         let _ = keeper.new_epoch();
                     }
-                    return Ok((keeper, Opened::Loaded { replayed }));
+                    // The exclusions may have changed while no engine ran.
+                    let reconciled = keeper.reconcile();
+                    return Ok((
+                        keeper,
+                        Opened::Loaded {
+                            replayed,
+                            reconciled,
+                        },
+                    ));
                 }
                 None => Some("its log does not belong with its chunks".to_owned()),
             },
@@ -189,16 +221,60 @@ impl Keeper {
         &self.root
     }
 
-    pub fn root_mut(&mut self) -> &mut Root {
-        &mut self.root
+    /// Take `exclusions` from now on, and make the index hold to them: a
+    /// folder they name is purged at once, and one they no longer name is
+    /// read at the next refresh.
+    pub fn set_exclusions(&mut self, exclusions: Exclusions) -> Reconciled {
+        self.root.set_exclusions(exclusions);
+        self.reconcile()
     }
 
-    /// Read the folder at `rel` again at the next refresh, its exclusion
-    /// taken back: until then it is not covered, not read yet.
-    pub fn readmit(&mut self, rel: &Path) {
-        if let Some(folder) = self.index.folder_at(rel) {
+    /// Make the folders the index holds as excluded those the root's
+    /// exclusions name, whatever happened between: an exclusion added or
+    /// taken back while no engine ran, a purge or a readmission a kill cut
+    /// short. Only a folder's parent read again would find them otherwise.
+    fn reconcile(&mut self) -> Reconciled {
+        let base = self.root.path();
+        let exclusions = self.root.exclusions();
+        let excluded = |state: Option<State>| state == Some(State::NotCovered(Why::Excluded));
+        // Named, and held: purged. The root itself is never its own hole.
+        let purge: Vec<FolderId> = exclusions
+            .paths()
+            .filter_map(|p| p.strip_prefix(base).ok())
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .filter_map(|rel| self.index.folder_at(rel))
+            .filter(|&f| !excluded(self.index.state_of(f)))
+            .collect();
+        // Excluded, and named no more: read again. An excluded folder holds
+        // nothing below it, so none of these is below another; one below a
+        // folder purged goes with it.
+        let mut readmit: Vec<FolderId> = Vec::new();
+        for (_, chunk) in self.index.tree().chunks() {
+            let view = chunk.view();
+            readmit.extend(
+                (0..chunk.len())
+                    .filter(|&b| excluded(Some(view.state(b))))
+                    .map(|b| view.folder(b)),
+            );
+        }
+        readmit.retain(|&f| {
+            let id = self.index.facts_of(f).map(|facts| facts.id);
+            !exclusions.holds(id, &base.join(self.index.path_of(f)))
+        });
+        for &folder in &purge {
+            self.index
+                .reread(folder, None, Seen::NotCovered(Why::Excluded));
+        }
+        readmit.retain(|&f| self.index.tree().loc(f).is_some());
+        for &folder in &readmit {
             self.index
                 .reread(folder, None, Seen::NotCovered(Why::Unread));
+        }
+        let unsaved = !purge.is_empty() && self.purged().is_err();
+        Reconciled {
+            purged: purge.len(),
+            readmitted: readmit.len(),
+            unsaved,
         }
     }
 
@@ -333,6 +409,12 @@ impl Keeper {
             return Ok(());
         };
         self.index.reread(folder, None, Seen::NotCovered(why));
+        self.purged()
+    }
+
+    /// Folders let go of in memory, let go of on disk: their names
+    /// dropped, the log that held them ended, the index saved.
+    fn purged(&mut self) -> std::io::Result<()> {
         self.index.blank_dead_names();
         self.new_epoch()?;
         self.save()

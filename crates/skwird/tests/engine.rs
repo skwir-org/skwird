@@ -341,6 +341,63 @@ fn two_clients_register_folders_and_each_takes_back_only_its_own() {
     );
 }
 
+/// The holes the engine answers below `root`, with why.
+fn holes_of(c: &mut Client, root: &Path) -> Vec<(PathBuf, Why)> {
+    c.coverage(root)
+        .unwrap()
+        .holes
+        .into_iter()
+        .map(|h| (h.path.to_path(), h.why))
+        .collect()
+}
+
+/// A folder the user names in their exclusions is purged from the next
+/// sync, or, written while no engine ran, before the next start answers
+/// anything, though its parent never changed. Taken out while no engine
+/// ran, it is read again. Each engine is killed, never left to save.
+#[test]
+fn the_users_exclusions_hold_from_the_next_sync_and_the_next_start() {
+    let mut env = Env::new("engine-configured");
+    tree(&env);
+    // Past the check's tick, so that no folder is read again for having
+    // changed just before it was read: only the exclusions can purge.
+    std::thread::sleep(Duration::from_millis(2200));
+    let home = env.home();
+    let excluded = home.join("docs/d03");
+    let file = env.s.join("config/skwird/exclude");
+    let report = named(&home, "report 3.txt");
+    let kill = |env: &mut Env, engine: usize| {
+        env.engines[engine].kill().unwrap();
+        env.engines[engine].wait().unwrap();
+    };
+    let first = env.engine(30);
+    let mut c = env.client("a test");
+    assert_eq!(answered(&mut c, &report).len(), 1);
+    // Written while it runs: it holds from the next sync.
+    env.s.write(&file, b"# kept out\n~/docs/d03\n");
+    c.sync(&home).unwrap();
+    assert!(answered(&mut c, &report).is_empty(), "its names gone");
+    assert_eq!(holes_of(&mut c, &home), [(excluded.clone(), Why::Excluded)]);
+    drop(c);
+    kill(&mut env, first);
+    // Taken out while no engine ran: not covered until read again.
+    env.s.write(&file, b"");
+    let second = env.engine(30);
+    let mut c = env.client("a test");
+    assert_eq!(holes_of(&mut c, &home), [(excluded.clone(), Why::Unread)]);
+    c.sync(&home).unwrap();
+    assert_eq!(holes_of(&mut c, &home), []);
+    assert_eq!(answered(&mut c, &report).len(), 1, "read again");
+    drop(c);
+    kill(&mut env, second);
+    // Written while no engine ran: it holds before any sync.
+    env.s.write(&file, b"~/docs/d03/\n");
+    env.engine(30);
+    let mut c = env.client("a test");
+    assert!(answered(&mut c, &report).is_empty(), "its names gone");
+    assert_eq!(holes_of(&mut c, &home), [(excluded, Why::Excluded)]);
+}
+
 /// An engine goes once its last client has been gone its idle time.
 #[test]
 fn an_engine_goes_once_idle() {

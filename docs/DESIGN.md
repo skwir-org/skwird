@@ -338,6 +338,22 @@ components. One that names no folder yet is kept by its resolved path,
 and applies to the folder made there. An empty or relative path is
 refused, never taken to mean everything.
 
+**The folders an index holds as excluded are always those the
+exclusions name** (found on 2026-11-21). They are derived again from
+the list whenever either side changes, never kept up by the events
+that changed them alone:
+- when an index is opened, before anything reads it;
+- when a client registers or withdraws a folder;
+- at each `sync`, the user's file read again.
+
+A folder the list names is purged; one it no longer names is not
+covered, not read yet, until the next refresh reads it. Otherwise an
+exclusion would hold only once its folder's parent was next read. A
+line added to the user's file, while an engine ran or while none did,
+left the folder's names indexed and answered. A purge or a readmission
+cut short by a kill was lost. fsearch lost a recovery so (its
+`705c5eb`), and its review led here.
+
 ### 6. Answers carry identity
 
 Each entry comes with its device and inode, and its folder's. That lets

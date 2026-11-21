@@ -13,9 +13,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
-use skwird_crawl::{Cancel, Exclusions, Options, Root, Why};
+use skwird_crawl::{Cancel, Exclusions, Options, Root};
 use skwird_index::Index;
-use skwird_index::keeper::{Event, Keeper, Opened, TooOld};
+use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
 use skwird_index::log::Token;
 use skwird_index::tree::Limits;
 use skwird_protocol::WirePath;
@@ -152,20 +152,36 @@ fn configured(dirs: &Dirs) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Every exclusion: the defaults, the user's, what clients registered.
-fn exclusions(dirs: &Dirs, registrations: &[Registration]) -> Exclusions {
+/// Every exclusion: the defaults, the user's, what clients registered;
+/// and how many were refused.
+fn exclusions(dirs: &Dirs, registrations: &[Registration]) -> (Exclusions, usize) {
     let paths = skwird_crawl::exclude::defaults(&dirs.home)
         .into_iter()
         .chain(configured(dirs))
         .chain(registrations.iter().map(|r| r.path.to_path()));
     let (exclusions, refused) = Exclusions::resolve(paths);
-    if !refused.is_empty() {
+    (exclusions, refused.len())
+}
+
+fn log_refused(refused: usize) {
+    if refused > 0 {
         log(&format!(
-            "{} exclusions refused: empty, relative or unresolvable",
-            refused.len()
+            "{refused} exclusions refused: empty, relative or unresolvable"
         ));
     }
-    exclusions
+}
+
+/// What a root's index did to hold to its exclusions, if anything.
+fn log_reconciled(root: usize, r: Reconciled) {
+    if r.purged > 0 || r.readmitted > 0 {
+        log(&format!(
+            "root {root} held to its exclusions: {} folders purged, {} to read again",
+            r.purged, r.readmitted
+        ));
+    }
+    if r.unsaved {
+        log("a purge's save failed: tried again at the next save");
+    }
 }
 
 /// Where a root's index is kept: a folder named by its path's hash.
@@ -230,9 +246,11 @@ fn open_all(
     cancel: &Cancel,
 ) -> Vec<Option<Keeper>> {
     let mut keepers = Vec::new();
+    let (ex, refused) = exclusions(&config.dirs, registrations);
+    log_refused(refused);
     for (i, path) in config.roots.iter().enumerate() {
         let start = std::time::Instant::now();
-        let opened = Root::open(path, exclusions(&config.dirs, registrations)).and_then(|root| {
+        let opened = Root::open(path, ex.clone()).and_then(|root| {
             Keeper::open(
                 &index_dir(&config.dirs, path),
                 root,
@@ -247,7 +265,7 @@ fn open_all(
                 log(&format!(
                     "root {i} {} in {:.2?}: {} entries in {} folders",
                     match how {
-                        Opened::Loaded { replayed } =>
+                        Opened::Loaded { replayed, .. } =>
                             format!("loaded, {replayed} records replayed"),
                         Opened::Built { because: None } => "built".to_owned(),
                         Opened::Built { because: Some(_) } => "built again".to_owned(),
@@ -256,6 +274,9 @@ fn open_all(
                     sizes.entries,
                     sizes.folders
                 ));
+                if let Opened::Loaded { reconciled, .. } = how {
+                    log_reconciled(i, reconciled);
+                }
                 shared.publish(i, Published::Ready(Arc::new(keeper.snapshot())));
                 keepers.push(Some(keeper));
             }
@@ -295,6 +316,9 @@ impl Writing<'_> {
                         other => self.pending.insert(0, other),
                     }
                 }
+                // The user's exclusions read again first: a line added to
+                // their file holds from the next sync.
+                self.hold_to_exclusions();
                 if let Some(keeper) = self.keepers[root].as_mut() {
                     refresh(keeper, root, self.shared, &self.cancel);
                 }
@@ -333,6 +357,28 @@ impl Writing<'_> {
         true
     }
 
+    /// Every root made to hold to the exclusions as they are now: the
+    /// defaults, the user's file read again, what clients registered. A
+    /// folder they name is purged at once. Gives back the roots whose
+    /// folders are to be read again, and how many exclusions were refused.
+    fn hold_to_exclusions(&mut self) -> (Vec<usize>, usize) {
+        let (ex, refused) = exclusions(&self.config.dirs, &self.registrations);
+        let mut readmitting = Vec::new();
+        for (i, keeper) in self.keepers.iter_mut().enumerate() {
+            let Some(keeper) = keeper else { continue };
+            let r = keeper.set_exclusions(ex.clone());
+            log_reconciled(i, r);
+            if r.readmitted > 0 {
+                readmitting.push(i);
+            }
+            if r.purged > 0 || r.readmitted > 0 {
+                self.shared
+                    .publish(i, Published::Ready(Arc::new(keeper.snapshot())));
+            }
+        }
+        (readmitting, refused)
+    }
+
     /// Take a client's registrations: what it adds is purged at once, what
     /// it takes back is read again. A client takes back only what it added.
     fn register(&mut self, client: &str, add: &[PathBuf], remove: &[PathBuf]) {
@@ -354,31 +400,14 @@ impl Writing<'_> {
         if !changed {
             return;
         }
+        // Kept first: a kill before the purge's save leaves it to the next
+        // open, which holds the index to what is kept.
         save_registered(&self.config.dirs, &self.registrations);
-        let ex = exclusions(&self.config.dirs, &self.registrations);
-        for keeper in self.keepers.iter_mut().flatten() {
-            keeper.root_mut().set_exclusions(ex.clone());
-        }
-        for path in add {
-            if let Some((i, rel)) = self.shared.locate(path)
-                && let Some(keeper) = self.keepers[i].as_mut()
-                && keeper.purge(&rel, Why::Excluded).is_err()
-            {
-                log("a purge's save failed: tried again at the next save");
-            }
-        }
-        for path in remove {
-            if let Some((i, rel)) = self.shared.locate(path)
-                && let Some(keeper) = self.keepers[i].as_mut()
-            {
-                keeper.readmit(&rel);
+        let (readmitting, refused) = self.hold_to_exclusions();
+        log_refused(refused);
+        for i in readmitting {
+            if let Some(keeper) = self.keepers[i].as_mut() {
                 refresh(keeper, i, self.shared, &self.cancel);
-            }
-        }
-        for (i, keeper) in self.keepers.iter().enumerate() {
-            if let Some(keeper) = keeper {
-                self.shared
-                    .publish(i, Published::Ready(Arc::new(keeper.snapshot())));
             }
         }
     }

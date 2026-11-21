@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Why};
-use skwird_index::keeper::{Event, Keeper, Opened, TooOld};
+use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
 use skwird_index::log::{Op, Token};
 use skwird_index::tree::Limits;
 use skwird_index::{Index, Proof, Query};
@@ -94,7 +94,7 @@ fn an_index_opened_again_replays_its_log() {
     };
     drop(k);
     let (k, opened) = keeper(&s);
-    let Opened::Loaded { replayed } = opened else {
+    let Opened::Loaded { replayed, .. } = opened else {
         panic!("{opened:?}")
     };
     assert!(
@@ -234,6 +234,107 @@ fn a_purge_leaves_no_trace_of_a_folders_names() {
     }
     assert_eq!(k.changes(Path::new(""), before), Err(TooOld));
     assert!(entries.contains_key(Path::new("open/plain.txt")));
+}
+
+/// A keeper of the scratch tree with `excluded` (paths below it) kept out.
+fn keeper_without(s: &Scratch, excluded: &[&str]) -> (Keeper, Opened) {
+    let (ex, refused) = Exclusions::resolve(excluded.iter().map(|rel| s.join(rel)));
+    assert!(refused.is_empty(), "{refused:?}");
+    let root = Root::open(s.path(), ex).unwrap();
+    Keeper::open(&s.join("index"), root, opts(), limits(), &Cancel::default()).unwrap()
+}
+
+fn reconciled(opened: &Opened) -> Reconciled {
+    match opened {
+        Opened::Loaded { reconciled, .. } => *reconciled,
+        Opened::Built { .. } => panic!("{opened:?}"),
+    }
+}
+
+/// The holes below the root, by path, with why.
+fn holes(k: &Keeper) -> Vec<(PathBuf, Why)> {
+    let index = k.index();
+    index
+        .coverage(index.root().unwrap())
+        .holes
+        .into_iter()
+        .map(|h| (h.path, h.why))
+        .filter(|(p, _)| !p.starts_with("index"))
+        .collect()
+}
+
+/// Whether a file of the index's folder holds `needle`.
+fn on_disk(s: &Scratch, needle: &[u8]) -> bool {
+    std::fs::read_dir(s.join("index")).unwrap().any(|file| {
+        let bytes = std::fs::read(file.unwrap().path()).unwrap();
+        bytes.windows(needle.len()).any(|w| w == needle)
+    })
+}
+
+/// An exclusion added while no engine ran (a line written in the user's
+/// file, or a client's registration whose purge a kill cut short) holds
+/// from the next open: the folder's names are purged before anything
+/// reads the index, on disk too, though its parent never changed.
+#[test]
+fn an_exclusion_added_while_no_engine_ran_holds_from_the_next_open() {
+    let s = Scratch::new("keeper-excluded-later");
+    s.file("diary/zqxj-entry.txt");
+    s.file("diary/inner/zqxj-deep.txt");
+    s.file("open/plain.txt");
+    let (k, _) = keeper(&s);
+    assert!(on_disk(&s, b"zqxj"), "indexed while not excluded");
+    drop(k);
+    let (k, opened) = keeper_without(&s, &["diary"]);
+    assert_eq!(
+        reconciled(&opened),
+        Reconciled {
+            purged: 1,
+            readmitted: 0,
+            unsaved: false
+        }
+    );
+    assert_eq!(holes(&k), [(PathBuf::from("diary"), Why::Excluded)]);
+    let entries = ours(k.index());
+    assert!(
+        !entries
+            .keys()
+            .any(|p| p.starts_with("diary") && p != Path::new("diary")),
+        "{entries:?}"
+    );
+    assert!(entries.contains_key(Path::new("open/plain.txt")));
+    assert!(!on_disk(&s, b"zqxj"), "a purged name is kept on disk");
+    // Opened again so, nothing is left to do.
+    drop(k);
+    let (_, opened) = keeper_without(&s, &["diary"]);
+    assert_eq!(reconciled(&opened), Reconciled::default());
+}
+
+/// An exclusion taken back, while no engine ran or with a kill before
+/// the folder was read again, is read at the next refresh: until then the
+/// folder is not covered, not read yet, never excluded for good.
+#[test]
+fn an_exclusion_taken_back_is_read_again_even_across_a_kill() {
+    let s = Scratch::new("keeper-readmitted");
+    s.file("diary/entry.txt");
+    s.file("diary/inner/deep.txt");
+    s.file("open/plain.txt");
+    let (k, _) = keeper_without(&s, &["diary"]);
+    assert_eq!(holes(&k), [(PathBuf::from("diary"), Why::Excluded)]);
+    drop(k);
+    // Taken back while running, and killed before the refresh.
+    let (mut k, opened) = keeper_without(&s, &["diary"]);
+    assert_eq!(reconciled(&opened), Reconciled::default());
+    let r = k.set_exclusions(Exclusions::none());
+    assert_eq!(r.readmitted, 1, "{r:?}");
+    assert_eq!(holes(&k), [(PathBuf::from("diary"), Why::Unread)]);
+    drop(k);
+    // Taken back while no engine ran: the next open finds it so.
+    let (mut k, opened) = keeper(&s);
+    assert_eq!(reconciled(&opened).readmitted, 1, "{opened:?}");
+    assert_eq!(holes(&k), [(PathBuf::from("diary"), Why::Unread)]);
+    k.refresh(&Cancel::default()).unwrap();
+    assert_eq!(holes(&k), []);
+    assert_eq!(ours(k.index()), of_walk(s.path()));
 }
 
 /// An index whose files are damaged is built again, and says why.

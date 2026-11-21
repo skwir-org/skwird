@@ -88,6 +88,11 @@ impl Exclusions {
     pub fn is_empty(&self) -> bool {
         self.by_path.is_empty()
     }
+
+    /// Every folder excluded, by its resolved path.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.by_path.iter().map(PathBuf::as_path)
+    }
 }
 
 /// A path named as the system resolves it, and the identity of the folder
