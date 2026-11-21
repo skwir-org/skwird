@@ -71,6 +71,17 @@ pub fn read_folder(root: &Root, _: &Path, _: &Options) -> (Option<FolderStat>, O
     match root.never {}
 }
 
+pub type Reuse<'a> = &'a dyn Fn(&[u8], u64, crate::Kind) -> Option<crate::Entry>;
+
+pub fn read_folder_reusing(
+    root: &Root,
+    _: &Path,
+    _: &Options,
+    _: Reuse<'_>,
+) -> (Option<FolderStat>, Outcome, crate::Watch) {
+    match root.never {}
+}
+
 pub fn read_folder_watched(
     root: &Root,
     _: &Path,
@@ -166,9 +177,10 @@ pub fn check(root: &Root, _: &Stored, _: &Options, _: &Cancel) -> Result<Checked
 }
 
 /// What a watcher heard (Linux's inotify; none here yet).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Heard {
     Changed(i32),
+    Entry(i32, Box<[u8]>),
     Moved(i32),
     Gone(i32),
     Overflow,

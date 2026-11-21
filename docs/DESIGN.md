@@ -496,6 +496,18 @@ lasts long enough still fills the journal: its clients' tokens turn
 "too old", and they walk again. That is the journal's answer, not a
 loss.
 
+**A folder read again stats what was named** (decided on 2026-11-21,
+from the user's home). Its listing is read whole, so its names are
+every name it holds. Of its entries, those its events named are
+stat-ed, and those new to it; every other one keeps what it was read
+with, if the listing gives it the same inode and kind. An entry's size
+and times change only through an event naming it. A folder heard of
+itself, or by more than 4,096 names, is read whole. Watching the user's
+home, one cache folder of 62,000 entries was heard about once a
+second, and each read stat-ed all of them: 60,000 stats a second, 9%
+of a core. In a folder of 2,000 entries, a file written to is now read
+again with at most two stats.
+
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
 its block and every block after it that is deeper, so no block stores
@@ -668,8 +680,8 @@ after a first build and after each refresh (`malloc_trim`).
     (5). A client removes only what it added.
   - `watch {add, remove}` (phase 2): folders the client wants live,
     kept as its exclusions are (open question 2). An event in one is
-    applied by reading its folder again, as the check reads it, so a
-    live answer and a checked one never disagree.
+    applied by reading its folder again: every name its listing holds,
+    stat-ing the entries its events named and what is new (DESIGN 8).
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do

@@ -388,14 +388,14 @@ fn listen(
         listened.events += heard.len() as u64;
         let mut named = BTreeSet::new();
         for h in &heard {
-            match *h {
-                Heard::Changed(wd) => {
-                    if let Some(rel) = model.by_wd.get(&wd) {
+            match h {
+                Heard::Changed(wd) | Heard::Entry(wd, _) => {
+                    if let Some(rel) = model.by_wd.get(wd) {
                         named.insert(rel.clone());
                     }
                 }
                 Heard::Gone(wd) => {
-                    model.by_wd.remove(&wd);
+                    model.by_wd.remove(wd);
                 }
                 Heard::Moved(_) | Heard::Cookie(_) => {}
                 Heard::Overflow => listened.overflows += 1,

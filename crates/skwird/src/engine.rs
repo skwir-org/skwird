@@ -24,7 +24,7 @@ use skwird_index::tree::Limits;
 use skwird_protocol::WirePath;
 
 use crate::dirs::Dirs;
-use crate::live::Gather;
+use crate::live::{Gather, HeardFolder};
 
 /// How an engine runs.
 #[derive(Clone, Debug)]
@@ -499,6 +499,13 @@ impl Writing<'_> {
                         }
                     }
                 }
+                Heard::Entry(wd, name) => {
+                    for (i, keeper) in self.keepers.iter().enumerate() {
+                        if let Some(folder) = keeper.as_ref().and_then(|k| k.watched(wd)) {
+                            self.gather.note_entry(i, folder, name.clone(), now);
+                        }
+                    }
+                }
                 Heard::Moved(wd) | Heard::Gone(wd) => {
                     for (i, keeper) in self.keepers.iter_mut().enumerate() {
                         let Some(keeper) = keeper else { continue };
@@ -585,14 +592,14 @@ impl Writing<'_> {
     }
 
     /// The folders of `root` heard, read again.
-    fn apply_heard(&mut self, root: usize, folders: &[FolderId]) {
+    fn apply_heard(&mut self, root: usize, folders: &[HeardFolder]) {
         if folders.is_empty() {
             return;
         }
         let Some(keeper) = self.keepers[root].as_mut() else {
             return;
         };
-        match keeper.heard(folders, &self.cancel) {
+        match keeper.heard_named(folders, &self.cancel) {
             Ok(done) => {
                 self.done.read_again(root, &done);
                 if !done.records.is_empty() {

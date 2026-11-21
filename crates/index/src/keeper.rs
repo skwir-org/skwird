@@ -26,7 +26,7 @@ use crate::index::Index;
 use crate::log::{self, Log, Op, Record, Token};
 use crate::store::{self, Mark};
 use crate::tree::Limits;
-use crate::update::{self, Proof, Refreshed, Seen};
+use crate::update::{self, HeardFolder, Proof, Refreshed, Seen};
 
 /// A log past this many bytes at a save starts another epoch: the
 /// journal keeps about as much.
@@ -416,8 +416,18 @@ impl Keeper {
     /// Apply what was heard in `folders`: each read again, watched, its
     /// new folders crawled, each change logged.
     pub fn heard(&mut self, folders: &[FolderId], cancel: &Cancel) -> Result<Refreshed, Error> {
-        let done =
-            update::reread_folders(&mut self.index, &self.root, &self.opts, cancel, folders)?;
+        let whole: Vec<HeardFolder> = folders.iter().map(|&f| (f, None)).collect();
+        self.heard_named(&whole, cancel)
+    }
+
+    /// [`Keeper::heard`], each folder given the names its events gave: of
+    /// what it held, those alone are stat-ed again ([`update::reread_named`]).
+    pub fn heard_named(
+        &mut self,
+        folders: &[HeardFolder],
+        cancel: &Cancel,
+    ) -> Result<Refreshed, Error> {
+        let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders)?;
         self.append(done.records.iter().cloned());
         self.note(&done.watches);
         self.prune();

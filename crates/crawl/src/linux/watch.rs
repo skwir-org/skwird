@@ -32,12 +32,15 @@ use rustix::io::Errno;
 use crate::Watch;
 
 /// What a watcher heard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Heard {
-    /// An entry of the folder watched by this descriptor was made,
-    /// removed, moved, written to or given other attributes, or the
-    /// folder's own: read it again.
+    /// The folder watched by this descriptor changed, its own attributes,
+    /// with no entry named: read it again whole.
     Changed(i32),
+    /// The entry of this name in the folder watched by this descriptor
+    /// was made, removed, moved, written to or given other attributes:
+    /// read the folder again, stat-ing it alone of what was there.
+    Entry(i32, Box<[u8]>),
     /// The folder itself moved: its old parent and its new say where.
     Moved(i32),
     /// The folder's watch is gone: the folder was removed, or its
@@ -242,7 +245,12 @@ impl Watcher {
             } else if flags.contains(ReadFlags::DELETE_SELF) {
                 // Its watch's end follows, as `IGNORED`.
             } else {
-                heard.push(Heard::Changed(wd));
+                // An entry named: it alone need be stat-ed again. Unnamed, the
+                // folder itself changed: read it whole.
+                match event.file_name() {
+                    Some(name) => heard.push(Heard::Entry(wd, name.to_bytes().into())),
+                    None => heard.push(Heard::Changed(wd)),
+                }
             }
         }
     }
@@ -297,6 +305,17 @@ mod tests {
         }
     }
 
+    /// The folders what was heard names, by descriptor.
+    fn named(heard: &[Heard]) -> BTreeSet<i32> {
+        heard
+            .iter()
+            .filter_map(|h| match h {
+                Heard::Changed(wd) | Heard::Entry(wd, _) => Some(*wd),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn heard(w: &Watcher) -> Vec<Heard> {
         let mut heard = Vec::new();
         w.read(&mut heard).unwrap();
@@ -322,16 +341,20 @@ mod tests {
         assert_eq!(w.watching(), 4);
         assert_eq!(heard(&w), [], "nothing heard of the crawl's own reads");
         s.file("a/new");
-        assert_eq!(heard(&w), [Heard::Changed(wa)]);
+        assert_eq!(
+            heard(&w),
+            [Heard::Entry(wa, Box::from(&b"new"[..]))],
+            "named by its entry"
+        );
         s.remove("b/c");
         let got = heard(&w);
-        assert!(got.contains(&Heard::Changed(wb)), "{got:?}");
+        assert!(named(&got).contains(&wb), "{got:?}");
         assert!(got.contains(&Heard::Gone(wc)), "{got:?}");
-        assert!(!got.contains(&Heard::Changed(wa)), "{got:?}");
+        assert!(!named(&got).contains(&wa), "{got:?}");
         assert_eq!(w.watching(), 3, "its watch let go of");
         s.rename("a/one", "b/one");
         let got = heard(&w);
-        assert!(got.contains(&Heard::Changed(wa)) && got.contains(&Heard::Changed(wb)));
+        assert!(named(&got).contains(&wa) && named(&got).contains(&wb));
     }
 
     /// Files made in every folder while the crawl reads and watches them:
@@ -361,7 +384,7 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             crawl
         });
-        let got: BTreeSet<Heard> = heard(&w).into_iter().collect();
+        let got = named(&heard(&w));
         let mut differed = 0;
         for folder in crawl
             .folders
@@ -382,7 +405,7 @@ mod tests {
                     panic!("{:?}", folder.watch)
                 };
                 assert!(
-                    got.contains(&Heard::Changed(wd)),
+                    got.contains(&wd),
                     "{} changed after it was read, unheard",
                     folder.rel.display()
                 );
@@ -427,7 +450,10 @@ mod tests {
         s.file("a/after");
         assert_eq!((old.generation(), new.generation()), (1, 2));
         assert_eq!(heard(&old).len(), 2, "the old one still hears both");
-        assert_eq!(heard(&new), [Heard::Changed(wd(&crawl, "a"))]);
+        assert_eq!(
+            heard(&new),
+            [Heard::Entry(wd(&crawl, "a"), Box::from(&b"after"[..]))]
+        );
     }
 
     /// Past its budget, a folder is not watched, and says so.

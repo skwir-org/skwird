@@ -15,12 +15,14 @@
 //! under a mount is let go of at once: names of a private folder are never
 //! kept, and a mount's names are not the folder's.
 
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use skwird_crawl::{
     Cancel, Crawled, Entry, Error, FileId, Kind, Options, Outcome, Root, Stale, Stored,
-    StoredFolder, Time, Watch, Why, check, check_watched, crawl_below, read_folder_watched,
+    StoredFolder, Time, Watch, Why, check, check_watched, crawl_below, read_folder_reusing,
+    read_folder_watched,
 };
 
 use crate::block::{Block, Facts, FolderId, Item, State};
@@ -385,6 +387,26 @@ impl Index {
 
     /// An entry of a block, as the log and the journal give it: a folder's
     /// device is its own block's.
+    /// The entries of `folder` as it was read, by name, but those of
+    /// `touched`: what a read that stats the entries heard alone keeps.
+    pub fn known_entries(
+        &self,
+        folder: FolderId,
+        touched: &HashSet<Box<[u8]>>,
+    ) -> HashMap<&[u8], Entry> {
+        let Some(block) = self.tree().block(folder) else {
+            return HashMap::new();
+        };
+        let dev = block.facts.map_or(0, |f| f.id.dev);
+        block
+            .items
+            .iter()
+            .map(|item| (self.names().get(item.name), item))
+            .filter(|(name, _)| !touched.contains(*name))
+            .map(|(name, item)| (name, self.entry_of(item, dev)))
+            .collect()
+    }
+
     fn entry_of(&self, item: &Item, dev: u64) -> Entry {
         let dev = item
             .child
@@ -539,6 +561,7 @@ pub fn refresh(
         cancel,
         &ids,
         &stored,
+        &[],
         checked.stale,
         &mut done,
     )?;
@@ -601,6 +624,7 @@ pub fn install(
         cancel,
         &ids,
         &stored,
+        &[],
         checked.stale,
         &mut done,
     )?;
@@ -616,16 +640,36 @@ pub fn reread_folders(
     cancel: &Cancel,
     folders: &[FolderId],
 ) -> Result<Refreshed, Error> {
+    let whole: Vec<HeardFolder> = folders.iter().map(|&f| (f, None)).collect();
+    reread_named(index, root, opts, cancel, &whole)
+}
+
+/// A folder heard, and the names its events gave: none to read it whole.
+pub type HeardFolder = (FolderId, Option<HashSet<Box<[u8]>>>);
+
+/// [`reread_folders`], a folder given the names its events gave stat-ing
+/// those alone of what it held (and what is new in its listing): every
+/// other entry is kept as it was, if its listing gives it the same inode
+/// and kind (DESIGN 8). A folder given none is read whole.
+pub fn reread_named(
+    index: &mut Index,
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    folders: &[HeardFolder],
+) -> Result<Refreshed, Error> {
     let mut ids = Vec::with_capacity(folders.len());
+    let mut named = Vec::with_capacity(folders.len());
     let mut stored = Stored::with_capacity(folders.len(), folders.len() * 64);
-    for &folder in folders {
-        if index.tree().loc(folder).is_none() {
+    for (folder, names) in folders {
+        if index.tree().loc(*folder).is_none() {
             continue;
         }
-        let facts = index.facts_of(folder);
-        ids.push(folder);
+        let facts = index.facts_of(*folder);
+        ids.push(*folder);
+        named.push(names.as_ref());
         stored.push(
-            &index.path_of(folder),
+            &index.path_of(*folder),
             StoredFolder {
                 id: facts.map(|f| f.id).unwrap_or_default(),
                 ctime: facts.map(|f| f.ctime).unwrap_or_default(),
@@ -635,7 +679,9 @@ pub fn reread_folders(
     }
     let stale = (0..ids.len()).map(|i| (i, Stale::Changed)).collect();
     let mut done = Refreshed::default();
-    apply(index, root, opts, cancel, &ids, &stored, stale, &mut done)?;
+    apply(
+        index, root, opts, cancel, &ids, &stored, &named, stale, &mut done,
+    )?;
     Ok(done)
 }
 
@@ -650,6 +696,7 @@ fn apply(
     cancel: &Cancel,
     ids: &[FolderId],
     stored: &Stored,
+    named: &[Option<&HashSet<Box<[u8]>>>],
     verdicts: Vec<(usize, Stale)>,
     done: &mut Refreshed,
 ) -> Result<(), Error> {
@@ -673,12 +720,27 @@ fn apply(
             Stale::Mount => (None, Seen::NotCovered(Why::Mount)),
             Stale::NetworkMount => (None, Seen::NotCovered(Why::NetworkMount)),
             _ => {
-                let (found, outcome, watch) = read_folder_watched(root, stored.rel(i), opts);
+                // Named by its events, it stats those entries alone, and
+                // what is new; the others kept as they were read.
+                let kept = Cell::new(0);
+                let (found, outcome, watch) = match named.get(i).copied().flatten() {
+                    Some(touched) => {
+                        let known = index.known_entries(folder, touched);
+                        read_folder_reusing(root, stored.rel(i), opts, &|name, ino, kind| {
+                            let entry = known.get(name).filter(|e| {
+                                e.id.ino == ino && (kind == Kind::Other || e.kind == kind)
+                            });
+                            kept.set(kept.get() + usize::from(entry.is_some()));
+                            entry.copied()
+                        })
+                    }
+                    None => read_folder_watched(root, stored.rel(i), opts),
+                };
                 if watch != Watch::Unasked {
                     done.watches.push((folder, watch));
                 }
                 if let Outcome::Listed(listing) = &outcome {
-                    done.entries += listing.len();
+                    done.entries += listing.len() - kept.get();
                     done.largest = done.largest.max(listing.len());
                 }
                 (found, Seen::of(&outcome))

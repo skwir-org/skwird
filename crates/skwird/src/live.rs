@@ -5,7 +5,7 @@
 //! gathering, the check after an overflow, a save. Otherwise it waits
 //! for a command alone: idle is idle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -90,11 +90,24 @@ pub fn listen(watcher: &Watcher, commands: &Sender<Command>) {
     }
 }
 
+pub use skwird_index::update::HeardFolder;
+
+/// Past this many names, a folder is read whole: what is kept of a
+/// gathering stays bounded.
+const NAMES: usize = 4096;
+
+/// A folder's gathering: when first heard, when last, and the names heard.
+struct Gathered {
+    first: Instant,
+    last: Instant,
+    names: Option<HashSet<Box<[u8]>>>,
+}
+
 /// What the writer has heard and not applied, and what is due after.
 #[derive(Default)]
 pub struct Gather {
-    /// Each folder heard, by root: when first heard, and last.
-    heard: HashMap<(usize, FolderId), (Instant, Instant)>,
+    /// Each folder heard, by root.
+    heard: HashMap<(usize, FolderId), Gathered>,
     /// When the check after an overflow is due.
     recheck: Option<Instant>,
     backoff: Duration,
@@ -104,31 +117,59 @@ pub struct Gather {
 }
 
 impl Gather {
-    /// A change heard in `folder` of root `root`.
+    /// A change heard in `folder` of root `root`, of the folder itself:
+    /// it is to be read whole.
     pub fn note(&mut self, root: usize, folder: FolderId, now: Instant) {
-        self.heard
-            .entry((root, folder))
-            .and_modify(|(_, last)| *last = now)
-            .or_insert((now, now));
+        self.gathered(root, folder, now).names = None;
+    }
+
+    /// A change heard in the entry `name` of `folder`: of what the folder
+    /// held, that entry alone is to be stat-ed again.
+    pub fn note_entry(&mut self, root: usize, folder: FolderId, name: Box<[u8]>, now: Instant) {
+        let fresh = !self.heard.contains_key(&(root, folder));
+        let g = self.gathered(root, folder, now);
+        if fresh {
+            g.names = Some(HashSet::new());
+        }
+        if let Some(names) = g.names.as_mut() {
+            names.insert(name);
+            if names.len() > NAMES {
+                g.names = None;
+            }
+        }
+    }
+
+    fn gathered(&mut self, root: usize, folder: FolderId, now: Instant) -> &mut Gathered {
         // The check after an overflow waits for the queue to be quiet.
         if let Some(at) = self.recheck.as_mut() {
             *at = (*at).max(now + self.backoff);
         }
+        let g = self.heard.entry((root, folder)).or_insert(Gathered {
+            first: now,
+            last: now,
+            names: None,
+        });
+        g.last = now;
+        g
     }
 
     /// The folders whose gathering is done, by root, let go of here.
-    pub fn due(&mut self, now: Instant) -> Vec<(usize, Vec<FolderId>)> {
-        let mut by_root: HashMap<usize, Vec<FolderId>> = HashMap::new();
-        self.heard.retain(|&(root, folder), &mut (first, last)| {
-            let done = now >= last + QUIET || now >= first + MOST;
-            if done {
-                by_root.entry(root).or_default().push(folder);
+    pub fn due(&mut self, now: Instant) -> Vec<(usize, Vec<HeardFolder>)> {
+        let mut by_root: HashMap<usize, Vec<HeardFolder>> = HashMap::new();
+        let done: Vec<(usize, FolderId)> = self
+            .heard
+            .iter()
+            .filter(|(_, g)| now >= g.last + QUIET || now >= g.first + MOST)
+            .map(|(&key, _)| key)
+            .collect();
+        for (root, folder) in done {
+            if let Some(g) = self.heard.remove(&(root, folder)) {
+                by_root.entry(root).or_default().push((folder, g.names));
             }
-            !done
-        });
+        }
         let mut due: Vec<_> = by_root.into_iter().collect();
         for (_, folders) in &mut due {
-            folders.sort_unstable();
+            folders.sort_unstable_by_key(|(folder, _)| *folder);
         }
         due.sort_unstable_by_key(|(root, _)| *root);
         due
@@ -136,16 +177,18 @@ impl Gather {
 
     /// Every folder of `root` heard, done gathering or not: a sync takes
     /// them at once.
-    pub fn take(&mut self, root: usize) -> Vec<FolderId> {
-        let mut folders = Vec::new();
-        self.heard.retain(|&(r, folder), _| {
-            let take = r == root;
-            if take {
-                folders.push(folder);
-            }
-            !take
-        });
-        folders.sort_unstable();
+    pub fn take(&mut self, root: usize) -> Vec<HeardFolder> {
+        let keys: Vec<(usize, FolderId)> = self
+            .heard
+            .keys()
+            .filter(|(r, _)| *r == root)
+            .copied()
+            .collect();
+        let mut folders: Vec<HeardFolder> = keys
+            .into_iter()
+            .filter_map(|key| self.heard.remove(&key).map(|g| (key.1, g.names)))
+            .collect();
+        folders.sort_unstable_by_key(|(folder, _)| *folder);
         folders
     }
 
@@ -197,7 +240,7 @@ impl Gather {
         let gathering = self
             .heard
             .values()
-            .map(|&(first, last)| (last + QUIET).min(first + MOST))
+            .map(|g| (g.last + QUIET).min(g.first + MOST))
             .min();
         [gathering, self.recheck, self.unsaved.map(|at| at + SAVE)]
             .into_iter()
@@ -237,7 +280,7 @@ mod tests {
         assert!(g.due(t + QUIET / 2).is_empty());
         g.note(0, 7, t + QUIET / 2);
         assert!(g.due(t + QUIET).is_empty(), "heard again: quiet anew");
-        assert_eq!(g.due(t + QUIET / 2 + QUIET), vec![(0, vec![7])]);
+        assert_eq!(g.due(t + QUIET / 2 + QUIET), vec![(0, vec![(7, None)])]);
         // Heard without pause: done at most a second after the first.
         let mut busy = Gather::default();
         let mut at = t;
@@ -246,10 +289,29 @@ mod tests {
             assert!(busy.due(at).is_empty());
             at += QUIET / 2;
         }
-        assert_eq!(busy.due(t + MOST), vec![(1, vec![3])]);
+        assert_eq!(busy.due(t + MOST), vec![(1, vec![(3, None)])]);
         assert_eq!(busy.deadline(), None, "nothing left due: idle");
     }
 
+    /// A folder heard by its entries' names keeps them, to stat those
+    /// alone; heard of itself, or by too many names, it is read whole.
+    #[test]
+    fn a_gathering_keeps_the_names_heard() {
+        let t = Instant::now();
+        let name = |s: &str| Box::<[u8]>::from(s.as_bytes());
+        let mut g = Gather::default();
+        g.note_entry(0, 1, name("a"), t);
+        g.note_entry(0, 1, name("b"), t);
+        g.note_entry(0, 2, name("c"), t);
+        g.note(0, 2, t);
+        let due = g.due(t + MOST);
+        let names: HashSet<Box<[u8]>> = [name("a"), name("b")].into();
+        assert_eq!(due, vec![(0, vec![(1, Some(names)), (2, None)])]);
+        for i in 0..=NAMES {
+            g.note_entry(0, 3, name(&format!("n{i}")), t);
+        }
+        assert_eq!(g.take(0), vec![(3, None)], "past the names kept, whole");
+    }
     /// The check after an overflow waits for quiet, and longer for each
     /// overflow that follows soon.
     #[test]

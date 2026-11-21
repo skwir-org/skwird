@@ -304,7 +304,7 @@ fn names_of(entries: impl Iterator<Item = rustix::io::Result<Named>>) -> Result<
 /// [`Options::attrs`], folders alone without). Gives its stat where it
 /// was taken, and what came of it.
 pub fn read_folder(root: &Root, rel: &Path, opts: &Options) -> (Option<FolderStat>, Outcome) {
-    read(root, rel, opts, &mut Watch::Unasked)
+    read(root, rel, opts, &mut Watch::Unasked, None)
 }
 
 fn read(
@@ -312,6 +312,7 @@ fn read(
     rel: &Path,
     opts: &Options,
     watch: &mut Watch,
+    reuse: Option<Reuse<'_>>,
 ) -> (Option<FolderStat>, Outcome) {
     let not_covered = |stat, why| (stat, Outcome::NotCovered(why));
     if root.excluded_by_path(rel) {
@@ -373,6 +374,12 @@ fn read(
     let again = read_at < stat.ctime.plus(opts.tick);
     let mut listing = Listing::new(stat, read_at, again);
     for (name, file_type, ino) in names {
+        // Taken as it was: no event named it, and the listing gives it the
+        // same inode and kind.
+        if let Some(entry) = reuse.and_then(|r| r(name.to_bytes(), ino, kind_of(file_type))) {
+            listing.push(name.to_bytes(), entry);
+            continue;
+        }
         let fallback = Entry {
             kind: kind_of(file_type),
             id: FileId {
@@ -408,6 +415,25 @@ fn read(
     (Some(stat), Outcome::Listed(listing))
 }
 
+/// An entry kept from what was read before, by its name and the inode
+/// and kind a listing gives it: none to stat it.
+pub type Reuse<'a> = &'a dyn Fn(&[u8], u64, Kind) -> Option<Entry>;
+
+/// [`read_folder_watched`], every entry `reuse` gives taken as it is, not
+/// stat-ed: a live folder read again stats what an event named, and what
+/// is new, alone (DESIGN 8). Its names are still every name its listing
+/// holds.
+pub fn read_folder_reusing(
+    root: &Root,
+    rel: &Path,
+    opts: &Options,
+    reuse: Reuse<'_>,
+) -> (Option<FolderStat>, Outcome, Watch) {
+    let mut watch = Watch::Unasked;
+    let (stat, outcome) = read(root, rel, opts, &mut watch, Some(reuse));
+    (stat, outcome, watch)
+}
+
 /// [`read_folder`], and what came of watching the folder: with
 /// [`Options::watcher`], a folder within its subtrees is watched through
 /// its handle before its entries are read.
@@ -417,7 +443,7 @@ pub fn read_folder_watched(
     opts: &Options,
 ) -> (Option<FolderStat>, Outcome, Watch) {
     let mut watch = Watch::Unasked;
-    let (stat, outcome) = read(root, rel, opts, &mut watch);
+    let (stat, outcome) = read(root, rel, opts, &mut watch, None);
     (stat, outcome, watch)
 }
 

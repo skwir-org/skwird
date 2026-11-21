@@ -4,7 +4,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,8 +47,9 @@ fn watching(s: &Scratch, scopes: &[&str], budget: usize) -> (Keeper, Arc<Watcher
     (k, watcher)
 }
 
-/// Apply everything heard, as the engine does, until nothing more is.
-/// Gives whether an overflow was heard.
+/// Apply everything heard, as the engine does, until nothing more is: a
+/// folder heard by its entries' names stats those alone, one heard of
+/// itself is read whole. Gives whether an overflow was heard.
 fn apply(k: &mut Keeper, w: &Watcher) -> bool {
     let mut overflowed = false;
     loop {
@@ -57,10 +58,22 @@ fn apply(k: &mut Keeper, w: &Watcher) -> bool {
         if heard.is_empty() {
             return overflowed;
         }
-        let mut folders = Vec::new();
+        let mut folders: BTreeMap<u32, Option<HashSet<Box<[u8]>>>> = BTreeMap::new();
         for h in heard {
             match h {
-                Heard::Changed(wd) => folders.extend(k.watched(wd)),
+                Heard::Changed(wd) => {
+                    if let Some(f) = k.watched(wd) {
+                        folders.insert(f, None);
+                    }
+                }
+                Heard::Entry(wd, name) => {
+                    if let Some(f) = k.watched(wd) {
+                        let names = folders.entry(f).or_insert_with(|| Some(HashSet::new()));
+                        if let Some(names) = names {
+                            names.insert(name);
+                        }
+                    }
+                }
                 Heard::Overflow => overflowed = true,
                 Heard::Moved(_) | Heard::Gone(_) | Heard::Cookie(_) => {}
             }
@@ -69,9 +82,8 @@ fn apply(k: &mut Keeper, w: &Watcher) -> bool {
             k.overflowed();
             return true;
         }
-        folders.sort_unstable();
-        folders.dedup();
-        k.heard(&folders, &Cancel::default()).unwrap();
+        let folders: Vec<_> = folders.into_iter().collect();
+        k.heard_named(&folders, &Cancel::default()).unwrap();
     }
 }
 
@@ -247,4 +259,49 @@ fn a_folder_registered_before_it_exists_is_live_once_made() {
     s.file("ghost/after.txt");
     apply(&mut k, &w);
     assert!(paths(k.index()).contains(Path::new("ghost/after.txt")));
+}
+
+/// A large folder heard by one of its entries stats that entry alone,
+/// the others kept as they were read; the entry written to is read again,
+/// its new size in the index. Each read of such a folder once stat-ed
+/// every entry: a home's busy cache folder of 62,000 entries cost 7.5% of
+/// a core.
+#[test]
+fn a_folder_heard_by_an_entry_stats_that_entry_alone() {
+    let s = Scratch::new("live-named");
+    for i in 0..2000 {
+        s.file(format!("docs/big/f{i:04}"));
+    }
+    let (mut k, w) = watching(&s, &["docs"], 100);
+    std::fs::write(s.join("docs/big/f0042"), b"grown").unwrap();
+    let mut heard = Vec::new();
+    w.read(&mut heard).unwrap();
+    let mut folder = None;
+    let mut names = HashSet::new();
+    for h in heard {
+        if let Heard::Entry(wd, name) = h {
+            folder = k.watched(wd);
+            names.insert(name);
+        }
+    }
+    let done = k
+        .heard_named(&[(folder.expect("heard"), Some(names))], &Cancel::default())
+        .unwrap();
+    assert!(done.entries <= 2, "{} entries stat-ed", done.entries);
+    let index = k.index();
+    let size = index
+        .query(index.root().unwrap(), &Query::default())
+        .unwrap()
+        .into_iter()
+        .find(|h| h.path == Path::new("docs/big/f0042"))
+        .and_then(|h| h.attrs)
+        .map(|a| a.size);
+    assert_eq!(size, Some(5), "the entry written to read again");
+    assert_eq!(
+        paths(index)
+            .iter()
+            .filter(|p| p.starts_with("docs/big"))
+            .count(),
+        2001
+    );
 }

@@ -938,6 +938,31 @@ committed once the gate holds.
    Left: the user's second run, `tools/measure.sh --no-root --only
    engine,live`, then the budgets.
 
+   **The user's second run** (at `ba3ed1e`):
+   - The engine step, with chunks of 16k entries: read back in 0.63 s at
+     181 MB, a warm sync in 0.62 s, no processor time idle, 288 MB on
+     disk. The chunks' size cost nothing measurable.
+   - Live: a change answered in 143 ms at the median, 161 ms at most;
+     the share of 131,072 folders watched in 4.3 s; the engine at
+     255 MB.
+   - Still 2.82 s of processor time in 30 s with no client asking. The
+     counts at each save said why: few folders read again (10 to 23 each
+     10 s, 1 to 3 distinct), but one of 62,000 entries heard about once a
+     second, each read stat-ing all of them (186,000 to 776,000 entries
+     stat-ed each 10 s).
+
+   Fixed (DESIGN 8): a folder read again stats only the entries its
+   events named, and those new to its listing. Its names are still every
+   name the listing holds, and every other entry keeps what it was read
+   with, if the listing gives it the same inode and kind. The watcher says
+   each event's name (`Heard::Entry`), and the gathering keeps up to
+   4,096 names a folder. A test: a folder of 2,000 entries, one file
+   written to, read again with at most two stats, its new size in the
+   index.
+
+   Left: the user's third run, `tools/measure.sh --no-root --only live`,
+   then the budgets.
+
 **Tests of live coverage:**
 - an overflow lowers coverage at once, and the check after it finds
   what the dropped events held;
