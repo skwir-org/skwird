@@ -6,10 +6,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Time, crawl_all};
+use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Time};
+use skwird_index::build::crawl_and_build;
 use skwird_index::store;
 use skwird_index::tree::Limits;
-use skwird_index::{Index, NameQuery, Pattern, Query, build};
+use skwird_index::{Index, NameQuery, Pattern, Query};
 
 use crate::said::{bytes, count, time};
 
@@ -97,17 +98,20 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
         threads,
         ..Options::default()
     };
+    // As the engine builds: each folder packed as the crawl reads it.
     let start = Instant::now();
-    let crawl = crawl_all(&root, &opts, &Cancel::default()).map_err(|e| e.to_string())?;
-    println!(
-        "crawl: {} folders in {} on {threads} threads, every entry stat-ed",
-        count(crawl.folders.len() as u64),
-        time(start.elapsed())
-    );
-    let start = Instant::now();
-    let mut index = build(crawl, Limits::default());
-    println!("build: {}", time(start.elapsed()));
+    let (mut index, crawled) = crawl_and_build(&root, &opts, &Cancel::default(), Limits::default())
+        .map_err(|e| e.to_string())?;
     let s = index.sizes();
+    println!(
+        "crawl: {} folders in {} on {threads} threads, every entry stat-ed, each packed as read",
+        count(s.folders),
+        time(crawled)
+    );
+    println!(
+        "build, once the crawl ended: {}",
+        time(start.elapsed().saturating_sub(crawled))
+    );
     let total = s.chunk_bytes + s.names_bytes;
     println!(
         "index: {} entries in {} folders, {} distinct names, {} chunks",

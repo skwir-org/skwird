@@ -537,15 +537,22 @@ cold check), not what is the engine's.
 | A sync, warm | 0.15 s | 0.12 s (0.83 s) | met |
 | The build, from a crawl | 1 s | 0.61 s (4.2 s) | met |
 | Memory at rest, the index read back | 40 MB | 26 MB (177 MB) | met |
-| Memory after a first build, once saved | as at rest | 272 MB (1,873 MB) | not met |
-| Memory at the peak of a first build | 150 MB | 329 MB (2,268 MB) | not met |
+| Memory after a first build, once saved | as at rest | 272 MB (1,873 MB) | not met; fixed, to be measured again |
+| Memory at the peak of a first build | 150 MB | 329 MB (2,268 MB) | not met; fixed, to be measured again |
 
 Memory is what the kernel counts resident (`VmRSS`, and `VmHWM` for the
 peak). The index's mapped files count once read, and are the page
 cache's to drop. A first start, with no index yet, answers once the
 whole tree is crawled and built: 9.3 s with the caches warm, about 20 s
-cold by the crawl's and the build's times measured apart. Meeting the
-two budgets not met is phase 1's step 7 (PLAN).
+cold by the crawl's and the build's times measured apart.
+
+The two budgets not met were the allocator's: the crawl's and the
+build's small allocations, freed and kept. Phase 1's step 7 packs each
+folder as the crawl reads it, into a few large buffers, and gives back
+what is left once after a first build. On a synthetic tree of 1.04
+million entries, the engine went from 336 MB after its build to 18 MB,
+and from a 340 MB peak to 67 MB. The user's home is measured again
+before the two are called met.
 
 ## Protocol (a sketch; experimental until declared stable)
 

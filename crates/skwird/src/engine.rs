@@ -208,7 +208,11 @@ pub fn writer(config: &Config, shared: &Shared, commands: &Receiver<Command>) {
     };
     let registrations = registered(&config.dirs);
     let cancel = Cancel::default();
-    let keepers = open_all(config, shared, &registrations, &opts, &cancel);
+    let (keepers, built) = open_all(config, shared, &registrations, &opts, &cancel);
+    if built {
+        // What a first build freed, given back now that it is saved.
+        crate::memory::give_back();
+    }
     let mut w = Writing {
         config,
         shared,
@@ -237,15 +241,16 @@ pub fn writer(config: &Config, shared: &Shared, commands: &Receiver<Command>) {
 }
 
 /// Open every root: its index read back, or crawled; each published as it
-/// is ready.
+/// is ready. Says whether any was built.
 fn open_all(
     config: &Config,
     shared: &Shared,
     registrations: &[Registration],
     opts: &Options,
     cancel: &Cancel,
-) -> Vec<Option<Keeper>> {
+) -> (Vec<Option<Keeper>>, bool) {
     let mut keepers = Vec::new();
+    let mut built = false;
     let (ex, refused) = exclusions(&config.dirs, registrations);
     log_refused(refused);
     for (i, path) in config.roots.iter().enumerate() {
@@ -274,8 +279,9 @@ fn open_all(
                     sizes.entries,
                     sizes.folders
                 ));
-                if let Opened::Loaded { reconciled, .. } = how {
-                    log_reconciled(i, reconciled);
+                match how {
+                    Opened::Loaded { reconciled, .. } => log_reconciled(i, reconciled),
+                    Opened::Built { .. } => built = true,
                 }
                 shared.publish(i, Published::Ready(Arc::new(keeper.snapshot())));
                 keepers.push(Some(keeper));
@@ -287,7 +293,7 @@ fn open_all(
             }
         }
     }
-    keepers
+    (keepers, built)
 }
 
 /// What the writer holds.

@@ -3,14 +3,17 @@
 //! it in that order, every name stored once.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
 
-use skwird_crawl::{Crawl, Crawled, FolderStat, Kind, Outcome};
+use skwird_crawl::{
+    Cancel, Crawl, Crawled, Error, FolderStat, Kind, Options, Outcome, Root, crawl,
+};
 
 use crate::block::{Block, Facts, FolderId, Item, NameId, State};
-use crate::chunk::Bytes;
 use crate::index::Index;
-use crate::names::{Builder, Names, Segment};
-use crate::tree::{Limits, Tree};
+use crate::packer::Packer;
+use crate::tree::Limits;
 
 pub fn facts(stat: &FolderStat) -> Facts {
     Facts {
@@ -118,20 +121,43 @@ pub fn blocks_of(
     blocks
 }
 
-/// The index of what `crawl` read, the root's folder first (slot 0).
+/// The index of what `crawl` read, the root's folder first (slot 0), each
+/// folder's listing let go of once packed ([`Packer`]).
 pub fn build(crawl: Crawl, limits: Limits) -> Index {
-    let mut names = Builder::new();
-    let blocks = blocks_of(
-        crawl.folders,
-        Top {
-            parent: None,
-            name: 0,
-            depth: 0,
-        },
-        &mut |slot| slot as FolderId,
-        &mut |name| names.intern(name),
-    );
-    let names = Segment::from_bytes(Bytes::Owned(names.finish().into_boxed_slice()), true, None)
-        .expect("names just written read back");
-    Index::new(Tree::build(blocks, limits), Names::new(names))
+    let mut packer = Packer::default();
+    for (slot, crawled) in crawl.folders.into_iter().enumerate() {
+        packer.add(slot, &crawled);
+    }
+    packer.finish(limits)
+}
+
+/// The index of the whole root, crawled now: each folder packed as the
+/// crawl reads it, on a thread of its own, so that the crawl is never
+/// held whole (`docs/PLAN.md`, phase 1, step 7). Gives how long the crawl
+/// took.
+pub fn crawl_and_build(
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    limits: Limits,
+) -> Result<(Index, Duration), Error> {
+    // A few folders ahead: the crawl waits for the packer rather than hold
+    // what it has not packed yet.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Crawled)>(256);
+    std::thread::scope(|scope| {
+        let packing = scope.spawn(move || {
+            let mut packer = Packer::default();
+            for (slot, crawled) in rx {
+                packer.add(slot, &crawled);
+            }
+            packer
+        });
+        let took = crawl(root, Path::new(""), opts, cancel, &|slot, crawled| {
+            // The packer ends only once every sender is gone.
+            let _ = tx.send((slot, crawled));
+        });
+        drop(tx);
+        let packer = packing.join().expect("the packer does not panic");
+        took.map(|took| (packer.finish(limits), took))
+    })
 }

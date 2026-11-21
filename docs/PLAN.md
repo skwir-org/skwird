@@ -412,6 +412,46 @@ committed then.
    - Done when `tools/measure.sh --only engine` on the user's home meets
      both.
 
+   **Built on 2026-11-21, waiting for the user's measurement.**
+   - **What held it, found first.** On a synthetic tree of 1.04 million
+     entries in 70,481 folders, a first build left the engine at
+     336 MB, 322 MB of it anonymous, against 19 MB read back.
+     `malloc_trim` took it to 64 MB. So the memory was the crawl's and
+     the build's many small allocations, freed and kept by glibc's
+     allocator. The index itself was not held.
+   - **The packer** (`skwird_index::packer`): each folder the crawl reads
+     is packed at once, on a thread of its own fed by the crawl's
+     threads, its listing let go of. It goes into a few buffers that
+     only grow:
+     - the names, each once, found by their hash;
+     - each folder's block, its numbers as variable-length integers;
+     - by slot, where each block starts.
+
+     Once the crawl ends, the blocks are unpacked in pre-order, each
+     folder's folders linked by name, and cut into chunks as
+     `Tree::build` cuts them. `build` and the keeper's first build both
+     go through it, and `skwird-bench index` builds as the engine does.
+   - **What is left given back:** the engine calls `malloc_trim` once,
+     after a first build, where the C library is glibc (`memory.rs`,
+     the one call to the system it makes for this).
+   - Measured on that tree, by the kernel's count:
+     - after the first build: 18 MB, where 336 MB were, as against 19 MB
+       read back;
+     - at the peak: 67 MB, where 340 MB were;
+     - the build: 0.42 s, as before (0.45 s).
+
+     That is 18 MB and 65 MB per million entries, against the
+     budgets' 40 and 150.
+   - Tests pass:
+     - the packer's blocks, and its chunk cuts, are those `blocks_of`
+       and `Tree::build` make, on folders of every size, one past a
+       chunk's most, one empty, one excluded;
+     - names whose hashes are alike are two names;
+     - every test of the index and the engine, which build through it.
+   - Left: the user's home, through `tools/measure.sh --only engine`. Its
+     folders hold fewer entries each, and its names repeat less, than
+     the synthetic tree's.
+
 **Tests:** coverage is never overstated. Fixtures cover:
 - a change made while the engine was down;
 - a folder whose times `tar` set back;

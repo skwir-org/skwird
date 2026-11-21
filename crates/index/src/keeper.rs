@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Why, crawl_all};
+use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Why};
 
 use crate::block::{FolderId, State};
 use crate::index::Index;
@@ -147,8 +147,8 @@ impl Keeper {
             Err(e) => Some(e.to_string()),
         };
         let start = Time::now();
-        let crawl = crawl_all(&root, &opts, cancel)?;
-        let mut index = crate::build(crawl, limits);
+        // Packed as it is read: the crawl is never held whole.
+        let (mut index, _) = crate::build::crawl_and_build(&root, &opts, cancel, limits)?;
         let tells = root.fs_name() != "fuse";
         index.set_proof(if tells {
             Proof::Checked(start)

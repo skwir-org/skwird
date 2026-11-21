@@ -15,6 +15,8 @@ pub mod dirs;
 #[cfg(target_os = "linux")]
 pub mod engine;
 #[cfg(target_os = "linux")]
+pub mod memory;
+#[cfg(target_os = "linux")]
 pub mod serve;
 
 /// Serve a user's engine: Linux's alone so far (rule 7).

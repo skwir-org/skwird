@@ -98,7 +98,7 @@ pub fn kind_code(kind: Kind) -> u64 {
     }
 }
 
-fn kind_of(code: u64) -> Kind {
+pub(crate) fn kind_of(code: u64) -> Kind {
     match code & 3 {
         0 => Kind::File,
         1 => Kind::Folder,

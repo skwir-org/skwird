@@ -16,6 +16,7 @@ pub mod map;
 pub mod matching;
 pub mod names;
 pub mod packed;
+pub mod packer;
 pub mod pages;
 pub mod store;
 pub mod tree;
