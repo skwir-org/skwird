@@ -9,6 +9,8 @@ use std::process::ExitCode;
 #[cfg(unix)]
 mod check;
 #[cfg(target_os = "linux")]
+mod churn;
+#[cfg(target_os = "linux")]
 mod fanotify;
 #[cfg(unix)]
 mod index;
@@ -22,6 +24,7 @@ usage: skwird-bench walk ROOT [--threads N] [--stat]
        skwird-bench check ROOT [--threads N] [--runs N] [--cold] [--drop-with CMD]
        skwird-bench index ROOT [--threads N] [--keep DIR]
        skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
+       skwird-bench churn FOLDER -- COMMAND [ARG]...
 
 walk      read every folder under ROOT with skwird's crawl, and size the
           index it would keep (--stat: stat every entry, as an index of
@@ -42,6 +45,11 @@ fanotify  whether a system service could watch the whole filesystem
           own in DIR, and say whether each of those was heard and
           whether its folder's handle opens
 
+churn     watch FOLDER as the engine is to watch it, run COMMAND (a
+          build, say), and say what applying its changes costs: each
+          folder read again at once, or its changes logged in batches;
+          each change sized as the engine's log holds it
+
 It prints counts, sizes and times, never a name or a path.";
 
 struct Args {
@@ -56,6 +64,8 @@ struct Args {
     seconds: u64,
     /// Where `index` saves the index.
     keep: Option<PathBuf>,
+    /// The command `churn` runs, after `--`.
+    rest: Vec<String>,
     /// Folders where `fanotify` makes, renames and removes a file of its own.
     probes: Vec<PathBuf>,
 }
@@ -74,6 +84,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         seconds: 0,
         keep: None,
         probes: Vec::new(),
+        rest: Vec::new(),
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -98,6 +109,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 parsed.probes.push(
                     std::fs::canonicalize(dir).map_err(|e| format!("cannot reach a probe: {e}"))?,
                 );
+            }
+            "--" => {
+                parsed.rest = it.by_ref().cloned().collect();
             }
             "-h" | "--help" => return Err(USAGE.into()),
             flag if flag.starts_with("--") => {
@@ -131,7 +145,7 @@ fn main() -> ExitCode {
 #[cfg(not(unix))]
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
-        "walk" | "check" | "index" | "fanotify" => {
+        "walk" | "check" | "index" | "fanotify" | "churn" => {
             Err("skwird-bench measures Unix filesystems so far; Windows comes with phase 4".into())
         }
         _ => Err(USAGE.into()),
@@ -153,6 +167,10 @@ fn run(args: &Args) -> Result<(), String> {
         "fanotify" => fanotify::probe(&args.path, args.seconds, &args.probes),
         #[cfg(not(target_os = "linux"))]
         "fanotify" => Err("fanotify is Linux's".into()),
+        #[cfg(target_os = "linux")]
+        "churn" => churn::run(&args.path, &args.rest),
+        #[cfg(not(target_os = "linux"))]
+        "churn" => Err("the watcher is Linux's so far".into()),
         _ => Err(USAGE.into()),
     }
 }

@@ -468,6 +468,29 @@ skwird adds:
   - past 350,000 changes at any time;
   - after 12 hours, once quiet.
 
+**Changes heard are gathered, a folder at a time** (decided on
+2026-11-21 from phase 2's step 2). A folder's events are gathered until
+100 ms pass without one, or 1 s after the first. Then the folder is
+read again once, and its changes logged once. A sync applies what is
+gathered below the path it asks at once, so a live answer after a sync
+holds every change made before it. Without a sync, an answer lags what
+was heard by a second at most.
+
+The measure was a full build of skwird's own workspace, watched, into a
+scratch folder (9.7 s, 15,000 events). Applied at once, it read folders
+again 7,462 times, 770 a second, each read stating every entry of a
+build's large folders, and logged 3.0 MB: the journal's 16 MB would
+last 55 s of such building. Gathered at 100 ms and 1 s, it read 269
+times and logged 688 KB. fsearch's batches of busy folders (5 s of
+quiet, 60 s at most) halved that again, with answers up to a minute
+behind.
+
+So no class of busy folders is kept: every watched folder gathers
+alike, and no set of folders is learned beside the index. A build that
+lasts long enough still fills the journal: its clients' tokens turn
+"too old", and they walk again. That is the journal's answer, not a
+loss.
+
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
 its block and every block after it that is deeper, so no block stores

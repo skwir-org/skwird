@@ -327,6 +327,17 @@ fn decode(payload: &[u8]) -> Option<Logged> {
     (r.at == payload.len()).then_some(Logged { seq, at, record })
 }
 
+/// The bytes `record` takes in a log, its frame with it: what the
+/// journal's 16 MB of log are counted in.
+pub fn size_of(record: &Record) -> usize {
+    let logged = Logged {
+        seq: 0,
+        at: Time::default(),
+        record: record.clone(),
+    };
+    12 + encode(&logged).len()
+}
+
 /// A log file of one epoch, open to append.
 pub struct Log {
     file: File,

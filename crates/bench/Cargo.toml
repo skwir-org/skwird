@@ -15,7 +15,7 @@ skwird-index.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 # fanotify mounts a btrfs filesystem's top-level subvolume, detached.
-rustix = { workspace = true, features = ["mount"] }
+rustix = { workspace = true, features = ["event", "mount"] }
 
 [dev-dependencies]
 skwird-testkit.workspace = true

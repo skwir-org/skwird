@@ -698,6 +698,34 @@ committed once the gate holds.
        learned set was empty after a restart, and grew without end (its
        `b98a7b0`, `6c9dea4`).
    - Decided in DESIGN 8 from the numbers.
+
+   **Done on 2026-11-21.** `skwird-bench churn FOLDER -- COMMAND`:
+   - It watches the folder as the engine is to watch it, and runs the
+     command.
+   - It reads each folder named again as soon as it is heard, crawling
+     and watching its new folders, as the engine would.
+   - From the same reads it counts what batches of three sizes would
+     have logged.
+   - Each change is sized by the log's own encoding
+     (`skwird_index::log::size_of`).
+
+   On a full debug build of skwird's workspace into a scratch folder
+   (9.7 s, 14,981 events, no overflow, 141 folders watched at most):
+
+   | applied | reads | records | changes | log | 16 MB last |
+   |---|---|---|---|---|---|
+   | at once | 7,462 | 6,972 | 18,410 | 3.0 MB | 55 s |
+   | 100 ms quiet, 1 s at most | 269 | 227 | 5,928 | 688 KB | 4 min |
+   | 1 s, 10 s | 132 | 124 | 2,837 | 272 KB | 10 min |
+   | 5 s, 60 s (fsearch's) | 132 | 124 | 2,837 | 272 KB | 10 min |
+
+   A release build of the engine after it (18 s, 2,534 events) logged
+   438 KB at once, 87 KB at 100 ms and 1 s, 39 KB at 5 s and 60 s.
+
+   Decided (DESIGN 8): every watched folder gathers its events for 100
+   ms of quiet, or 1 s at most, then is read again once. A sync applies
+   what is gathered at once. No class of busy folders, and so no set of
+   them kept.
 3. **Live folders in the engine.**
    - Protocol: `watch {add, remove}`, the folders a client wants live,
      kept per client across restarts as its exclusions are (DESIGN 5),
