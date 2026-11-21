@@ -210,6 +210,17 @@ fn answered(index: &Index, root: &Path, query: &Query) -> Vec<PathBuf> {
     paths
 }
 
+/// A save's mark, every time `at`, no log.
+fn mark(at: Time) -> store::Mark {
+    store::Mark {
+        saved_at: at,
+        crawled_at: at,
+        proven_at: at,
+        epoch: 0,
+        log_seq: 0,
+    }
+}
+
 fn indexed(s: &Scratch, limits: Limits) -> Index {
     let root = Root::open(s.path(), Exclusions::none()).unwrap();
     let crawl = crawl_all(&root, &Options::default(), &Cancel::default()).unwrap();
@@ -317,7 +328,7 @@ fn saved_and_mapped_back_it_answers_alike() {
         sec: 1_790_000_000,
         nsec: 7,
     };
-    store::save(&mut index, &dir, saved_at, saved_at).unwrap();
+    store::save(&mut index, &dir, &mark(saved_at)).unwrap();
     assert!(index.tree().chunks().all(|(_, c)| c.is_mapped()));
     assert_answers_as_the_walk(
         &index,
@@ -346,7 +357,7 @@ fn saved_and_mapped_back_it_answers_alike() {
         .map(|e| e.unwrap().file_name())
         .collect();
     let mut again = loaded;
-    store::save(&mut again, &dir, saved_at, saved_at).unwrap();
+    store::save(&mut again, &dir, &mark(saved_at)).unwrap();
     let after: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())

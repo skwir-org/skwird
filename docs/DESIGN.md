@@ -454,13 +454,33 @@ from before what the log keeps, or from another epoch: a rebuilt index
 starts a new one. So the journal comes in phase 1, with the log, not
 in phase 2.
 
+As built (phase 1, step 4): a record says what one folder now is, its
+facts, its state and each change to its entries (added, removed or
+changed, a removal with what the entry was), and a refresh that
+completes adds when it proved the names. Each record has a checksum: a
+record a crash cut short ends the log, and is cut off before the next
+append. The manifest says how far into the log the chunks go, so a load
+replays the rest. A load claims "as of" when the names were last
+proven, which the manifest and the log record, never the time of the
+save, which may be later. An epoch ends where the journal cannot go on
+whole: a rebuild, a log that could not be written (the next save
+starts another), a log grown past 16 MB at a save, and a purge.
+
+**A purge leaves nothing on disk.** A folder made private, or registered
+by a client, is let go of in the index at once; its names that no other
+entry holds are written empty (each keeps its number, so no chunk
+changes); the log that held them ends its epoch and is removed; and the
+index is saved, so the chunks that held them are removed too.
+
 The index is a cache: a damaged file, or one of another version or
 layout, is rebuilt. Its header records every array's width, so two
 layouts never pass for one: the port keeps kinds in 4 bits on macOS and
 5 on Linux under one version, on the promise that the two files never
 meet. A save that fails keeps the index in memory, and its "as
 of" stays at the last save that succeeded: fsearch reloaded the older
-file and lost every change since, until 0.2.1.
+file and lost every change since, until 0.2.1. On disk, the last
+manifest, the files it names and the log stay, so a start after it
+replays to where the log ends.
 
 `skwird-bench walk` estimates its size, every field at its full width:
 33 bytes per entry, 16 per distinct name plus its bytes, and 40 per

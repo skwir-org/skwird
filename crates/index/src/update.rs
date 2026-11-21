@@ -15,16 +15,93 @@
 //! under a mount is let go of at once: names of a private folder are never
 //! kept, and a mount's names are not the folder's.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use skwird_crawl::{
-    Cancel, Entry, Error, FolderStat, Kind, Options, Outcome, Root, Stale, Stored, Time, Why,
+    Cancel, Crawled, Entry, Error, FileId, Kind, Options, Outcome, Root, Stale, Stored, Time, Why,
     check, crawl_below, read_folder,
 };
 
-use crate::block::{Block, FolderId, Item, State};
+use crate::block::{Block, Facts, FolderId, Item, State};
 use crate::build::{Top, blocks_of, facts};
 use crate::index::{Index, component};
+use crate::log::{Change, FolderRecord, Op, Record};
+use crate::packed::Malformed;
+
+/// What a read of a folder found, as [`Index::reread`] takes it: from a
+/// crawl's listing, or rebuilt from a record of the log.
+#[derive(Clone, Debug)]
+pub enum Seen {
+    Listed {
+        again: bool,
+        entries: Vec<(Vec<u8>, Entry)>,
+    },
+    NotCovered(Why),
+}
+
+impl Seen {
+    pub fn of(outcome: &Outcome) -> Seen {
+        match outcome {
+            Outcome::Listed(listing) => Seen::Listed {
+                again: listing.again,
+                entries: listing.iter().map(|(n, e)| (n.to_vec(), *e)).collect(),
+            },
+            Outcome::NotCovered(why) => Seen::NotCovered(*why),
+        }
+    }
+}
+
+/// What a merge of a folder's entries found.
+#[derive(Default)]
+struct Merged {
+    /// Folders whose subtrees go.
+    gone: Vec<FolderId>,
+    /// Folders new, their blocks not read yet.
+    made: Vec<Block>,
+    changes: Vec<Change>,
+}
+
+/// What a reread did.
+#[derive(Clone, Debug, Default)]
+pub struct Reread {
+    /// The folders new in it, not read yet, to be crawled.
+    pub fresh: Vec<FolderId>,
+    /// What changed of its entries.
+    pub changes: Vec<Change>,
+}
+
+/// The records of a crawl grafted in, each folder's entries all added,
+/// a folder's before those below it (slots are given in that order).
+pub fn records_of(crawl: &[Crawled]) -> Vec<Record> {
+    crawl
+        .iter()
+        .map(|c| {
+            let (state, changes) = match &c.outcome {
+                Outcome::Listed(listing) => (
+                    State::Listed {
+                        again: listing.again,
+                    },
+                    listing
+                        .iter()
+                        .map(|(name, entry)| Change {
+                            op: Op::Added,
+                            name: name.to_vec(),
+                            entry: *entry,
+                        })
+                        .collect(),
+                ),
+                Outcome::NotCovered(why) => (State::NotCovered(*why), Vec::new()),
+            };
+            Record::Folder(FolderRecord {
+                path: c.rel.clone(),
+                facts: c.stat.as_ref().map(facts),
+                state,
+                changes,
+            })
+        })
+        .collect()
+}
 
 /// How far an index's names can be trusted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,8 +135,10 @@ pub struct Coverage {
 }
 
 /// What a refresh did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Refreshed {
+    /// What it changed, in the order it changed it, for the log.
+    pub records: Vec<Record>,
     /// Folders the check compared.
     pub checked: usize,
     /// Folders read again.
@@ -119,118 +198,213 @@ impl Index {
         out
     }
 
-    /// Put what a read of `folder` found in place of what the index held,
-    /// and give the folders new in it, each a block not read yet, to be
-    /// crawled ([`Index::graft`]).
+    /// Put what a read of `folder` found in place of what the index held.
+    /// Gives the folders new in it, each a block not read yet, to be
+    /// crawled ([`Index::graft`]), and what changed of its entries, for
+    /// the log.
     ///
     /// Entries are matched by name. A folder that is still the same folder,
     /// by identity, keeps its block and what is below it; one gone, or
     /// another in its place, takes its subtree with it.
-    pub fn reread(
-        &mut self,
-        folder: FolderId,
-        stat: Option<FolderStat>,
-        outcome: Outcome,
-    ) -> Vec<FolderId> {
+    pub fn reread(&mut self, folder: FolderId, facts: Option<Facts>, seen: Seen) -> Reread {
         let Some(old) = self.tree().block(folder) else {
-            return Vec::new();
+            return Reread::default();
         };
-        let mut gone: Vec<FolderId> = Vec::new();
-        let mut made: Vec<Block> = Vec::new();
-        let facts = stat.as_ref().map(facts).or(old.facts);
-        let (state, items) = match outcome {
-            Outcome::Listed(listing) => {
-                let mut entries: Vec<(&[u8], &Entry)> = listing.iter().collect();
-                entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                let mut items = Vec::with_capacity(entries.len());
-                let mut o = 0;
-                for (name, entry) in entries {
-                    // Old entries before this name are gone.
-                    while o < old.items.len() && self.names().get(old.items[o].name) < name {
-                        gone.extend(old.items[o].child);
-                        o += 1;
-                    }
-                    let same = old
-                        .items
-                        .get(o)
-                        .filter(|item| self.names().get(item.name) == name)
-                        .copied();
-                    if same.is_some() {
-                        o += 1;
-                    }
-                    let name_id = match same {
-                        Some(item) => item.name,
-                        None => self.names_mut().intern(name),
-                    };
-                    let kept = same.and_then(|item| {
-                        let child = item.child?;
-                        (entry.kind == Kind::Folder && same_folder(self, child, &item, entry))
-                            .then_some(child)
-                    });
-                    if let Some(old_child) = same.and_then(|item| item.child)
-                        && kept != Some(old_child)
-                    {
-                        gone.push(old_child);
-                    }
-                    let child = match (entry.kind, kept) {
-                        (Kind::Folder, Some(child)) => Some(child),
-                        (Kind::Folder, None) => {
-                            let id = self.tree_mut().alloc();
-                            made.push(Block {
-                                folder: id,
-                                parent: Some(folder),
-                                name: name_id,
-                                depth: old.depth + 1,
-                                facts: None,
-                                state: State::NotCovered(Why::Unread),
-                                items: Vec::new(),
-                            });
-                            Some(id)
-                        }
-                        _ => None,
-                    };
-                    items.push(Item {
-                        name: name_id,
-                        kind: entry.kind,
-                        ino: entry.id.ino,
-                        attrs: entry.attrs,
-                        child,
-                    });
-                }
-                for item in &old.items[o..] {
-                    gone.extend(item.child);
-                }
-                (
-                    State::Listed {
-                        again: listing.again,
-                    },
-                    items,
-                )
-            }
-            // Never kept: a private folder's names, a mount's.
-            Outcome::NotCovered(
+        let mut m = Merged::default();
+        let facts = facts.or(old.facts);
+        let (state, items) = match seen {
+            Seen::Listed { again, entries } => (
+                State::Listed { again },
+                self.merge(folder, &old, entries, &mut m),
+            ),
+            // Never kept: a private folder's names, a mount's. Their
+            // removal is not logged entry by entry: a purge starts another
+            // epoch of the log ([`crate::keeper`]).
+            Seen::NotCovered(
                 why @ (Why::Private | Why::Excluded | Why::Mount | Why::NetworkMount),
             ) => {
-                gone.extend(old.items.iter().filter_map(|i| i.child));
+                m.gone.extend(old.items.iter().filter_map(|i| i.child));
                 (State::NotCovered(why), Vec::new())
             }
             // Kept as it was read.
-            Outcome::NotCovered(why) => (State::NotCovered(why), old.items.clone()),
+            Seen::NotCovered(why) => (State::NotCovered(why), old.items.clone()),
         };
-        let fresh: Vec<FolderId> = made.iter().map(|b| b.folder).collect();
+        let fresh: Vec<FolderId> = m.made.iter().map(|b| b.folder).collect();
         self.tree_mut().replace(Block {
             facts,
             state,
             items,
             ..old
         });
-        for child in gone {
+        for child in m.gone {
             self.tree_mut().remove(child);
         }
-        if !made.is_empty() {
-            self.tree_mut().insert_after(folder, made);
+        if !m.made.is_empty() {
+            self.tree_mut().insert_after(folder, m.made);
         }
-        fresh
+        Reread {
+            fresh,
+            changes: m.changes,
+        }
+    }
+
+    /// The new entries of `folder`, matched by name with its block's
+    /// `old` ones: what is gone, what is made and what changed, into `m`.
+    fn merge(
+        &mut self,
+        folder: FolderId,
+        old: &Block,
+        mut entries: Vec<(Vec<u8>, Entry)>,
+        m: &mut Merged,
+    ) -> Vec<Item> {
+        let dev = old.facts.map_or(0, |f| f.id.dev);
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut items = Vec::with_capacity(entries.len());
+        let mut o = 0;
+        for (name, entry) in &entries {
+            let name = name.as_slice();
+            // Old entries before this name are m.gone.
+            while o < old.items.len() && self.names().get(old.items[o].name) < name {
+                let item = old.items[o];
+                m.gone.extend(item.child);
+                m.changes.push(Change {
+                    op: Op::Removed,
+                    name: self.names().get(item.name).to_vec(),
+                    entry: self.entry_of(&item, dev),
+                });
+                o += 1;
+            }
+            let same = old
+                .items
+                .get(o)
+                .filter(|item| self.names().get(item.name) == name)
+                .copied();
+            if same.is_some() {
+                o += 1;
+            }
+            let name_id = match same {
+                Some(item) => item.name,
+                None => self.names_mut().intern(name),
+            };
+            let kept = same.and_then(|item| {
+                let child = item.child?;
+                (entry.kind == Kind::Folder && same_folder(self, child, &item, entry))
+                    .then_some(child)
+            });
+            if let Some(old_child) = same.and_then(|item| item.child)
+                && kept != Some(old_child)
+            {
+                m.gone.push(old_child);
+            }
+            let child = match (entry.kind, kept) {
+                (Kind::Folder, Some(child)) => Some(child),
+                (Kind::Folder, None) => {
+                    let id = self.tree_mut().alloc();
+                    m.made.push(Block {
+                        folder: id,
+                        parent: Some(folder),
+                        name: name_id,
+                        depth: old.depth + 1,
+                        facts: None,
+                        state: State::NotCovered(Why::Unread),
+                        items: Vec::new(),
+                    });
+                    Some(id)
+                }
+                _ => None,
+            };
+            let item = Item {
+                name: name_id,
+                kind: entry.kind,
+                ino: entry.id.ino,
+                attrs: entry.attrs,
+                child,
+            };
+            match same {
+                None => m.changes.push(Change {
+                    op: Op::Added,
+                    name: name.to_vec(),
+                    entry: *entry,
+                }),
+                Some(was)
+                    if was.kind != item.kind
+                        || was.ino != item.ino
+                        || was.attrs != item.attrs
+                        || was.child != item.child =>
+                {
+                    m.changes.push(Change {
+                        op: Op::Changed,
+                        name: name.to_vec(),
+                        entry: *entry,
+                    });
+                }
+                Some(_) => {}
+            }
+            items.push(item);
+        }
+        for item in &old.items[o..] {
+            m.gone.extend(item.child);
+            m.changes.push(Change {
+                op: Op::Removed,
+                name: self.names().get(item.name).to_vec(),
+                entry: self.entry_of(item, dev),
+            });
+        }
+        items
+    }
+
+    /// An entry of a block, as the log and the journal give it: a folder's
+    /// device is its own block's.
+    fn entry_of(&self, item: &Item, dev: u64) -> Entry {
+        let dev = item
+            .child
+            .and_then(|c| self.facts_of(c))
+            .map_or(dev, |f| f.id.dev);
+        Entry {
+            kind: item.kind,
+            id: FileId { dev, ino: item.ino },
+            attrs: item.attrs,
+        }
+    }
+
+    /// Take a record of the log again, as it was taken when it was made.
+    /// A record about a folder the index does not hold is an error: the
+    /// log and the chunks do not belong together.
+    pub fn replay(&mut self, record: &FolderRecord) -> Result<(), Malformed> {
+        let folder = self.folder_at(&record.path).ok_or(Malformed)?;
+        let seen = match record.state {
+            State::Listed { again } => {
+                let old = self.tree().block(folder).ok_or(Malformed)?;
+                let dev = old.facts.map_or(0, |f| f.id.dev);
+                let mut entries: BTreeMap<Vec<u8>, Entry> = old
+                    .items
+                    .iter()
+                    .map(|item| {
+                        (
+                            self.names().get(item.name).to_vec(),
+                            self.entry_of(item, dev),
+                        )
+                    })
+                    .collect();
+                for change in &record.changes {
+                    match change.op {
+                        Op::Removed => {
+                            entries.remove(&change.name);
+                        }
+                        Op::Added | Op::Changed => {
+                            entries.insert(change.name.clone(), change.entry);
+                        }
+                    }
+                }
+                Seen::Listed {
+                    again,
+                    entries: entries.into_iter().collect(),
+                }
+            }
+            State::NotCovered(why) => Seen::NotCovered(why),
+        };
+        self.reread(folder, record.facts, seen);
+        Ok(())
     }
 
     /// Put a crawl of `folder`'s subtree in place of its block: slot 0 is
@@ -331,12 +505,27 @@ pub fn refresh(
                 "the root was replaced since it was opened",
             )));
         }
-        let (seen, outcome) = match stale {
-            Stale::Mount => (None, Outcome::NotCovered(Why::Mount)),
-            Stale::NetworkMount => (None, Outcome::NotCovered(Why::NetworkMount)),
-            _ => read_folder(root, &stored[i].rel, opts),
+        let (found, seen) = match stale {
+            Stale::Mount => (None, Seen::NotCovered(Why::Mount)),
+            Stale::NetworkMount => (None, Seen::NotCovered(Why::NetworkMount)),
+            _ => {
+                let (found, outcome) = read_folder(root, &stored[i].rel, opts);
+                (found, Seen::of(&outcome))
+            }
         };
-        fresh.extend(index.reread(folder, seen, outcome));
+        let folder_facts = found.as_ref().map(facts);
+        let state = match &seen {
+            Seen::Listed { again, .. } => State::Listed { again: *again },
+            Seen::NotCovered(why) => State::NotCovered(*why),
+        };
+        let reread = index.reread(folder, folder_facts, seen);
+        fresh.extend(reread.fresh);
+        done.records.push(Record::Folder(FolderRecord {
+            path: stored[i].rel.clone(),
+            facts: folder_facts.or_else(|| index.facts_of(folder)),
+            state,
+            changes: reread.changes,
+        }));
         done.reread += 1;
     }
     while let Some(folder) = fresh.pop() {
@@ -346,6 +535,7 @@ pub fn refresh(
         let rel = index.path_of(folder);
         let crawl = crawl_below(root, &rel, opts, cancel)?;
         done.crawled += crawl.folders.len();
+        done.records.extend(records_of(&crawl.folders));
         index.graft(folder, crawl.folders);
     }
     let tells = root.fs_name() != "fuse";

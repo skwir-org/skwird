@@ -245,6 +245,32 @@ committed then.
      older file rebuilt; a folder made private, or registered by a
      client, purged.
    - Done when the kill and save-failure tests pass.
+
+   **Done on 2026-11-21.** `skwird_index::log` (records with checksums,
+   tokens), `skwird_index::keeper` (opened from disk with its log
+   replayed, or built again with why; refreshed, each change logged;
+   saved; asked `changes` below a folder since a token; purged),
+   `Index::replay`, `Index::blank_dead_names`, the manifest's third
+   version (the log's epoch and how far the chunks go into it, when the
+   names were last proven). Tests pass: an index dropped unsaved opens
+   again with its log replayed, as of its last proof, equal to the tree;
+   the journal gives each change below a folder with identity and kind,
+   a removal with what it was, and "too old" for a token of another
+   epoch or ahead of the log; a save that fails (its folder read-only)
+   keeps the index in memory and the manifest as it was, and what is on
+   disk opens to the refresh; a purge leaves no byte of the folder's
+   names in any file; a damaged chunk is built again, with why; a log
+   whose tail is torn or flipped ends there. **The kill test**: a
+   process editing, refreshing and saving, killed at random moments,
+   120 rounds, mid-append and mid-save: each time what it left opened
+   (all 120 loaded, none built again) and refreshed equal to the tree.
+   - Not done here: **saves run on the writer's thread**, not in the
+     background. There are no merges to make: a change rewrites its
+     chunk in memory at once, and a save writes only what is new. The
+     engine (step 5) decides when to save.
+   - A crash during a large graft (a big folder copied in) replays it a
+     folder at a time, each rewriting its chunk: correct, slow. The
+     journal keeps what its 16 MB of log hold.
 5. **Protocol 0 and the engine.**
    - The socket in `$XDG_RUNTIME_DIR/skwird/`, peer credentials
      checked: hello, coverage, sync, query, cancel, changes, exclude.

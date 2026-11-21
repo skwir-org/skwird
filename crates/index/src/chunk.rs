@@ -107,7 +107,7 @@ fn kind_of(code: u64) -> Kind {
     }
 }
 
-fn state_code(state: State) -> (u64, u64) {
+pub(crate) fn state_code(state: State) -> (u64, u64) {
     match state {
         State::Listed { again: false } => (0, 0),
         State::Listed { again: true } => (1, 0),
@@ -126,7 +126,7 @@ fn state_code(state: State) -> (u64, u64) {
     }
 }
 
-fn state_of(code: u64, errno: u64) -> Option<State> {
+pub(crate) fn state_of(code: u64, errno: u64) -> Option<State> {
     let errno = i32::try_from(errno).unwrap_or(i32::MAX);
     Some(match code {
         0 => State::Listed { again: false },

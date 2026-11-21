@@ -87,25 +87,30 @@ impl Builder {
 
     /// The names file.
     pub fn finish(self) -> Vec<u8> {
-        let count = self.list.len();
-        let total: usize = self.list.iter().map(|n| n.len()).sum();
-        let mut out = Vec::with_capacity(16 + count * 16 + total);
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(count as u64).to_le_bytes());
-        let mut end = 0u64;
-        for name in &self.list {
-            end += name.len() as u64;
-            out.extend_from_slice(&end.to_le_bytes());
-        }
-        for name in &self.list {
-            out.extend_from_slice(&mask(&lowered(name)).to_le_bytes());
-        }
-        for name in &self.list {
-            out.extend_from_slice(name);
-        }
-        out
+        segment_bytes(&self.list.iter().map(|n| &**n).collect::<Vec<_>>())
     }
+}
+
+/// The bytes of a names file of `names`, in that order, each kept as it is
+/// (two alike are two names).
+pub fn segment_bytes(names: &[&[u8]]) -> Vec<u8> {
+    let total: usize = names.iter().map(|n| n.len()).sum();
+    let mut out = Vec::with_capacity(16 + names.len() * 16 + total);
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&(names.len() as u64).to_le_bytes());
+    let mut end = 0u64;
+    for name in names {
+        end += name.len() as u64;
+        out.extend_from_slice(&end.to_le_bytes());
+    }
+    for name in names {
+        out.extend_from_slice(&mask(&lowered(name)).to_le_bytes());
+    }
+    for name in names {
+        out.extend_from_slice(name);
+    }
+    out
 }
 
 /// A names file, read in place: a run of names numbered from where the

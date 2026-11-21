@@ -10,6 +10,8 @@ pub mod block;
 pub mod build;
 pub mod chunk;
 pub mod index;
+pub mod keeper;
+pub mod log;
 pub mod map;
 pub mod matching;
 pub mod names;

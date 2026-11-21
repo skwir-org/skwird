@@ -9,9 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use skwird_crawl::{Cancel, Exclusions, Kind, Options, Outcome, Root, Time, Why, crawl_all};
+use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Time, Why, crawl_all};
 use skwird_index::store;
 use skwird_index::tree::Limits;
+use skwird_index::update::Seen;
 use skwird_index::{Index, Proof, Query, build, refresh};
 use skwird_testkit::{Scratch, reference_walk};
 
@@ -147,7 +148,18 @@ fn a_change_made_while_the_engine_was_down_is_found() {
     let dir = s.join(".cache-index");
     let saved_at = Time::now();
     let crawled_at = index.crawled_at();
-    store::save(&mut index, &dir, saved_at, crawled_at).unwrap();
+    store::save(
+        &mut index,
+        &dir,
+        &store::Mark {
+            saved_at,
+            crawled_at,
+            proven_at: saved_at,
+            epoch: 0,
+            log_seq: 0,
+        },
+    )
+    .unwrap();
     drop(index);
     s.file("a/three.txt");
     s.remove("b");
@@ -253,7 +265,9 @@ fn a_listing_cut_short_keeps_what_was_read() {
     let mut index = first_index(&root);
     let folder = index.folder_at(Path::new("folder")).unwrap();
     let before = of_index(&index);
-    let fresh = index.reread(folder, None, Outcome::NotCovered(Why::CutShort(5)));
+    let fresh = index
+        .reread(folder, None, Seen::NotCovered(Why::CutShort(5)))
+        .fresh;
     assert!(fresh.is_empty(), "{fresh:?}");
     assert_eq!(of_index(&index), before, "nothing let go of");
     assert_eq!(hole(&index, "folder"), Some(Why::CutShort(5)));
@@ -445,7 +459,19 @@ fn random_edits_never_overstate_coverage() {
             }
             if rng.below(6) == 0 {
                 let crawled_at = index.crawled_at();
-                store::save(&mut index, &dir, Time::now(), crawled_at).unwrap();
+                let now = Time::now();
+                store::save(
+                    &mut index,
+                    &dir,
+                    &store::Mark {
+                        saved_at: now,
+                        crawled_at,
+                        proven_at: now,
+                        epoch: 0,
+                        log_seq: 0,
+                    },
+                )
+                .unwrap();
                 done.push("saved and loaded".into());
                 (index, _) = store::load(&dir, limits()).unwrap();
             }

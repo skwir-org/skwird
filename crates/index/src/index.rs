@@ -364,6 +364,43 @@ impl Index {
         self.tree.chunk(loc.chunk).view().facts(loc.block as usize)
     }
 
+    /// Let go of every name that no entry and no folder holds any more:
+    /// each is kept empty, its number kept, so that no chunk changes. A
+    /// purge does this, so that a private folder's names are not kept in
+    /// the names' files; the next save writes them all again.
+    pub fn blank_dead_names(&mut self) {
+        let count = self.names.len();
+        let mut live = vec![0u64; count.div_ceil(64)];
+        let mut hold = |id: NameId| live[id as usize / 64] |= 1 << (id % 64);
+        hold(0);
+        for (_, chunk) in self.tree.chunks() {
+            let view = chunk.view();
+            for b in 0..chunk.len() {
+                hold(view.name(b));
+                for i in view.entries(b) {
+                    hold(view.item_name(i));
+                }
+            }
+        }
+        let names: Vec<&[u8]> = (0..count as NameId)
+            .map(|id| {
+                if live[id as usize / 64] & (1 << (id % 64)) == 0 {
+                    &[][..]
+                } else {
+                    self.names.get(id)
+                }
+            })
+            .collect();
+        let bytes = crate::names::segment_bytes(&names);
+        let segment = crate::names::Segment::from_bytes(
+            crate::chunk::Bytes::Owned(bytes.into_boxed_slice()),
+            true,
+            None,
+        )
+        .expect("names just written read back");
+        self.names = Names::new(segment);
+    }
+
     /// What the index holds, and its bytes.
     pub fn sizes(&self) -> Sizes {
         let mut s = Sizes {

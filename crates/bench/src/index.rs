@@ -136,7 +136,14 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
     });
     let start = Instant::now();
     let now = Time::now();
-    store::save(&mut index, &dir, now, now).map_err(|e| format!("cannot save: {e}"))?;
+    let mark = store::Mark {
+        saved_at: now,
+        crawled_at: now,
+        proven_at: now,
+        epoch: 0,
+        log_seq: 0,
+    };
+    store::save(&mut index, &dir, &mark).map_err(|e| format!("cannot save: {e}"))?;
     println!("save: {}", time(start.elapsed()));
     drop(index);
     let start = Instant::now();

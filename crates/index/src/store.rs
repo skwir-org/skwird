@@ -16,8 +16,10 @@
 //!
 //! The manifest, little-endian: `SKWM`, its version, the chunks' and the
 //! names' layout versions (4 bytes each); the save's number (8); when it
-//! was saved, and when the index was last crawled whole (8 and 4 each);
-//! the number the next names segment takes (8); the number of names
+//! was saved, when the index was last crawled whole, and when its names
+//! were last proven (8 and 4 each); the log's epoch, and the number of
+//! the last record the chunks hold (8 each); the number the next names
+//! segment takes (8); the number of names
 //! segments (4) and each one's number (8 each); the number of chunks (4)
 //! and each one's number (4 each).
 
@@ -36,7 +38,7 @@ use crate::names::{self, Names, Segment};
 use crate::tree::{ChunkId, Limits, Tree};
 
 const MAGIC: &[u8; 4] = b"SKWM";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MANIFEST: &str = "manifest";
 
 /// Why an index could not be read back.
@@ -67,19 +69,25 @@ impl std::error::Error for LoadError {}
 /// What a manifest says.
 struct Manifest {
     generation: u64,
-    saved_at: Time,
-    crawled_at: Time,
+    mark: Mark,
     next_segment: u64,
     segments: Vec<u64>,
     chunks: Vec<ChunkId>,
 }
 
-/// What an index read back says of itself.
+/// What a save says of the index, and what it reads back as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Saved {
+pub struct Mark {
     pub saved_at: Time,
     /// When it was last crawled whole: its attributes are as of then.
     pub crawled_at: Time,
+    /// When its names were last proven: what it was saved with is as of
+    /// then.
+    pub proven_at: Time,
+    /// The log's epoch, and the number of the last record of it the chunks
+    /// hold: the records after it are to be replayed.
+    pub epoch: u64,
+    pub log_seq: u64,
 }
 
 fn chunk_file(id: ChunkId) -> String {
@@ -137,8 +145,13 @@ fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
     }
     let mut parse = || -> Option<Manifest> {
         let generation = r.u64()?;
-        let saved_at = r.time()?;
-        let crawled_at = r.time()?;
+        let mark = Mark {
+            saved_at: r.time()?,
+            crawled_at: r.time()?,
+            proven_at: r.time()?,
+            epoch: r.u64()?,
+            log_seq: r.u64()?,
+        };
         let next_segment = r.u64()?;
         let count = r.u32()? as usize;
         let segments = (0..count).map(|_| r.u64()).collect::<Option<Vec<_>>>()?;
@@ -146,8 +159,7 @@ fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
         let chunks = (0..count).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
         (r.at == bytes.len() && !segments.is_empty()).then_some(Manifest {
             generation,
-            saved_at,
-            crawled_at,
+            mark,
             next_segment,
             segments,
             chunks,
@@ -189,7 +201,7 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// The index's folder, made its user's alone if it is not there.
-fn make_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn make_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -199,18 +211,12 @@ fn make_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Save `index` in `dir`, as of `saved_at`, its attributes as of
-/// `crawled_at`: what is new in it written (chunks in memory, names
+/// Save `index` in `dir`, with what `mark` says of it: what is new in it written (chunks in memory, names
 /// given since), the manifest switched, what no manifest names removed.
 /// What was written is mapped back in place of what was in memory, so its
 /// pages are the system's to drop. A save that fails leaves the index as
 /// it was, and the last manifest as it was.
-pub fn save(
-    index: &mut Index,
-    dir: &Path,
-    saved_at: Time,
-    crawled_at: Time,
-) -> std::io::Result<()> {
+pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
     make_dir(dir)?;
     let previous = read_manifest(dir).ok();
     let generation = previous.as_ref().map_or(0, |m| m.generation + 1);
@@ -248,10 +254,12 @@ pub fn save(
         m.extend_from_slice(&v.to_le_bytes());
     }
     m.extend_from_slice(&generation.to_le_bytes());
-    for t in [saved_at, crawled_at] {
+    for t in [mark.saved_at, mark.crawled_at, mark.proven_at] {
         m.extend_from_slice(&t.sec.to_le_bytes());
         m.extend_from_slice(&t.nsec.to_le_bytes());
     }
+    m.extend_from_slice(&mark.epoch.to_le_bytes());
+    m.extend_from_slice(&mark.log_seq.to_le_bytes());
     m.extend_from_slice(&next_segment.to_le_bytes());
     m.extend_from_slice(&(segments.len() as u32).to_le_bytes());
     for s in &segments {
@@ -324,7 +332,7 @@ fn remove_unnamed(dir: &Path, segments: &[u64], ids: &[ChunkId]) {
 /// The index saved in `dir`, its files mapped, and what it says of
 /// itself. Every file is checked as it is read; any that does not read
 /// as its layout refuses the whole.
-pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Saved), LoadError> {
+pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Mark), LoadError> {
     let manifest = read_manifest(dir)?;
     let segments = manifest
         .segments
@@ -347,13 +355,7 @@ pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Saved), LoadError> {
         .collect::<Result<Vec<_>, LoadError>>()?;
     let tree = Tree::from_chunks(chunks, limits).map_err(|_| LoadError::Damaged)?;
     check_entries(&tree, &names)?;
-    Ok((
-        Index::new(tree, names),
-        Saved {
-            saved_at: manifest.saved_at,
-            crawled_at: manifest.crawled_at,
-        },
-    ))
+    Ok((Index::new(tree, names), manifest.mark))
 }
 
 fn check_entries(tree: &Tree, names: &Names) -> Result<(), LoadError> {
