@@ -4,13 +4,16 @@ Each phase is useful alone, and ends with what was measured and what is
 left, honestly. The design is `docs/DESIGN.md`; a phase that changes a
 decision changes it there.
 
-## Where it stands (2026-11-21)
+## Where it stands (2026-11-22)
 
 Phase 0 is done. Phase 1 is done, its eight steps: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
 the user's home and given budgets (DESIGN 10), the three of memory
 (after a first build, at its peak, after a sync) met at the second and
-third measurements. The
+third measurements. Phase 2 is done, its seven steps: the engine as a
+user service, folders its clients register watched and answered live,
+a sync of them a barrier, the mount table followed, within budgets of
+its own (DESIGN 10). The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -620,7 +623,7 @@ Kept alike in both: the four coverage words; name matching (DESIGN 7),
 so a change to one is a change to the other; and how a network mount
 is told (DESIGN 2).
 
-## Phase 2: Linux, a user service
+## Phase 2: Linux, a user service (done)
 
 The engine as a systemd user unit, outliving a client's run (phase 1's
 accepted limit), with inotify watching the folders clients register.
@@ -986,8 +989,16 @@ committed once the gate holds.
    A hasher faster than the standard one was tried for what is kept of
    a folder, and changed nothing: removed.
 
-   Left: the user's fourth run, `tools/measure.sh --no-root --only
-   live`, then the budgets.
+   **Done on 2026-11-22.** The user's fourth run (at `7d2232f`, on a
+   machine at a load of 20 to 35, their home now 6.7 million entries in
+   798,530 folders): 0.53 s of processor time in 30 s watching the
+   share, 1.8% of a core, under the duty cycle's 2%. The other figures
+   were the load's, 2 to 7 times the quiet runs': the build 136 s, the
+   install 24 s, a change answered in 411 ms at the median, a sync of a
+   live folder in 54 ms. The budgets (DESIGN 10) take latency, install
+   and memory from the two quiet runs before, which the duty cycle does
+   not change (it holds only folders whose reads are costly), and
+   processor time from this one: all met.
 
 **Tests of live coverage:**
 - an overflow lowers coverage at once, and the check after it finds

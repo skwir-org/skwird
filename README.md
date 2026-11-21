@@ -15,13 +15,16 @@ It runs in one of three ways, with the same engine and protocol:
 - **on demand**, started by its first client and ending a minute after
   its last.
 
-**Status:** phase 1 built and measured: a user's engine on Linux,
-started by its first client (`skwird serve`), answering protocol 0, its
-index checked when a client asks. On a home of 6.9 million entries it
-answers 0.6 s after a start, holds 144 to 178 MB idle, takes no
-processor time while idle, and builds its index in under 9 s with the
-caches warm, at most 598 MB. Every budget it was given is met (DESIGN
-10).
+**Status:** phases 1 and 2 built and measured: a user's engine on
+Linux, started by its first client or run for the session as a user
+service, answering protocol 0. Its index is checked when a client
+asks, and the folders its clients register are watched and answered
+live. On a home of 6.9 million entries it answers 0.6 s after a start,
+holds 144 to 178 MB idle, and builds its index in under 9 s with the
+caches warm, at most 598 MB. A change in a live folder is answered in
+about 150 ms, and watching as much of the home as its share of watches
+allows costs at most 2% of a core. Every budget it was given is met
+(DESIGN 10).
 Read `docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the
 phases.
 

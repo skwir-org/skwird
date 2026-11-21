@@ -665,6 +665,30 @@ threshold rises each time such a mapping is freed, and the next large
 buffers come from an arena that keeps them. What is free is given back
 after a first build and after each refresh (`malloc_trim`).
 
+**Budgets for live folders** (phase 2), set on 2026-11-22 from the live
+step of `tools/measure.sh` on the user's home: the engine watching as
+much of it as its share allows (131,072 folders, the most a user's
+engine holds), dot folders first, caches and profiles among them.
+Latency, install and memory come from two runs on a quiet machine (at
+`ba3ed1e` and `2e7ad76`); processor time from the last (at `7d2232f`),
+at a load of 20 to 35, since the duty cycle (8) counts the engine's
+own time, whatever the load.
+
+| What | Budget | Measured | |
+|---|---|---|---|
+| A change in a watched folder to its answer, no sync | 0.25 s at the median, 1 s at most | 136 to 158 ms, 161 to 179 ms at most | met |
+| A sync of a live folder | 0.1 s | 54 ms, loaded | met |
+| Watching, from a registration | 5 s per 100,000 folders | 3.4 to 5.6 s for 131,072 | met |
+| Processor time watching, no client asking | 2% of a core, whatever the folders do; none measurable where nothing changes | 0.53 s in 30 s (1.8%); 0.00 s on a synthetic tree at rest | met |
+| Memory watching, idle | at rest and 1 KB a watch (312 MB here) | 108 to 242 MB with 131,072 watches; at rest, 181 MB | met |
+
+The kernel keeps about 1 KB of its own memory for each watch, not
+counted in the engine's: 131 MB for the share. Just after an install,
+the engine held up to 353 MB: the index's pages the install read, the
+page cache's to drop. A folder whose reads would take more than its
+share of a core lags by more than a second, live still; a sync applies
+it at once.
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`
