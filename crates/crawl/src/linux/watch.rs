@@ -45,6 +45,9 @@ pub enum Heard {
     Gone(i32),
     /// Events were dropped: what was heard proves nothing until a check.
     Overflow,
+    /// The cookie of this number was made ([`Watcher::watch_cookies`]):
+    /// everything queued before it has been read.
+    Cookie(u64),
 }
 
 /// What a folder is watched for: every change to what it holds, and to
@@ -70,6 +73,8 @@ struct State {
     budget: usize,
     /// The descriptors watching now.
     watching: HashSet<i32>,
+    /// The descriptor of the folder cookies are made in.
+    cookies: Option<i32>,
 }
 
 /// An inotify instance and what it watches.
@@ -101,6 +106,7 @@ impl Watcher {
                 scopes: Vec::new(),
                 budget,
                 watching: HashSet::new(),
+                cookies: None,
             }),
             buffer: Mutex::new(vec![MaybeUninit::uninit(); 64 << 10].into_boxed_slice()),
         })
@@ -169,6 +175,28 @@ impl Watcher {
         }
     }
 
+    /// Watch `dir`, a folder of the caller's own, for cookies: a file
+    /// named `cookie-N` made in it is heard as [`Heard::Cookie`] in its
+    /// turn, after every event queued before it (the sync barrier, DESIGN
+    /// 2). Within no subtree, and outside the budget.
+    pub fn watch_cookies(&self, dir: &Path) -> std::io::Result<()> {
+        let fd = rustix::fs::open(
+            dir,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
+        let handle = format!("/proc/self/fd/{}", rustix::fd::AsRawFd::as_raw_fd(&fd));
+        let wd = inotify::add_watch(
+            &self.fd,
+            handle.as_str(),
+            WatchFlags::CREATE | WatchFlags::ONLYDIR,
+        )?;
+        self.lock().cookies = Some(wd);
+        Ok(())
+    }
+
     /// Stop watching by this descriptor.
     pub fn unwatch(&self, wd: i32) {
         if self.lock().watching.remove(&wd) {
@@ -185,6 +213,7 @@ impl Watcher {
             .buffer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cookies = self.lock().cookies;
         let mut reader = inotify::Reader::new(&self.fd, &mut buffer);
         loop {
             let event = match reader.next() {
@@ -194,7 +223,14 @@ impl Watcher {
                 Err(e) => return Err(e.into()),
             };
             let (wd, flags) = (event.wd(), event.events());
-            if flags.contains(ReadFlags::QUEUE_OVERFLOW) {
+            if Some(wd) == cookies {
+                // A cookie made: every event before it has been read.
+                if flags.contains(ReadFlags::CREATE)
+                    && let Some(n) = event.file_name().and_then(cookie_number)
+                {
+                    heard.push(Heard::Cookie(n));
+                }
+            } else if flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                 heard.push(Heard::Overflow);
             } else if flags.contains(ReadFlags::IGNORED) {
                 self.lock().watching.remove(&wd);
@@ -210,6 +246,11 @@ impl Watcher {
             }
         }
     }
+}
+
+/// The number of a cookie's file, `cookie-N`.
+fn cookie_number(name: &std::ffi::CStr) -> Option<u64> {
+    name.to_str().ok()?.strip_prefix("cookie-")?.parse().ok()
 }
 
 #[cfg(test)]

@@ -689,8 +689,12 @@ after a first build and after each refresh (`malloc_trim`).
 
 ## Open questions
 
-1. **Cookies:** where they go on each filesystem, one per notification
-   queue (fanotify has one queue for all its marks).
+1. **Cookies:** answered for inotify on 2026-11-21 (phase 2, step 4). A
+   user's engine has one inotify instance, so one queue: its cookies go in
+   a folder of its own in its runtime folder, whatever filesystem the
+   folders it watches are on. Open for fanotify, whose one queue holds
+   every mark's events, and for the change journal. FSEvents flushes
+   instead (`FSEventStreamFlushSync`).
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
    - which folders a user's engine watches on Linux: answered on

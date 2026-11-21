@@ -397,7 +397,7 @@ fn listen(
                 Heard::Gone(wd) => {
                     model.by_wd.remove(&wd);
                 }
-                Heard::Moved(_) => {}
+                Heard::Moved(_) | Heard::Cookie(_) => {}
                 Heard::Overflow => listened.overflows += 1,
             }
         }

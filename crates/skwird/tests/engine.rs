@@ -644,3 +644,54 @@ fn watched_folders_are_kept_across_a_restart() {
     assert_eq!(c.watch(&[], &[&docs]).unwrap(), Vec::<PathBuf>::new());
     assert!(!is_live(&mut c, &docs));
 }
+
+/// A sync of a live folder answers with a change made just before it: the
+/// barrier's cookie, heard in its turn, says every event before it was
+/// read, and what was gathered is applied before the answer.
+#[test]
+fn a_sync_of_a_live_folder_answers_with_a_change_made_just_before_it() {
+    let mut env = Env::new("engine-barrier");
+    tree(&env);
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    for round in 0..5 {
+        let made = env
+            .s
+            .file(docs.join(format!("d07/just before {round}.txt")));
+        let coverage = c.sync(&docs).unwrap();
+        assert!(matches!(coverage.names, Proof::Live(_)), "{coverage:?}");
+        assert!(
+            answered(&mut c, &named(&home, &format!("just before {round}"))).contains(&made),
+            "round {round}: the sync answered before the change"
+        );
+    }
+}
+
+/// The barrier proves the live folder alone: it runs no check of the
+/// root, so a change made in a folder nothing watches waits for a sync of
+/// that folder, which checks.
+#[test]
+fn a_sync_of_a_live_folder_checks_nothing_else() {
+    let mut env = Env::new("engine-barrier-only");
+    tree(&env);
+    // Past the check's tick: a folder read just after it changed is read
+    // again at every check, which would find what this test hides.
+    std::thread::sleep(Duration::from_millis(2200));
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    let unwatched = env.s.file(home.join("elsewhere/unseen.txt"));
+    c.sync(&docs).unwrap();
+    assert!(
+        !answered(&mut c, &named(&home, "unseen")).contains(&unwatched),
+        "the barrier checked the root"
+    );
+    let coverage = c.sync(&home).unwrap();
+    assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
+    assert!(answered(&mut c, &named(&home, "unseen")).contains(&unwatched));
+}

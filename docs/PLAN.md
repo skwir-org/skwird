@@ -810,6 +810,28 @@ committed once the gate holds.
    answers once the cookie is heard and what came before applied: live,
    up to a time after the sync was asked. Elsewhere, the check, as in
    phase 1.
+
+   **Done on 2026-11-21.**
+   - The watcher watches a folder of the engine's own for cookies
+     (`watch_cookies`, outside any subtree and the budget). A file named
+     `cookie-N` made there is heard as `Heard::Cookie(N)`, in its turn in
+     the queue.
+   - The engine makes that folder in its runtime folder
+     (`$XDG_RUNTIME_DIR/skwird/cookies`, its user's alone), and lets go
+     of cookies a dead engine left.
+   - A sync whose every path asked is live makes a cookie, and waits for
+     it without blocking the writer: the cookie comes through the same
+     channel as every event. Heard, the root's gatherings are applied
+     and the sync answered. Only the current watcher's cookie counts.
+   - A cookie not heard within 2 s (its event dropped, its folder gone)
+     falls back to the check, as does a sync of a folder not live.
+   - Tests pass:
+     - five syncs, each just after a file is made in a live folder: each
+       answers live, the file in its answer. With the gatherings not
+       applied on a cookie, it failed at once;
+     - a sync of a live folder checks nothing else: a file made just
+       before in a folder nothing watches is not answered, and is after
+       a sync of the home, which checks.
 5. **The mount table followed,** as skwir follows it (`POLLPRI` on
    `/proc/self/mountinfo`): a mount made or taken below a root lowers
    coverage at once, for its subtree.

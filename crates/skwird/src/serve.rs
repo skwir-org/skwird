@@ -319,11 +319,19 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
 }
 
 fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath) -> Answer {
-    let Some((i, _)) = shared.locate(&root.to_path()) else {
+    let Some((i, rel)) = shared.locate(&root.to_path()) else {
         return Answer::Coverage(outside());
     };
     let (reply, done) = channel();
-    if commands.send(Command::Sync { root: i, reply }).is_err() || done.recv().is_err() {
+    if commands
+        .send(Command::Sync {
+            root: i,
+            rel,
+            reply,
+        })
+        .is_err()
+        || done.recv().is_err()
+    {
         return failure("internal", "the engine is going");
     }
     match coverage(shared, root) {

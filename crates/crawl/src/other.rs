@@ -168,6 +168,7 @@ pub enum Heard {
     Moved(i32),
     Gone(i32),
     Overflow,
+    Cookie(u64),
 }
 
 /// A watcher, which no system but Linux makes yet (rule 7): [`Watcher::new`]
@@ -201,6 +202,10 @@ impl Watcher {
     }
 
     pub fn wants(&self, _: &Path) -> bool {
+        match self.never {}
+    }
+
+    pub fn watch_cookies(&self, _: &Path) -> std::io::Result<()> {
         match self.never {}
     }
 

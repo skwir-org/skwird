@@ -98,6 +98,8 @@ pub enum Command {
     /// published.
     Sync {
         root: usize,
+        /// The path asked, below the root: live, a barrier serves it.
+        rel: PathBuf,
         reply: Sender<()>,
     },
     Changes {
@@ -246,6 +248,9 @@ pub fn writer(
         w.set_scopes(resolved(&kept_live));
     }
     let cancel = Cancel::default();
+    let cookies = watcher
+        .as_ref()
+        .and_then(|w| cookie_folder(&config.dirs, w));
     let (keepers, built) = open_all(config, shared, &registrations, &opts, &cancel);
     if built {
         // What a first build freed, given back now that it is saved.
@@ -260,13 +265,16 @@ pub fn writer(
         kept_live,
         watcher,
         gather: Gather::default(),
+        cookies,
+        next_cookie: 0,
+        waiting: Vec::new(),
         pending: Vec::new(),
     };
     w.apply_scopes();
     loop {
         let command = match w.pending.pop() {
             Some(c) => c,
-            None => match w.gather.deadline() {
+            None => match w.deadline() {
                 None => match commands.recv() {
                     Ok(c) => c,
                     Err(_) => break,
@@ -378,6 +386,11 @@ struct Writing<'a> {
     watcher: Option<Arc<Watcher>>,
     /// What was heard and not applied yet, and what is due.
     gather: Gather,
+    /// The folder cookies are made in, once watched.
+    cookies: Option<PathBuf>,
+    next_cookie: u64,
+    /// Syncs waiting for their cookie.
+    waiting: Vec<Waiting>,
     /// Commands taken while gathering syncs, to answer next.
     pending: Vec<Command>,
 }
@@ -387,28 +400,36 @@ impl Writing<'_> {
     fn answer(&mut self, commands: &Receiver<Command>, command: Command) -> bool {
         match command {
             Command::Stop => return false,
-            Command::Sync { root, reply } => {
-                // Every sync asked of this root meanwhile is served by the
-                // same refresh; others wait their turn.
+            Command::Sync { root, rel, reply } => {
+                // Every sync asked of this root meanwhile is served alike;
+                // others wait their turn.
                 let mut replies = vec![reply];
+                let mut live = self.is_live(root, &rel);
                 while let Ok(next) = commands.try_recv() {
                     match next {
-                        Command::Sync { root: r, reply } if r == root => replies.push(reply),
+                        Command::Sync {
+                            root: r,
+                            rel,
+                            reply,
+                        } if r == root => {
+                            live &= self.is_live(r, &rel);
+                            replies.push(reply);
+                        }
                         other => self.pending.insert(0, other),
                     }
                 }
-                // What was heard below it, applied first.
-                let heard = self.gather.take(root);
-                self.apply_heard(root, &heard);
-                // The user's exclusions read again first: a line added to
-                // their file holds from the next sync.
-                self.hold_to_exclusions();
-                if let Some(keeper) = self.keepers[root].as_mut() {
-                    refresh(keeper, root, self.shared, &self.cancel);
-                }
-                self.gather.checked(Instant::now());
-                for reply in replies {
-                    let _ = reply.send(());
+                // Live, a barrier serves: a cookie heard in its turn says
+                // every change before it was heard (DESIGN 2). Otherwise,
+                // the check.
+                if live && let Some(cookie) = self.make_cookie() {
+                    self.waiting.push(Waiting {
+                        cookie,
+                        root,
+                        replies,
+                        until: Instant::now() + BARRIER,
+                    });
+                } else {
+                    self.check_now(root, replies);
                 }
             }
             Command::Changes {
@@ -454,9 +475,8 @@ impl Writing<'_> {
     /// check due once the queue is quiet.
     fn heard(&mut self, generation: u64, heard: Vec<Heard>) {
         let now = Instant::now();
-        // One instance a run so far: an older one's would be applied, but
-        // would bring nothing back (DESIGN 2).
-        let _ = generation;
+        // An older watcher's changes are applied all the same (a read is
+        // never wrong), but its cookies prove nothing (DESIGN 2).
         let mut lowered = BTreeSet::new();
         for h in heard {
             match h {
@@ -478,6 +498,16 @@ impl Writing<'_> {
                         if matches!(h, Heard::Gone(_)) {
                             keeper.forget(wd);
                         }
+                    }
+                }
+                Heard::Cookie(n) => {
+                    // Only the current watcher's cookie proves its queue read.
+                    if self
+                        .watcher
+                        .as_ref()
+                        .is_some_and(|w| w.generation() == generation)
+                    {
+                        self.cookie_heard(n);
                     }
                 }
                 Heard::Overflow => {
@@ -503,6 +533,15 @@ impl Writing<'_> {
     /// overflow, a save.
     fn on_time(&mut self) {
         let now = Instant::now();
+        // A cookie not heard in time: the barrier failed, the check serves.
+        let (late, waiting): (Vec<Waiting>, Vec<Waiting>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|w| now >= w.until);
+        self.waiting = waiting;
+        for w in late {
+            self.forget_cookie(w.cookie);
+            self.check_now(w.root, w.replies);
+        }
         for (root, folders) in self.gather.due(now) {
             self.apply_heard(root, &folders);
         }
@@ -688,4 +727,108 @@ fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) {
     // waits again: an engine idle after a sync holds what one at rest
     // holds (DESIGN 10).
     crate::memory::give_back();
+}
+
+/// How long a sync waits for its cookie before the check serves it.
+const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A sync of a live folder, waiting for its cookie to be heard.
+struct Waiting {
+    cookie: u64,
+    root: usize,
+    replies: Vec<Sender<()>>,
+    until: Instant,
+}
+
+/// The folder the engine makes its cookies in, in its runtime folder,
+/// watched by `watcher` (open question 1): the same queue as every
+/// folder it watches. Cookies left by an engine before are let go of.
+fn cookie_folder(dirs: &Dirs, watcher: &Watcher) -> Option<PathBuf> {
+    let dir = dirs.runtime.join("cookies");
+    let made = crate::dirs::make_private(&dir).and_then(|()| {
+        for left in std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            let _ = std::fs::remove_file(left.path());
+        }
+        watcher.watch_cookies(&dir).map_err(|e| e.to_string())
+    });
+    match made {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            log(&format!("no cookies, so a sync checks: {e}"));
+            None
+        }
+    }
+}
+
+impl Writing<'_> {
+    /// When something is due next: a gathering, a check, a save, or a
+    /// sync whose cookie is late.
+    fn deadline(&self) -> Option<Instant> {
+        let late = self.waiting.iter().map(|w| w.until).min();
+        [self.gather.deadline(), late].into_iter().flatten().min()
+    }
+
+    /// Whether answers at `rel` below root `root` are live.
+    fn is_live(&self, root: usize, rel: &Path) -> bool {
+        self.keepers[root]
+            .as_ref()
+            .is_some_and(|k| k.index().live_since(rel).is_some())
+    }
+
+    /// A cookie made, its number given; none without a cookie folder.
+    fn make_cookie(&mut self) -> Option<u64> {
+        let dir = self.cookies.as_ref()?;
+        let n = self.next_cookie;
+        self.next_cookie += 1;
+        match std::fs::File::create(dir.join(format!("cookie-{n}"))) {
+            Ok(_) => Some(n),
+            Err(e) => {
+                log(&format!("a cookie cannot be made, so a sync checks: {e}"));
+                None
+            }
+        }
+    }
+
+    fn forget_cookie(&self, n: u64) {
+        if let Some(dir) = &self.cookies {
+            let _ = std::fs::remove_file(dir.join(format!("cookie-{n}")));
+        }
+    }
+
+    /// The cookie numbered `n` heard: every event queued before it has
+    /// been read and gathered. Each sync waiting for it or one before it
+    /// is served: its root's gatherings applied, its answer sent.
+    fn cookie_heard(&mut self, n: u64) {
+        let (served, waiting): (Vec<Waiting>, Vec<Waiting>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|w| w.cookie <= n);
+        self.waiting = waiting;
+        for w in served {
+            self.forget_cookie(w.cookie);
+            let heard = self.gather.take(w.root);
+            self.apply_heard(w.root, &heard);
+            for reply in w.replies {
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    /// A sync served by the check: what was heard applied first, the
+    /// user's exclusions read again, every folder of the root compared.
+    fn check_now(&mut self, root: usize, replies: Vec<Sender<()>>) {
+        let heard = self.gather.take(root);
+        self.apply_heard(root, &heard);
+        // A line added to the user's file holds from the next sync.
+        self.hold_to_exclusions();
+        if let Some(keeper) = self.keepers[root].as_mut() {
+            refresh(keeper, root, self.shared, &self.cancel);
+        }
+        self.gather.checked(Instant::now());
+        for reply in replies {
+            let _ = reply.send(());
+        }
+    }
 }

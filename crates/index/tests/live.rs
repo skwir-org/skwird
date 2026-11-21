@@ -62,7 +62,7 @@ fn apply(k: &mut Keeper, w: &Watcher) -> bool {
             match h {
                 Heard::Changed(wd) => folders.extend(k.watched(wd)),
                 Heard::Overflow => overflowed = true,
-                Heard::Moved(_) | Heard::Gone(_) => {}
+                Heard::Moved(_) | Heard::Gone(_) | Heard::Cookie(_) => {}
             }
         }
         if overflowed {
