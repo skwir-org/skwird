@@ -883,6 +883,34 @@ committed once the gate holds.
    folder, idle with them, the time from a change to its answer).
    Budgets added to DESIGN 10.
 
+   **Ready on 2026-11-21, waiting for the user.** `tools/measure.sh
+   --only live` (in every full run too):
+   - **The time from a change to its answer:** a file made twenty times in
+     a probe folder of the measurement's own cache, which the engine
+     watches, each time until `skwird find` answers with it.
+   - **The cost of the folder measured, watched whole** as far as the
+     engine's share goes, the most watches a user's engine holds: the
+     time it takes, the watches held (the kernel's memory, about 1 KB
+     each), the memory then, a sync of it, and 30 idle seconds once past
+     the save that follows what was heard.
+
+   Its trials, on a synthetic tree of 9,650 folders, found two bugs,
+   both fixed with tests that fail without the fix:
+   - **A folder made after the index last read its parent, then
+     registered,** was installed with nothing in it to watch, and claimed
+     live. Now the nearest folder above it held is read first, so that it
+     is crawled and watched; one that does not exist is not live, and
+     each refresh tries it again.
+   - **The engine's own folders, within the folder it watched:** it heard
+     its own saves and log, and read itself again without end, a tenth of
+     a core idle. They are now never indexed (DESIGN 5).
+
+   Then, on that tree:
+   - a change answered in 113 ms at the median, 121 ms at most;
+   - 9,649 folders watched in 0.12 s, the engine at 19 MB;
+   - a sync of them, live, in 0.02 s;
+   - 30 s idle with them: no processor time.
+
 **Tests of live coverage:**
 - an overflow lowers coverage at once, and the check after it finds
   what the dropped events held;

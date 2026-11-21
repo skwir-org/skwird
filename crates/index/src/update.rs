@@ -552,12 +552,27 @@ pub fn install(
     scope: &Path,
 ) -> Result<Refreshed, Error> {
     root.reread_mounts().map_err(Error::Root)?;
+    let mut done = Refreshed::default();
+    // A folder made since its parent was last read is not in the index:
+    // the nearest folder above it held is read again first, so that it is
+    // crawled, and watched, before it is installed.
+    if index.folder_at(scope).is_none() {
+        let mut above = scope.to_path_buf();
+        let held = loop {
+            if !above.pop() {
+                break index.root();
+            }
+            if let Some(folder) = index.folder_at(&above) {
+                break Some(folder);
+            }
+        };
+        if let Some(folder) = held {
+            done = reread_folders(index, root, opts, cancel, &[folder])?;
+        }
+    }
     let (ids, stored) = index.stored(|rel| rel.starts_with(scope));
     let (checked, watches) = check_watched(root, &stored, opts, cancel)?;
-    let mut done = Refreshed {
-        checked: stored.len(),
-        ..Refreshed::default()
-    };
+    done.checked += stored.len();
     done.watches.extend(
         ids.iter()
             .copied()

@@ -833,3 +833,57 @@ fn an_engine_answers_on_the_socket_a_service_manager_passes() {
     });
     assert!(socket.exists(), "the service manager's socket was removed");
 }
+
+/// Processor time a process has taken so far, in clock ticks.
+fn ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // Past the name, which may hold spaces: user time, then system time.
+    let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+    fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+}
+
+/// An engine whose own cache and state are within the folder it watches,
+/// as a user's are within their home, stays idle: its own folders are
+/// never indexed, so it never hears its own saves and log, and reads
+/// itself again without end. Once it did, a tenth of a core.
+#[test]
+fn an_engine_watching_its_own_folders_stays_idle() {
+    let mut env = Env::new("engine-own-folders");
+    tree(&env);
+    let home = env.home();
+    let cache = home.join(".cache");
+    let state = home.join(".local/state");
+    let engine = env.engine_with(
+        30,
+        &[
+            ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ],
+    );
+    let mut c = env.client("a test");
+    c.watch(&[&home], &[]).unwrap();
+    assert!(is_live(&mut c, &home));
+    // A change heard and saved, as a busy day's are.
+    env.s.file(home.join("docs/d01/made.txt"));
+    c.sync(&home).unwrap();
+    drop(c);
+    // Past the save that follows what was heard (10 s), then idle.
+    std::thread::sleep(Duration::from_secs(11));
+    let pid = env.engines[engine].id();
+    let before = ticks(pid);
+    std::thread::sleep(Duration::from_secs(3));
+    let taken = ticks(pid) - before;
+    assert!(
+        taken <= 2,
+        "{taken} ticks of processor time in 3 idle seconds"
+    );
+    let mut c = env.client("a test");
+    assert!(answered(&mut c, &named(&home, "made.txt")).contains(&home.join("docs/d01/made.txt")));
+    // Its name in its parent's listing, as any excluded folder's, but
+    // nothing of what it holds.
+    let own: Vec<PathBuf> = answered(&mut c, &everything(&cache))
+        .into_iter()
+        .filter(|p| p.starts_with(cache.join("skwird")) && *p != cache.join("skwird"))
+        .collect();
+    assert!(own.is_empty(), "the engine's own folders indexed: {own:?}");
+}

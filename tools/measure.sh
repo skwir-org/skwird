@@ -3,7 +3,7 @@
 # 6) on one folder, your home by default, kept in one file you can share:
 # it holds counts, sizes and times, never a name or a path.
 #
-#   tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine] [FOLDER]
+#   tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine|live] [FOLDER]
 #
 # It asks for your password once (sudo), to drop the caches before each
 # cold pass (the machine is slower for a while after) and to try
@@ -12,11 +12,14 @@
 # read-only and attached nowhere, for the seconds it listens. --no-root
 # skips both: warm passes only, no fanotify. --only runs one step. The
 # index and the engine steps build skwird's index of the folder in a
-# folder of their own in your cache, and remove it once measured. It
+# folder of their own in your cache, and remove it once measured. The
+# live step runs an engine keeping folders live (phase 2): the time from
+# a change to its answer, in a folder of its own in your cache, then the
+# folder itself watched as far as the engine's share of watches goes. It
 # takes a few minutes; an idle machine gives the fairest numbers.
 set -euo pipefail
 
-usage='tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine] [FOLDER]'
+usage='tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine|live] [FOLDER]'
 use_root=1
 only=
 folder=$HOME
@@ -25,9 +28,9 @@ while [ $# -gt 0 ]; do
     --no-root) use_root=0 ;;
     --only)
         case ${2:-} in
-        walk | check | fanotify | index | engine) only=$2 ;;
+        walk | check | fanotify | index | engine | live) only=$2 ;;
         *)
-            echo "--only takes walk, check, fanotify, index or engine ($usage)" >&2
+            echo "--only takes walk, check, fanotify, index, engine or live ($usage)" >&2
             exit 2
             ;;
         esac
@@ -191,6 +194,85 @@ measure_engine() {
     rm -rf "$engine_dir"
 }
 
+# Milliseconds since a time `now` gave.
+since_ms() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%d", (b - a) * 1000 }'; }
+
+# The watches a process holds, from its inotify descriptors' fdinfo.
+watches() {
+    local n=0 fd
+    for fd in /proc/"$1"/fd/*; do
+        if [ "$(readlink "$fd" 2>/dev/null)" = "anon_inode:inotify" ]; then
+            n=$((n + $(grep -c '^inotify wd:' "/proc/$1/fdinfo/${fd##*/}" 2>/dev/null || echo 0)))
+        fi
+    done
+    echo "$n"
+}
+
+# The engine with folders kept live (phase 2): the time from a change in
+# a small watched folder to its answer, then the folder measured itself
+# watched, as far as the engine's share of watches goes (the most a
+# user's engine holds), and what that costs.
+measure_live() {
+    rm -rf "$engine_dir"
+    mkdir -p "$engine_dir/run" "$engine_dir/cache" "$engine_dir/state"
+    local start pid before
+    serve_engine
+    pid=$engine_pid
+    if ! ready; then
+        echo "(the engine never answered)"
+        kill "$pid" 2>/dev/null || true
+        return 1
+    fi
+    local probe=$cache/live-probe
+    case $probe in
+    "$root"/*)
+        rm -rf "$probe"
+        mkdir -p "$probe"
+        skw watch "$probe" >/dev/null
+        local times=() i t0
+        for i in $(seq 1 20); do
+            t0=$(now)
+            : >"$probe/p$i"
+            local deadline=$((SECONDS + 10))
+            until skw find "p$i" --in "$probe" 2>/dev/null | grep -q .; do
+                if [ $SECONDS -ge $deadline ]; then
+                    echo "(a change was not answered within 10 s)"
+                    break 2
+                fi
+                sleep 0.005
+            done
+            times+=("$(since_ms "$t0")")
+        done
+        printf '%s\n' "${times[@]}" | sort -n | awk '{ a[NR] = $1 }
+            END { printf "a change to its answer, live (20 files made): median %d ms, most %d ms\n", a[int((NR + 1) / 2)], a[NR] }'
+        skw watch --remove "$probe" >/dev/null
+        rm -rf "$probe"
+        ;;
+    *)
+        echo "a change to its answer: not measured, the folder does not hold the cache"
+        ;;
+    esac
+    start=$(now)
+    skw watch "$root" >/dev/null
+    echo "the folder watched whole, as far as the share goes: $(since "$start") s"
+    echo "watches held: $(watches "$pid") (the kernel's memory, about 1 KB each)"
+    echo "memory watching: $(memory "$pid")"
+    start=$(now)
+    skw sync "$root" >/dev/null
+    echo "a sync of it, $(skw coverage "$root" | sed -n 's/^names: \([a-z]*\).*/\1/p'): $(since "$start") s"
+    # Past the save due 10 s after the last change heard: idle, then.
+    sleep 11
+    before=$(cpu "$pid")
+    sleep 30
+    echo "idle, 30 s watching: $(awk -v a="$before" -v b="$(cpu "$pid")" 'BEGIN { printf "%.2f", b - a }') s of processor time"
+    echo "memory idle watching: $(memory "$pid")"
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    echo "the engine's log (counts and times):"
+    sed 's/^/  /' "$engine_dir/engine.log"
+    rm -rf "$engine_dir"
+}
+
 section() { printf '\n== %s\n' "$1"; }
 
 # A step that fails says so, and the others still run.
@@ -281,6 +363,11 @@ disk() {
     if want engine; then
         section "engine: a user's engine on the folder"
         run measure_engine
+    fi
+
+    if want live; then
+        section "live: folders kept live (phase 2)"
+        run measure_live
     fi
 
     echo

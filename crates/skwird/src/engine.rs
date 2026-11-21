@@ -179,13 +179,18 @@ fn configured(dirs: &Dirs) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Every exclusion: the defaults, the user's, what clients registered;
-/// and how many were refused.
+/// Every exclusion: the defaults, the engine's own folders, the user's,
+/// what clients registered; and how many were refused.
 fn exclusions(dirs: &Dirs, registrations: &[Registration]) -> (Exclusions, usize) {
+    // The engine's own folders too: its index, its log, its state and its
+    // cookies. Indexed, and watched, the engine would hear its own saves,
+    // and read itself again without end.
+    let own = [dirs.cache.clone(), dirs.state.clone(), dirs.runtime.clone()];
     let paths = skwird_crawl::exclude::defaults(&dirs.home)
         .into_iter()
         .chain(configured(dirs))
-        .chain(registrations.iter().map(|r| r.path.to_path()));
+        .chain(registrations.iter().map(|r| r.path.to_path()))
+        .chain(own);
     let (exclusions, refused) = Exclusions::resolve(paths);
     (exclusions, refused.len())
 }

@@ -204,3 +204,47 @@ fn a_folder_removed_lets_go_of_its_watch() {
     assert_eq!(w.watching(), 1, "only docs is watched");
     assert!(!paths(k.index()).iter().any(|p| p.starts_with("docs/a")));
 }
+
+/// Register `scopes` (below the root) with the keeper and its watcher.
+fn register(k: &mut Keeper, w: &Watcher, s: &Scratch, scopes: &[&str]) {
+    let base = std::fs::canonicalize(s.path()).unwrap();
+    w.set_scopes(scopes.iter().map(|p| base.join(p)).collect());
+    let rels: Vec<PathBuf> = scopes.iter().map(PathBuf::from).collect();
+    k.set_scopes(&rels, &Cancel::default()).unwrap();
+}
+
+/// A folder made after the index last read its parent, then registered:
+/// read from its parent first, crawled and watched, then live. It was
+/// once installed with nothing in it to watch, and claimed live.
+#[test]
+fn a_folder_made_after_the_index_was_read_is_watched_when_registered() {
+    let s = Scratch::new("live-made-later");
+    s.dir("docs");
+    let (mut k, w) = watching(&s, &[], 100);
+    s.file("later/inner/first.txt");
+    register(&mut k, &w, &s, &["later"]);
+    assert_eq!(w.watching(), 2, "later and later/inner");
+    assert!(k.live()[0].since.is_some());
+    assert!(paths(k.index()).contains(Path::new("later/inner/first.txt")));
+    s.file("later/inner/second.txt");
+    apply(&mut k, &w);
+    assert!(paths(k.index()).contains(Path::new("later/inner/second.txt")));
+}
+
+/// A folder registered before it exists is not live; once made, the
+/// refresh that finds it installs it, and it is.
+#[test]
+fn a_folder_registered_before_it_exists_is_live_once_made() {
+    let s = Scratch::new("live-not-yet");
+    s.dir("docs");
+    let (mut k, w) = watching(&s, &[], 100);
+    register(&mut k, &w, &s, &["ghost"]);
+    assert_eq!(k.live()[0].since, None);
+    assert_eq!(k.index().live_since(Path::new("ghost")), None);
+    s.file("ghost/made.txt");
+    k.refresh(&Cancel::default()).unwrap();
+    assert!(k.live()[0].since.is_some(), "{:?}", k.live());
+    s.file("ghost/after.txt");
+    apply(&mut k, &w);
+    assert!(paths(k.index()).contains(Path::new("ghost/after.txt")));
+}

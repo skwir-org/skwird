@@ -327,7 +327,12 @@ the index. skwird honours what marks them itself:
   password store (`~/.password-store`), whose names are the accounts it
   holds;
 - a user's own exclusions, in skwird's configuration;
-- folders a client registers (the user's choice, 2026-11-11).
+- folders a client registers (the user's choice, 2026-11-11);
+- the engine's own folders: its index and its log, its state, its
+  socket and cookies (phase 2). Within its home, a user's engine that
+  indexed and watched them would hear its own saves, and read itself
+  again without end: a trial of phase 2 found it taking a tenth of a
+  core, idle.
 
 **A client narrows what is indexed, never widens it.** It registers
 folders over the socket, with its user's credentials, and skwird keeps

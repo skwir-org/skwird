@@ -338,6 +338,18 @@ impl Keeper {
                 }
             }
         }
+        // A subtree whose folder was not there is tried again: made since,
+        // the check found it.
+        let pending: Vec<PathBuf> = self
+            .live
+            .iter()
+            .filter(|l| !l.installed && self.index.folder_at(&l.scope).is_some())
+            .map(|l| l.scope.clone())
+            .collect();
+        for scope in pending {
+            self.install(&scope, cancel)?;
+        }
+        self.prune();
         self.publish_live();
         Ok(done)
     }
@@ -360,17 +372,7 @@ impl Keeper {
                 short: None,
                 installed: false,
             });
-            let start = Time::now();
-            let installed =
-                update::install(&mut self.index, &mut self.root, &self.opts, cancel, scope)?;
-            self.append(installed.records.iter().cloned());
-            self.note(&installed.watches);
-            if let Some(live) = self.live.iter_mut().find(|l| &l.scope == scope) {
-                live.installed = true;
-                if live.short.is_none() {
-                    live.since = Some(start);
-                }
-            }
+            let installed = self.install(scope, cancel)?;
             done.records.extend(installed.records);
             done.watches.extend(installed.watches);
             done.checked += installed.checked;
@@ -380,6 +382,25 @@ impl Keeper {
         self.prune();
         self.publish_live();
         Ok(done)
+    }
+
+    /// Install the subtree at `scope` ([`update::install`]): live from
+    /// when this began if every folder in it was watched. A folder not
+    /// there is not live, nor installed: each refresh tries it again.
+    fn install(&mut self, scope: &Path, cancel: &Cancel) -> Result<Refreshed, Error> {
+        let start = Time::now();
+        let installed =
+            update::install(&mut self.index, &mut self.root, &self.opts, cancel, scope)?;
+        self.append(installed.records.iter().cloned());
+        self.note(&installed.watches);
+        let there = self.index.folder_at(scope).is_some();
+        if let Some(live) = self.live.iter_mut().find(|l| l.scope == scope) {
+            live.installed = there;
+            if there && live.short.is_none() {
+                live.since = Some(start);
+            }
+        }
+        Ok(installed)
     }
 
     /// The subtrees watched, live or not.
