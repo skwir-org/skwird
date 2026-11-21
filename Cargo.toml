@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 rustix = { version = "1.1", features = ["fs"] }
 libc = "0.2.189"
 skwird-crawl = { path = "crates/crawl" }
+skwird-index = { path = "crates/index" }
 skwird-testkit = { path = "crates/testkit" }
 
 [workspace.lints.rust]

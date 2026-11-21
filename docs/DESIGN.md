@@ -23,7 +23,8 @@ taken:
 
 - [fsearch](https://github.com/noahdunnagan/fsearch) (macOS):
   - the index layout (8);
-  - the overlay of changes over a base;
+  - changes kept over a base, which skwird keeps as chunks rewritten
+    whole (8);
   - FSEvents replay, of events the system dropped as well.
 - [fsearch-crossplatform](https://github.com/threehymns/fsearch-crossplatform):
   - a Linux walker with `getdents64`;
@@ -393,8 +394,11 @@ From fsearch (0.2):
   times in runs of 64 from a base;
 - zones: for each 1,024 entries, the largest size, the range of times
   and the kinds present, so a query on size or time skips most of the
-  index;
-- a base, and an overlay of changes with tombstones.
+  index.
+
+fsearch also keeps a base and an overlay of changes with tombstones.
+skwird does without the overlay (below, "How a subtree stays one
+range").
 
 skwird adds:
 - one file per filesystem, where fsearch keeps one for all and does not
@@ -403,17 +407,41 @@ skwird adds:
 - each folder's change time, owner, group, mode and ACL flag;
 - each filesystem's identity (its UUID where the system gives one), so
   a removable drive's index survives being unplugged;
-- the overlay keyed by folder and name, not by path, so removing a
-  folder removes everything under it. fsearch's tables keyed by path
-  kept a removed folder's new files searchable, until 0.2.1;
-- changes written as segments merged in the background, never the whole
-  index rewritten. fsearch rewrites everything after 50,000 changes or
-  12 hours, about 280 MB by its own estimate, and its port does the
-  same.
+- changes made by folder, never by path: a folder's subtree is one
+  range, so removing a folder removes everything under it. fsearch's
+  tables keyed by path kept a removed folder's new files searchable,
+  until 0.2.1;
+- a change rewrites the chunks it touches, never the whole index.
+  fsearch rewrites everything after 50,000 changes or 12 hours, about
+  280 MB by its own estimate, and its port does the same.
+
+**How a subtree stays one range** (the format's spike, 2026-11-21).
+The blocks are in pre-order, each with its depth: a folder's subtree is
+its block and every block after it that is deeper, so no block stores
+where its subtree ends, and no change writes a folder above the one it
+changes. The blocks are cut into chunks of about 64k entries (a chunk
+is cut past 96k, but for a single block; one below 16k joins a
+neighbour that can take it in). A change keeps pre-order:
+- a folder made is inserted right after its parent's own block, which
+  pre-order allows, so only that chunk is rewritten;
+- a folder removed takes its range with it;
+- a folder moved is its range taken out and inserted after its new
+  parent's block, every depth in it moved alike.
+
+A folder keeps its number through all this. The folder table, which
+says where each folder's block is now, is rebuilt from the chunks
+when the index is loaded, and kept in pages that a snapshot shares. A
+chunk being small, a change rewrites it in memory at once, copy-on-
+write, for the next snapshot: that is the overlay, and the log keeps it
+durable until the chunk is written. The spike held the promise through
+240,000 random edits (files made and removed; folders made, removed
+and moved; nested ones), every folder's range compared with a model
+tree after each, with chunks of a few dozen entries so that every edit
+cut or joined some.
 
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
-numbered log before it reaches the overlay. One structure does three
+numbered log before it reaches a chunk. One structure does three
 jobs: saves are incremental, a crash is replayed from it, and it
 answers `changes {root, since}`, which skwir's harvest consumes (its
 ADR-089). Its entries carry each entry's identity and kind. A token is

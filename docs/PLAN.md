@@ -93,8 +93,9 @@ live: that is phase 3's (DESIGN 3).
 - **Crates:**
   - `skwird-crawl`: the Linux walker and the check, with the mount
     table. Other systems get an error naming them (rule 7);
-  - `skwird-index`: the format, the overlay and the log, and queries on
-    them, with fsearch 0.2's packed arrays and zones (DESIGN 8);
+  - `skwird-index`: the format, its chunks rewritten copy-on-write, the
+    log, and queries on them, with fsearch 0.2's packed arrays and
+    zones (DESIGN 8);
   - `skwird-protocol`: the messages, which the engine speaks too;
   - `skwird-client`: a client and a fake engine for clients' tests.
     Like `skwird-protocol`, it depends on serde and serde_json alone,
@@ -162,7 +163,10 @@ committed then.
 2. **The index.**
    - A spike first, on the format's one hard part: a subtree stays one
      range while chunks are rewritten. Its answer shapes the format, so
-     it comes before the format is written.
+     it comes before the format is written. Done on 2026-11-21: yes, by
+     pre-order with depths and new folders after their parent's block
+     (DESIGN 8, "How a subtree stays one range"), held through 240,000
+     random edits. It does without an overlay.
    - The crawl's output laid out depth first, names stored once, packed
      arrays and zones, written to a file and mapped. Queries by name
      (matched as skwir matches, DESIGN 7), kind, size, time and root.

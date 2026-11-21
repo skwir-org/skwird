@@ -1,0 +1,17 @@
+[package]
+name = "skwird-index"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "skwird's index: names in folder blocks, depth first, in chunks rewritten alone"
+
+[dependencies]
+skwird-crawl.workspace = true
+
+[dev-dependencies]
+skwird-testkit.workspace = true
+
+[lints]
+workspace = true

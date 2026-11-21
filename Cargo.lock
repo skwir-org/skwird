@@ -62,6 +62,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skwird-index"
+version = "0.0.0"
+dependencies = [
+ "skwird-crawl",
+ "skwird-testkit",
+]
+
+[[package]]
 name = "skwird-testkit"
 version = "0.0.0"
 dependencies = [
