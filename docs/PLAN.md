@@ -328,6 +328,25 @@ committed then.
      answer and idle CPU become budgets (DESIGN 10), and the index's
      size is compared with the estimate.
 
+   **Ready on 2026-11-21, waiting for the user.** `skwird find`,
+   `coverage`, `sync` and `status` came with step 5. `tools/measure.sh`
+   gained two steps:
+   - `index`: `skwird-bench index`, the default exclusions honoured: the
+     crawl, the build, the size against the estimate, a save and a
+     load, nine queries timed, the peak memory.
+   - `engine`: `skwird serve` on the folder, its runtime, cache and state
+     folders the measurement's own, `HOME` the user's (so the default
+     exclusions are theirs) and `SKWIRD_NO_START` set: the time to the
+     first answer with the index built and with it read back, the
+     memory then, a warm sync, the processor time of 30 idle seconds.
+
+   Both print counts, sizes and times alone, and remove what they built
+   (the index of the folder measured), even when cut short. Tried on a
+   synthetic tree of 1,530 entries: the engine answered first in 0.07 s,
+   held 5 MB, and took no processor time in 30 idle seconds. What is
+   left is the user's: `tools/measure.sh` on their home, then the
+   budgets set in DESIGN 10 from what it says.
+
 **Tests:** coverage is never overstated. Fixtures cover:
 - a change made while the engine was down;
 - a folder whose times `tar` set back;

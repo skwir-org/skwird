@@ -86,7 +86,13 @@ fn time_queries(index: &Index) {
 }
 
 pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), String> {
-    let root = Root::open(path, Exclusions::none()).map_err(|e| e.to_string())?;
+    // The engine's default exclusions: a private folder's names are never
+    // kept, not even in a measurement's index.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let (exclusions, _) = Exclusions::resolve(skwird_crawl::exclude::defaults(&home));
+    let root = Root::open(path, exclusions).map_err(|e| e.to_string())?;
     let opts = Options {
         threads,
         ..Options::default()

@@ -81,8 +81,11 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   process's environment on its own command line (`VAR=value cmd`).
 - **An engine run by hand or by a test never reaches its user's own.**
   Give every `skwird` it runs, and every client that may start one,
-  `HOME` and `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and
-  `XDG_CONFIG_HOME` of a scratch folder, on its own command line (a
-  test: `Command::env`). Otherwise a client starts the user's engine,
+  `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` of a scratch
+  folder, on its own command line (a test: `Command::env`); a test
+  gives `HOME` and `XDG_CONFIG_HOME` too. A measurement of a real home
+  keeps `HOME`, so that the default exclusions name the user's own
+  private folders, and sets `SKWIRD_NO_START`, so that no client of it
+  starts another engine. Otherwise a client starts the user's engine,
   which crawls the whole home into the user's cache: it happened once,
   in phase 1's step 5.

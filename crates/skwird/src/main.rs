@@ -23,7 +23,8 @@ coverage  how far answers below PATH can be trusted
 sync      prove PATH current now, then say how far it can be trusted
 status    what the engine says of itself
 
-The commands that ask start the engine where none answers.";
+The commands that ask start the engine where none answers, unless
+SKWIRD_NO_START is set.";
 
 struct Args {
     command: String,
@@ -105,8 +106,12 @@ fn folder(args: &Args) -> Result<PathBuf, String> {
 
 fn client() -> Result<Client, String> {
     let mut find = Find::new("skwird");
-    // This program is the engine: start it where none answers.
-    find.start = std::env::current_exe().ok();
+    // This program is the engine: start it where none answers, unless
+    // SKWIRD_NO_START says not to (a measurement that runs its own).
+    find.start = std::env::var_os("SKWIRD_NO_START")
+        .is_none()
+        .then(|| std::env::current_exe().ok())
+        .flatten();
     Client::connect(&find).map_err(|e| e.to_string())
 }
 
