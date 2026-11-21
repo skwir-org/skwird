@@ -6,11 +6,11 @@ decision changes it there.
 
 ## Where it stands (2026-11-21)
 
-Phase 0 is done. Phase 1's steps 1 to 7 are done: a user's engine on
+Phase 0 is done. Phase 1 is done, its eight steps: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
-the user's home and given budgets (DESIGN 10), the two of memory
-around a first build met at the second measurement. Step 8, for the
-engine idle after a sync, is built and waits for a third. The
+the user's home and given budgets (DESIGN 10), the three of memory
+(after a first build, at its peak, after a sync) met at the second and
+third measurements. The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -92,7 +92,7 @@ tried as root, and the design is revised where the numbers say so.
 Done on 2026-10-11. fanotify's way through btrfs is tried, not proven
 live: that is phase 3's (DESIGN 3).
 
-## Phase 1: Linux, a user's engine, started by its first client
+## Phase 1: Linux, a user's engine, started by its first client (done)
 
 - **Crates:**
   - `skwird-crawl`: the Linux walker and the check, with the mount
@@ -505,12 +505,12 @@ committed then.
      freed one. The next list then came from the writer's arena, and
      `malloc_trim` never shrinks a thread arena's top.
    - **The thresholds fixed** as the engine starts (`memory::settle`,
-     `mallopt`). Every allocation of 128 KiB or more has a mapping of
+     `mallopt`). Every allocation of 1 MiB or more has a mapping of
      its own, given back whole when freed, and a heap's free top is
      given back past 1 MiB. What is free is given back after each
      refresh, as after a first build.
-   - Measured, five syncs after each start, one with a change made
-     behind the engine's back:
+   - Measured with the threshold at 128 KiB, as first set, five syncs
+     after each start, one with a change made behind the engine's back:
 
      | | ready | after the syncs |
      |---|---|---|
@@ -525,7 +525,29 @@ committed then.
      limit among them. Every test of the check, the refresh and the
      engine takes the list.
 
-**Tests:** coverage is never overstated. Fixtures cover:
+   **Done on 2026-11-21.** The user ran `tools/measure.sh --only engine`
+   on their home at `7f98a7d` (6.9 million entries in 867,166 folders):
+   - idle after a sync, 144 MB, where 384 MB were: 21 MB per million,
+     within the budget of 40;
+   - after the first build, 144 MB, where 253 MB were; at the peak,
+     598 MB, where 706 MB were;
+   - a warm sync in 0.43 s, where 0.65 s were: no path is made an
+     allocation of its own any more;
+   - read back: 178 MB, a first answer in 0.63 s; idle, no processor
+     time.
+
+   **The threshold, then raised to 1 MiB.** The first answer when
+   building came at 8.6 s, where the second measurement's came at
+   5.6 s. On the synthetic tree, the same build ranged from 0.59 to
+   0.96 s over runs with nothing changed, so one run says little of it.
+   What the threshold cost was counted instead: 46,000 page faults where
+   18,000 were, every buffer of 128 KiB or more taking pages fresh from
+   the system. At 1 MiB, the faults are 18,400, and the memory after
+   syncs is the same: 18.3 MB built, 21.8 MB read back with 20 threads.
+   The large buffers, the check's list and the packer's, are past 1 MiB
+   on any tree where they matter. Only the synthetic tree measured that
+   change.
+ Fixtures cover:
 - a change made while the engine was down;
 - a folder whose times `tar` set back;
 - a folder changed again within a tick of being read;

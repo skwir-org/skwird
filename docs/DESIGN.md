@@ -559,42 +559,39 @@ it. It never uses the network.
 6.9 million entries in 867,000 folders: btrfs on a solid-state disk, 20
 threads, 32 GB. They are per million entries, so that they scale with
 the tree. A slower disk lengthens what is the disk's (a cold crawl, a
-cold check), not what is the engine's. The engine's rows were measured
-again after step 7 (at `bab36bc`); the build's row is the first
-measurement's (at `8850b44`).
+cold check), not what is the engine's. The engine's rows are the third
+measurement's, after phase 1's step 8 (at `7f98a7d`); the build's row is
+the first measurement's (at `8850b44`).
 
 | What | Budget, per million entries | Measured, per million (whole home) | |
 |---|---|---|---|
 | Processor time while idle | none measurable (the kernel counts in 10 ms ticks) | 0.00 s in 30 s | met |
-| First answer after a start, the index read back | 0.15 s | 0.08 s (0.57 s), as of its last save | met |
-| A sync, warm | 0.15 s | 0.09 s (0.65 s) | met |
+| First answer after a start, the index read back | 0.15 s | 0.09 s (0.63 s), as of its last save | met |
+| A sync, warm | 0.15 s | 0.06 s (0.43 s) | met |
 | The build, from a crawl | 1 s | 0.61 s (4.2 s) | met |
 | Memory at rest, the index read back | 40 MB | 26 MB (178 MB) | met |
-| Memory after a first build, once saved | as at rest | 37 MB (253 MB) | met |
-| Memory at the peak of a first build | 150 MB | 102 MB (706 MB) | met |
-| Memory idle, after a sync | as at rest | 56 MB (384 MB) | not met; fixed, to be measured again |
+| Memory after a first build, once saved | as at rest | 21 MB (144 MB) | met |
+| Memory at the peak of a first build | 150 MB | 87 MB (598 MB) | met |
+| Memory idle, after a sync | as at rest | 21 MB (144 MB) | met |
 
 Memory is what the kernel counts resident (`VmRSS`, and `VmHWM` for the
 peak). The index's mapped files count once read, and are the page
 cache's to drop. A first start, with no index yet, answers once the
-whole tree is crawled and built: 5.6 s with the caches warm, and at most
-about 20 s cold, by the first measurement's cold crawl and build.
+whole tree is crawled and built. With the caches warm, that took 5.6 s
+at the second measurement and 8.6 s at the third; at most about 20 s
+cold, by the first measurement's cold crawl and build.
 
 **What memory was over budget was the allocator's:** small allocations,
 freed and kept for the process. Measured first, the engine stayed at
-1,873 MB after a first build (2,268 MB at the peak), the crawl's and
-the build's. Phase 1's step 7 packs each folder as the crawl reads it,
-into a few large buffers, and gives back what is left once after a
-first build. The last row is the same cause in the refresh: each
-check's list of every folder, a path in an allocation of its own. On a
-synthetic tree it adds 300 bytes a folder, once (a second sync adds
-next to nothing), whether the index was built or read back. Phase 1's
-step 8 keeps those paths in one buffer, and fixes glibc's threshold for
-giving a large allocation a mapping of its own: otherwise it rises each
-time such a mapping is freed, and the next large buffers come from an
-arena that keeps them. On the synthetic tree, an engine after five
-syncs holds what it held ready, but for 132 KB for each thread the
-check ran on. The user's home is measured again before the row is met.
+1,873 MB after a first build (2,268 MB at the peak), and at 384 MB idle
+after a sync, against 178 MB read back. Phase 1's step 7 packs each
+folder as the crawl reads it, into a few large buffers. Step 8 keeps the
+check's list of every folder in one buffer, where each path had an
+allocation of its own. It also fixes glibc's threshold for giving a
+large allocation a mapping of its own (`mallopt`, 1 MiB): otherwise the
+threshold rises each time such a mapping is freed, and the next large
+buffers come from an arena that keeps them. What is free is given back
+after a first build and after each refresh (`malloc_trim`).
 
 ## Protocol (a sketch; experimental until declared stable)
 

@@ -12,7 +12,7 @@
 //!   shrinks the top of a thread's arena.
 //!
 //! So the engine fixes the threshold when it starts ([`settle`]). Every
-//! allocation of 128 KiB or more gets a mapping of its own, given back
+//! allocation of 1 MiB or more gets a mapping of its own, given back
 //! whole when freed, and a heap's free top is given back past 1 MiB. Then
 //! it gives back what is free after a first build and after each refresh
 //! ([`give_back`]). The packer (`skwird_index::packer`) and the check's
@@ -43,7 +43,7 @@ mod glibc {
         // off the threshold's rise; memory already allocated is not
         // touched.
         unsafe {
-            mallopt(M_MMAP_THRESHOLD, 128 << 10);
+            mallopt(M_MMAP_THRESHOLD, 1 << 20);
             mallopt(M_TRIM_THRESHOLD, 1 << 20);
         }
     }
