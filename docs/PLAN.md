@@ -114,7 +114,7 @@ live: that is phase 3's (DESIGN 3).
   with that run (DESIGN 1). The next client starts another and pays one
   check. Phase 2's unit removes this.
 
-**The gate,** chained with `&&` before every commit: `cargo fmt
+**The gate,** `tools/gate.sh`, chained before every commit: `cargo fmt
 --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
 the same clippy for `x86_64-pc-windows-gnu` and `aarch64-apple-darwin`
 (rule 7).

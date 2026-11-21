@@ -3,5 +3,5 @@
 # that moves it. The oldest Rust that builds skwird is `rust-version` in
 # Cargo.toml.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
