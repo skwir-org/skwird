@@ -76,10 +76,17 @@ pub fn serve(config: &Config) -> Result<(), String> {
         .map_err(|e| format!("cannot open the lock: {e}"))?;
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
         .map_err(|e| format!("cannot take the lock: {e}"))?;
-    // The lock is ours: a socket left there is a dead engine's.
-    let _ = std::fs::remove_file(&socket);
-    let listener =
-        UnixListener::bind(&socket).map_err(|e| format!("cannot bind the socket: {e}"))?;
+    // A service manager's socket, where it passed one; otherwise our own.
+    // The lock is ours: a socket left at the path is a dead engine's.
+    let activated = crate::activation::passed()?;
+    let bound = activated.is_none();
+    let listener = if let Some(listener) = activated {
+        log("answering on the socket the service manager passed");
+        listener
+    } else {
+        let _ = std::fs::remove_file(&socket);
+        UnixListener::bind(&socket).map_err(|e| format!("cannot bind the socket: {e}"))?
+    };
     log(&format!("serving {} roots", config.roots.len()));
     let shared = Arc::new(Shared::new(config.roots.clone()));
     let (commands, received) = channel();
@@ -134,7 +141,11 @@ pub fn serve(config: &Config) -> Result<(), String> {
     }
     let _ = commands.send(Command::Stop);
     let _ = writing.join();
-    let _ = std::fs::remove_file(&socket);
+    // A socket the service manager passed stays its own, to start the
+    // next engine.
+    if bound {
+        let _ = std::fs::remove_file(&socket);
+    }
     log("idle: gone");
     drop(lock);
     Ok(())

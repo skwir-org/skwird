@@ -1,0 +1,13 @@
+# The socket clients find a user's engine at (docs/DESIGN.md, Protocol):
+# held by the user's service manager, which starts skwird.service at the
+# first connection and passes it this socket.
+[Unit]
+Description=skwird's socket, a user's engine
+
+[Socket]
+ListenStream=%t/skwird/socket
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

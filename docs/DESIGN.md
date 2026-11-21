@@ -625,7 +625,9 @@ after a first build and after each refresh (`malloc_trim`).
   bytes on Linux, 104 on macOS) is an error that says so, not the crash
   it was in fsearch. The user's folder is the user's alone (mode 0700),
   checked so before the socket is bound, as skwir keeps its own runtime
-  folder.
+  folder. A service manager may make the socket and pass it
+  (systemd's `LISTEN_FDS`, phase 2): the engine then answers on it, and
+  neither binds nor removes one of its own.
 - **Framing.** JSON lines at first, for readability; each message has
   an id.
 - **Messages:**

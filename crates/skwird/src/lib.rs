@@ -8,6 +8,8 @@
 //! is the command line.
 
 #[cfg(target_os = "linux")]
+pub mod activation;
+#[cfg(target_os = "linux")]
 pub mod convert;
 #[cfg(target_os = "linux")]
 pub mod coverage;

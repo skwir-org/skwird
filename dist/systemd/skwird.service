@@ -1,0 +1,26 @@
+# skwird, a user's engine for the session (docs/PLAN.md, phase 2): the
+# index of the user's home, the folders its clients keep live watched.
+#
+# Copy it and skwird.socket to ~/.config/systemd/user/ (a package puts
+# them in /usr/lib/systemd/user/), point ExecStart at skwird where it is
+# installed, then: systemctl --user enable --now skwird.socket
+[Unit]
+Description=skwird, an index of file names kept current
+Requires=skwird.socket
+After=skwird.socket
+
+[Service]
+Type=simple
+# The engine for the session: idle never ends it, so that what it
+# watches stays live between its clients' runs.
+ExecStart=/usr/bin/skwird serve --forever
+Restart=on-failure
+# Nothing leaves the machine (rule 6): Unix sockets alone.
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+# A crawl yields to what the user is doing.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

@@ -31,6 +31,30 @@ skwird sync ~                          # prove it current now
 skwird coverage ~/Documents            # how far its answers can be trusted
 ```
 
+To keep folders live, changes in them heard as they come, ask the
+engine to watch them. It keeps them across restarts:
+
+```
+skwird watch ~/Documents ~/Projects    # live from now on
+skwird watch --remove ~/Projects       # checked again
+```
+
+### As a user service
+
+Started by a client, the engine goes a minute after its last client. As
+a user service, it lives for the session, so that the folders it
+watches stay live between clients. `dist/systemd/` holds the unit and
+its socket:
+
+```
+cp dist/systemd/skwird.service dist/systemd/skwird.socket ~/.config/systemd/user/
+# point ExecStart at skwird where it is installed, then:
+systemctl --user daemon-reload
+systemctl --user enable --now skwird.socket
+```
+
+The socket starts the engine at the first client.
+
 ## Measuring
 
 `skwird-bench` measures what an index would cost on a real tree. It

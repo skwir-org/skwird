@@ -857,6 +857,27 @@ committed once the gate holds.
    (`LISTEN_FDS`) where a package installs the socket. Tested with
    `systemd-socket-activate`; no test installs a unit on the developer's
    own system.
+
+   **Done on 2026-11-21.**
+   - `dist/systemd/skwird.service`: `skwird serve --forever`, restarted
+     on failure, Unix sockets alone (`RestrictAddressFamilies=AF_UNIX`,
+     rule 6), no new privileges, a crawl yielding to the user (`Nice=10`,
+     idle I/O).
+   - `skwird.socket`: `%t/skwird/socket`, mode 0600 in a folder of mode
+     0700, where clients look. `systemd-analyze verify` accepts both, but
+     for `ExecStart`'s path, which a package or the user fills in.
+   - The engine answers on a socket a service manager passes
+     (`activation.rs`: `LISTEN_PID`, `LISTEN_FDS`), checked to be a Unix
+     stream socket listening, taken once. It binds none of its own then,
+     and leaves the socket in place when it goes.
+   - README: `skwird watch`, and how to install the unit.
+   - Tests pass:
+     - the units run the engine for the session on the socket clients
+       look for;
+     - started by `systemd-socket-activate` at the first connection, the
+       engine answers on the socket passed, the same inode before and
+       after, and leaves it in place when it goes. With the passed socket
+       ignored, the first connection was never answered.
 7. **Measured,** by the user, on their home: `tools/measure.sh` gains a
    live step (memory and processor time with the watches of a large
    folder, idle with them, the time from a change to its answer).

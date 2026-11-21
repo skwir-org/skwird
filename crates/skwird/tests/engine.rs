@@ -739,3 +739,97 @@ fn a_mount_made_below_a_watched_folder_is_a_hole_at_once() {
     });
     assert!(c.coverage(&docs).unwrap().holes.is_empty());
 }
+
+/// The units run the engine for the session, on the socket clients look
+/// for: the user's runtime folder's `skwird/socket`, its user's alone.
+#[test]
+fn the_units_run_the_engine_for_the_session_on_its_socket() {
+    let dist = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/systemd");
+    let service = std::fs::read_to_string(dist.join("skwird.service")).unwrap();
+    let socket = std::fs::read_to_string(dist.join("skwird.socket")).unwrap();
+    assert!(
+        service
+            .lines()
+            .any(|l| l.starts_with("ExecStart=") && l.ends_with(" serve --forever")),
+        "{service}"
+    );
+    assert!(
+        service.contains("RestrictAddressFamilies=AF_UNIX"),
+        "rule 6"
+    );
+    for line in [
+        "ListenStream=%t/skwird/socket",
+        "SocketMode=0600",
+        "DirectoryMode=0700",
+    ] {
+        assert!(socket.lines().any(|l| l == line), "{line}");
+    }
+}
+
+/// Started by a service manager with its socket (`LISTEN_FDS`), as
+/// systemd starts skwird.service: the engine answers on the socket it was
+/// passed, binds none of its own, and leaves it in place when it goes.
+/// `systemd-socket-activate` stands in for systemd; nothing is installed.
+#[test]
+fn an_engine_answers_on_the_socket_a_service_manager_passes() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if Command::new("systemd-socket-activate")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: no systemd-socket-activate");
+        return;
+    }
+    let mut env = Env::new("engine-activated");
+    tree(&env);
+    let socket = env.socket();
+    // The runtime folder, its user's alone, as the socket unit makes it.
+    let folder = socket.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = env.home();
+    let mut activate = Command::new("systemd-socket-activate");
+    activate.arg("-l").arg(&socket);
+    for (name, value) in [
+        ("HOME", home.clone()),
+        ("XDG_RUNTIME_DIR", env.s.join("run")),
+        ("XDG_CACHE_HOME", env.s.join("cache")),
+        ("XDG_STATE_HOME", env.s.join("state")),
+        ("XDG_CONFIG_HOME", env.s.join("config")),
+    ] {
+        let mut set = std::ffi::OsString::from(format!("--setenv={name}="));
+        set.push(value);
+        activate.arg(set);
+    }
+    let child = activate
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_skwird"))
+        .args([OsStr::new("serve"), OsStr::new("--root"), home.as_os_str()])
+        .args(["--idle", "2", "--threads", "2"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    env.engines.push(child);
+    wait_for(5, "the socket made by the service manager", || {
+        socket.exists()
+    });
+    let made = std::fs::metadata(&socket).unwrap().ino();
+    let mut c = connect(&socket, &home, "a test");
+    let coverage = c.coverage(&home).unwrap();
+    assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
+    assert_eq!(answered(&mut c, &everything(&home)), walked(&home));
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().ino(),
+        made,
+        "the engine bound a socket of its own"
+    );
+    drop(c);
+    let engine = env.engines.last_mut().unwrap();
+    wait_for(10, "the engine gone once idle", || {
+        engine.try_wait().unwrap().is_some()
+    });
+    assert!(socket.exists(), "the service manager's socket was removed");
+}
