@@ -16,11 +16,11 @@
 //! kept, and a mount's names are not the folder's.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use skwird_crawl::{
     Cancel, Crawled, Entry, Error, FileId, Kind, Options, Outcome, Root, Stale, Stored,
-    StoredFolder, Time, Why, check, crawl_below, read_folder,
+    StoredFolder, Time, Watch, Why, check, check_watched, crawl_below, read_folder_watched,
 };
 
 use crate::block::{Block, Facts, FolderId, Item, State};
@@ -145,6 +145,9 @@ pub struct Refreshed {
     pub reread: usize,
     /// Folders new since, crawled.
     pub crawled: usize,
+    /// What came of watching each folder read or crawled, where a watch
+    /// was asked ([`Options::watcher`]).
+    pub watches: Vec<(FolderId, Watch)>,
 }
 
 /// Whether `entry` is the folder whose block is `child`, by identity.
@@ -158,13 +161,14 @@ fn same_folder(index: &Index, child: FolderId, item: &Item, entry: &Entry) -> bo
 }
 
 impl Index {
-    /// Every folder the check is to compare, and its number: each folder
+    /// Every folder the check is to compare whose path `keep` keeps, and
+    /// its number: each folder
     /// read, and each to be tried again. Excluded folders are not.
     ///
     /// No allocation is made for each folder (DESIGN 10): the paths go end
     /// to end into the list's buffer, and each is made in the buffer kept
     /// for its depth, which the next folder at that depth takes over.
-    pub fn stored(&self) -> (Vec<FolderId>, Stored) {
+    pub fn stored(&self, keep: impl Fn(&Path) -> bool) -> (Vec<FolderId>, Stored) {
         let folders = self.tree().len();
         let mut ids = Vec::with_capacity(folders);
         // About 64 bytes a path, grown in place if more.
@@ -192,7 +196,7 @@ impl Index {
                     State::NotCovered(Why::Private) => Some(false),
                     State::NotCovered(_) => Some(true),
                 };
-                if let Some(again) = again {
+                if let Some(again) = again.filter(|_| keep(path)) {
                     let facts = view.facts(b);
                     ids.push(view.folder(b));
                     out.push(
@@ -419,10 +423,11 @@ impl Index {
     }
 
     /// Put a crawl of `folder`'s subtree in place of its block: slot 0 is
-    /// the folder itself, every other slot a folder below it.
-    pub fn graft(&mut self, folder: FolderId, crawl: Vec<skwird_crawl::Crawled>) {
+    /// the folder itself, every other slot a folder below it. Gives the
+    /// number each slot was given.
+    pub fn graft(&mut self, folder: FolderId, crawl: Vec<skwird_crawl::Crawled>) -> Vec<FolderId> {
         let Some(old) = self.tree().block(folder) else {
-            return;
+            return Vec::new();
         };
         for child in old.items.iter().filter_map(|i| i.child) {
             self.tree_mut().remove(child);
@@ -433,10 +438,17 @@ impl Index {
             depth: old.depth,
         };
         let (tree, names) = self.parts_mut();
+        // `blocks_of` numbers the slots in order, the first before any
+        // other.
+        let mut given = Vec::with_capacity(crawl.len());
         let mut blocks = blocks_of(
             crawl,
             top,
-            &mut |slot| if slot == 0 { folder } else { tree.alloc() },
+            &mut |slot| {
+                let id = if slot == 0 { folder } else { tree.alloc() };
+                given.push(id);
+                id
+            },
             &mut |name| names.intern(name),
         )
         .into_iter();
@@ -447,6 +459,7 @@ impl Index {
         if !rest.is_empty() {
             tree.insert_after(folder, rest);
         }
+        given
     }
 
     /// How far an answer below `folder` can be trusted.
@@ -486,6 +499,10 @@ impl Index {
 /// as of then alone. Cancelled, the index stays sound, its proof as it
 /// was. A root replaced since it was opened is an error: open it again,
 /// and build again.
+///
+/// With [`Options::watcher`], each folder read within the watcher's
+/// subtrees is watched before its entries are read: what came of each is
+/// in [`Refreshed::watches`].
 pub fn refresh(
     index: &mut Index,
     root: &mut Root,
@@ -494,15 +511,121 @@ pub fn refresh(
 ) -> Result<Refreshed, Error> {
     let start = Time::now();
     root.reread_mounts().map_err(Error::Root)?;
-    let (ids, stored) = index.stored();
+    let (ids, stored) = index.stored(|_| true);
     let checked = check(root, &stored, opts, cancel)?;
     let mut done = Refreshed {
         checked: stored.len(),
         ..Refreshed::default()
     };
+    apply(
+        index,
+        root,
+        opts,
+        cancel,
+        &ids,
+        &stored,
+        checked.stale,
+        &mut done,
+    )?;
+    let tells = root.fs_name() != "fuse";
+    index.set_proof(if tells {
+        Proof::Checked(start)
+    } else {
+        Proof::AsOf(start)
+    });
+    Ok(done)
+}
+
+/// Watch every folder of the index below `scope` and prove it current,
+/// as [`refresh`] does, but through each folder's handle: each is opened,
+/// watched, then compared with what was stored (`check_watched`). A
+/// change before its watch moves its change time, and one after is
+/// heard. Gives what came of each folder's watch, the stale ones read
+/// again and the new ones crawled, watched too. The index's proof is not
+/// changed: the subtree is live from when this began, if every folder in
+/// it was watched.
+pub fn install(
+    index: &mut Index,
+    root: &mut Root,
+    opts: &Options,
+    cancel: &Cancel,
+    scope: &Path,
+) -> Result<Refreshed, Error> {
+    root.reread_mounts().map_err(Error::Root)?;
+    let (ids, stored) = index.stored(|rel| rel.starts_with(scope));
+    let (checked, watches) = check_watched(root, &stored, opts, cancel)?;
+    let mut done = Refreshed {
+        checked: stored.len(),
+        ..Refreshed::default()
+    };
+    done.watches.extend(
+        ids.iter()
+            .copied()
+            .zip(watches)
+            .filter(|(_, w)| *w != Watch::Unasked),
+    );
+    apply(
+        index,
+        root,
+        opts,
+        cancel,
+        &ids,
+        &stored,
+        checked.stale,
+        &mut done,
+    )?;
+    Ok(done)
+}
+
+/// Read again each of `folders`, as a change heard in it asks, and crawl
+/// each folder new in it; watched as [`refresh`] watches.
+pub fn reread_folders(
+    index: &mut Index,
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    folders: &[FolderId],
+) -> Result<Refreshed, Error> {
+    let mut ids = Vec::with_capacity(folders.len());
+    let mut stored = Stored::with_capacity(folders.len(), folders.len() * 64);
+    for &folder in folders {
+        if index.tree().loc(folder).is_none() {
+            continue;
+        }
+        let facts = index.facts_of(folder);
+        ids.push(folder);
+        stored.push(
+            &index.path_of(folder),
+            StoredFolder {
+                id: facts.map(|f| f.id).unwrap_or_default(),
+                ctime: facts.map(|f| f.ctime).unwrap_or_default(),
+                again: true,
+            },
+        );
+    }
+    let stale = (0..ids.len()).map(|i| (i, Stale::Changed)).collect();
+    let mut done = Refreshed::default();
+    apply(index, root, opts, cancel, &ids, &stored, stale, &mut done)?;
+    Ok(done)
+}
+
+/// Read again each folder of `stored` (numbered `ids`) the verdicts name,
+/// and crawl
+/// each folder new since; what changed in `done`.
+#[allow(clippy::too_many_arguments)] // the parts of one refresh, shared by three
+fn apply(
+    index: &mut Index,
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    ids: &[FolderId],
+    stored: &Stored,
+    verdicts: Vec<(usize, Stale)>,
+    done: &mut Refreshed,
+) -> Result<(), Error> {
     let top = index.root();
     let mut fresh = Vec::new();
-    for (i, stale) in checked.stale {
+    for (i, stale) in verdicts {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -520,7 +643,10 @@ pub fn refresh(
             Stale::Mount => (None, Seen::NotCovered(Why::Mount)),
             Stale::NetworkMount => (None, Seen::NotCovered(Why::NetworkMount)),
             _ => {
-                let (found, outcome) = read_folder(root, stored.rel(i), opts);
+                let (found, outcome, watch) = read_folder_watched(root, stored.rel(i), opts);
+                if watch != Watch::Unasked {
+                    done.watches.push((folder, watch));
+                }
                 (found, Seen::of(&outcome))
             }
         };
@@ -547,13 +673,14 @@ pub fn refresh(
         let crawl = crawl_below(root, &rel, opts, cancel)?;
         done.crawled += crawl.folders.len();
         done.records.extend(records_of(&crawl.folders));
-        index.graft(folder, crawl.folders);
+        let watches: Vec<Watch> = crawl.folders.iter().map(|c| c.watch).collect();
+        let given = index.graft(folder, crawl.folders);
+        done.watches.extend(
+            given
+                .into_iter()
+                .zip(watches)
+                .filter(|(_, w)| *w != Watch::Unasked),
+        );
     }
-    let tells = root.fs_name() != "fuse";
-    index.set_proof(if tells {
-        Proof::Checked(start)
-    } else {
-        Proof::AsOf(start)
-    });
-    Ok(done)
+    Ok(())
 }

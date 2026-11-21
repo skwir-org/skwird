@@ -32,6 +32,11 @@
 # A client narrows what is indexed, never widens it.
 > {"id":9,"exclude":{"add":["/home/user/.local/share/vault"],"remove":[]}}
 < {"id":9,"excluded":{"folders":["/home/user/.local/share/vault"]}}
+# A client wants a folder live: changes in it heard, applied as they come.
+> {"id":12,"watch":{"add":["/home/user/Documents"],"remove":[]}}
+< {"id":12,"watching":{"folders":["/home/user/Documents"]}}
+> {"id":13,"coverage":{"root":"/home/user/Documents"}}
+< {"id":13,"coverage":{"names":{"live":{"sec":1795000200,"nsec":0}},"attrs":{"live":{"sec":1795000200,"nsec":0}}}}
 # An error answers any request.
 > {"id":10,"query":{"root":"/home/user","name":{"match":"glob","text":"a[b","case_sensitive":true}}}
 < {"id":10,"error":{"what":"bad_pattern","message":"unclosed character class"}}

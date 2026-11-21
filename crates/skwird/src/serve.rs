@@ -83,9 +83,16 @@ pub fn serve(config: &Config) -> Result<(), String> {
     log(&format!("serving {} roots", config.roots.len()));
     let shared = Arc::new(Shared::new(config.roots.clone()));
     let (commands, received) = channel();
+    // One watcher for every root, listened to on a thread of its own that
+    // waits on it alone.
+    let watcher = crate::live::watcher(config.watches);
+    if let Some(w) = &watcher {
+        let (w, commands) = (Arc::clone(w), commands.clone());
+        std::thread::spawn(move || crate::live::listen(&w, &commands));
+    }
     let writing = {
         let (config, shared) = (config.clone(), Arc::clone(&shared));
-        std::thread::spawn(move || writer(&config, &shared, &received))
+        std::thread::spawn(move || writer(&config, &shared, &received, watcher))
     };
     let live = Arc::new(Live {
         state: Mutex::new((0, Instant::now())),
@@ -280,6 +287,22 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 });
                 match asked.ok().and_then(|()| answer.recv().ok()) {
                     Some(folders) => Answer::Excluded {
+                        folders: folders.iter().map(|p| WirePath::of(p)).collect(),
+                    },
+                    None => failure("internal", "the engine is going"),
+                }
+            }
+            Ask::Watch { add, remove } => {
+                let (reply, answer) = channel();
+                let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
+                let asked = commands.send(Command::Watch {
+                    client: client.clone(),
+                    add: to_path(add),
+                    remove: to_path(remove),
+                    reply,
+                });
+                match asked.ok().and_then(|()| answer.recv().ok()) {
+                    Some(folders) => Answer::Watching {
                         folders: folders.iter().map(|p| WirePath::of(p)).collect(),
                     },
                     None => failure("internal", "the engine is going"),

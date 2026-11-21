@@ -307,6 +307,20 @@ impl Client {
             _ => Err(Error::Unexpected),
         }
     }
+
+    /// Want `add` live, take back `remove`: what this client wants live,
+    /// after. A folder past the engine's share of watches is checked,
+    /// not live: its coverage says which.
+    pub fn watch(&mut self, add: &[&Path], remove: &[&Path]) -> Result<Vec<PathBuf>, Error> {
+        let id = self.ask(Ask::Watch {
+            add: add.iter().map(|p| WirePath::of(p)).collect(),
+            remove: remove.iter().map(|p| WirePath::of(p)).collect(),
+        })?;
+        match self.answer(id)? {
+            Answer::Watching { folders } => Ok(folders.iter().map(WirePath::to_path).collect()),
+            _ => Err(Error::Unexpected),
+        }
+    }
 }
 
 /// Start the engine, apart from this process: in a process group of its

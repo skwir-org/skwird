@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use skwird_crawl::{Attrs, FileId, Kind, Time};
 
@@ -54,6 +55,9 @@ pub struct Index {
     proof: Proof,
     /// When it was last crawled whole: its attributes are as of then.
     crawled_at: Time,
+    /// The subtrees live, by path below the root, each since when
+    /// ([`crate::keeper::Live`]): shared by snapshots.
+    live: Arc<[(PathBuf, Time)]>,
 }
 
 /// A name's bytes as a path's component.
@@ -78,6 +82,7 @@ impl Index {
             names,
             proof: Proof::AsOf(Time::default()),
             crawled_at: Time::default(),
+            live: Arc::from([]),
         }
     }
 
@@ -95,6 +100,21 @@ impl Index {
 
     pub fn set_crawled_at(&mut self, at: Time) {
         self.crawled_at = at;
+    }
+
+    /// The subtrees live, each since when.
+    pub fn set_live(&mut self, live: Vec<(PathBuf, Time)>) {
+        self.live = Arc::from(live);
+    }
+
+    /// Since when every change at or below `rel` is heard, if it is within
+    /// a live subtree: the earliest of those holding it.
+    pub fn live_since(&self, rel: &Path) -> Option<Time> {
+        self.live
+            .iter()
+            .filter(|(scope, _)| rel.starts_with(scope))
+            .map(|&(_, since)| since)
+            .min()
     }
 
     /// The tree and the names, each to be changed.

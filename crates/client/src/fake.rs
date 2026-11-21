@@ -6,7 +6,7 @@
 //! the longest root holding the path asked (`outside` for none); `query`
 //! with the entries given below the root asked, a name matched as a
 //! substring after lowercasing (globs are not its); `changes` as too old;
-//! `exclude` with what was asked.
+//! `exclude` and `watch` with what was asked.
 
 use std::path::PathBuf;
 
@@ -105,6 +105,7 @@ mod imp {
             Ask::Cancel { .. } => Ok(()),
             Ask::Changes { .. } => say(Answer::TooOld {}),
             Ask::Exclude { add, .. } => say(Answer::Excluded { folders: add }),
+            Ask::Watch { add, .. } => say(Answer::Watching { folders: add }),
         }
     }
 

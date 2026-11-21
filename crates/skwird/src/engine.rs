@@ -8,19 +8,23 @@
 //! the same refresh), the journal, a client's registrations. Nothing wakes
 //! it otherwise: idle is idle.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use skwird_crawl::{Cancel, Exclusions, Options, Root};
+use skwird_crawl::{Cancel, Exclusions, Heard, Options, Root, Watcher};
 use skwird_index::Index;
+use skwird_index::block::FolderId;
 use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
 use skwird_index::log::Token;
 use skwird_index::tree::Limits;
 use skwird_protocol::WirePath;
 
 use crate::dirs::Dirs;
+use crate::live::Gather;
 
 /// How an engine runs.
 #[derive(Clone, Debug)]
@@ -31,6 +35,8 @@ pub struct Config {
     /// How long it stays once its last client left: none for always.
     pub idle: Option<std::time::Duration>,
     pub threads: usize,
+    /// The most folders it watches: none for the user's share.
+    pub watches: Option<usize>,
 }
 
 /// What a root publishes for queries to read.
@@ -107,6 +113,18 @@ pub enum Command {
         remove: Vec<PathBuf>,
         reply: Sender<Vec<PathBuf>>,
     },
+    /// A client's folders to keep live.
+    Watch {
+        client: String,
+        add: Vec<PathBuf>,
+        remove: Vec<PathBuf>,
+        reply: Sender<Vec<PathBuf>>,
+    },
+    /// What the watcher of this generation heard ([`crate::live::listen`]).
+    Heard {
+        generation: u64,
+        heard: Vec<Heard>,
+    },
     Stop,
 }
 
@@ -117,17 +135,22 @@ struct Registration {
     path: WirePath,
 }
 
+/// The files of what clients registered, in the state folder: folders
+/// kept out of the index, and folders kept live.
+const EXCLUDED: &str = "registered";
+const WATCHED: &str = "watched";
+
 /// What clients registered, kept across restarts.
-fn registered(dirs: &Dirs) -> Vec<Registration> {
-    std::fs::read(dirs.state.join("registered"))
+fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
+    std::fs::read(dirs.state.join(file))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn save_registered(dirs: &Dirs, all: &[Registration]) {
-    let path = dirs.state.join("registered");
-    let tmp = dirs.state.join("registered.tmp");
+fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {
+    let path = dirs.state.join(file);
+    let tmp = dirs.state.join(format!("{file}.tmp"));
     let ok = crate::dirs::make_private(&dirs.state).is_ok()
         && serde_json::to_vec(all).is_ok_and(|b| std::fs::write(&tmp, b).is_ok())
         && std::fs::rename(&tmp, &path).is_ok();
@@ -200,13 +223,28 @@ pub fn log(line: &str) {
 }
 
 /// The writer's loop: open every root, then serve commands until told to
-/// stop or every sender is gone.
-pub fn writer(config: &Config, shared: &Shared, commands: &Receiver<Command>) {
+/// stop or every sender is gone. With a watcher, the folders clients
+/// registered are watched, what it heard applied as it comes (DESIGN 8):
+/// the writer then waits with a deadline, but only while something is
+/// due.
+pub fn writer(
+    config: &Config,
+    shared: &Shared,
+    commands: &Receiver<Command>,
+    watcher: Option<Arc<Watcher>>,
+) {
     let opts = Options {
+        watcher: watcher.clone(),
         threads: config.threads,
         ..Options::default()
     };
-    let registrations = registered(&config.dirs);
+    let registrations = registered(&config.dirs, EXCLUDED);
+    let kept_live = registered(&config.dirs, WATCHED);
+    // Wanted before the first crawl, so that a first build watches them
+    // as it reads them.
+    if let Some(w) = &watcher {
+        w.set_scopes(resolved(&kept_live));
+    }
     let cancel = Cancel::default();
     let (keepers, built) = open_all(config, shared, &registrations, &opts, &cancel);
     if built {
@@ -219,25 +257,56 @@ pub fn writer(config: &Config, shared: &Shared, commands: &Receiver<Command>) {
         cancel,
         keepers,
         registrations,
+        kept_live,
+        watcher,
+        gather: Gather::default(),
         pending: Vec::new(),
     };
+    w.apply_scopes();
     loop {
         let command = match w.pending.pop() {
             Some(c) => c,
-            None => match commands.recv() {
-                Ok(c) => c,
-                Err(_) => break,
+            None => match w.gather.deadline() {
+                None => match commands.recv() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                },
+                Some(at) => {
+                    match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                        Ok(c) => c,
+                        Err(RecvTimeoutError::Timeout) => {
+                            w.on_time();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
             },
         };
         if !w.answer(commands, command) {
             break;
         }
+        // Heard without pause, the deadline would never pass.
+        w.on_time();
     }
+    w.flush_all();
     for keeper in w.keepers.iter_mut().flatten() {
         if keeper.save().is_err() {
             log("a save at exit failed: the log keeps what changed");
         }
     }
+}
+
+/// The folders registered, as the system resolves them; one not there yet
+/// is left out until it is registered again.
+fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = registrations
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r.path.to_path()).ok())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// Open every root: its index read back, or crawled; each published as it
@@ -254,7 +323,7 @@ fn open_all(
     let (ex, refused) = exclusions(&config.dirs, registrations);
     log_refused(refused);
     for (i, path) in config.roots.iter().enumerate() {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let opened = Root::open(path, ex.clone()).and_then(|root| {
             Keeper::open(
                 &index_dir(&config.dirs, path),
@@ -302,7 +371,13 @@ struct Writing<'a> {
     shared: &'a Shared,
     cancel: Cancel,
     keepers: Vec<Option<Keeper>>,
+    /// Folders clients keep out of the index.
     registrations: Vec<Registration>,
+    /// Folders clients keep live.
+    kept_live: Vec<Registration>,
+    watcher: Option<Arc<Watcher>>,
+    /// What was heard and not applied yet, and what is due.
+    gather: Gather,
     /// Commands taken while gathering syncs, to answer next.
     pending: Vec<Command>,
 }
@@ -322,12 +397,16 @@ impl Writing<'_> {
                         other => self.pending.insert(0, other),
                     }
                 }
+                // What was heard below it, applied first.
+                let heard = self.gather.take(root);
+                self.apply_heard(root, &heard);
                 // The user's exclusions read again first: a line added to
                 // their file holds from the next sync.
                 self.hold_to_exclusions();
                 if let Some(keeper) = self.keepers[root].as_mut() {
                     refresh(keeper, root, self.shared, &self.cancel);
                 }
+                self.gather.checked(Instant::now());
                 for reply in replies {
                     let _ = reply.send(());
                 }
@@ -351,16 +430,170 @@ impl Writing<'_> {
                 reply,
             } => {
                 self.register(&client, &add, &remove);
-                let theirs = self
-                    .registrations
-                    .iter()
-                    .filter(|r| r.client == client)
-                    .map(|r| r.path.to_path())
-                    .collect();
-                let _ = reply.send(theirs);
+                let _ = reply.send(theirs(&self.registrations, &client));
             }
+            Command::Watch {
+                client,
+                add,
+                remove,
+                reply,
+            } => {
+                if changed(&mut self.kept_live, &client, &add, &remove) {
+                    save_registered(&self.config.dirs, WATCHED, &self.kept_live);
+                    self.apply_scopes();
+                }
+                let _ = reply.send(theirs(&self.kept_live, &client));
+            }
+            Command::Heard { generation, heard } => self.heard(generation, heard),
         }
         true
+    }
+
+    /// What the watcher heard: each folder named gathered, an overflow or
+    /// a watched subtree's own folder lost lowering coverage at once, the
+    /// check due once the queue is quiet.
+    fn heard(&mut self, generation: u64, heard: Vec<Heard>) {
+        let now = Instant::now();
+        // One instance a run so far: an older one's would be applied, but
+        // would bring nothing back (DESIGN 2).
+        let _ = generation;
+        let mut lowered = BTreeSet::new();
+        for h in heard {
+            match h {
+                Heard::Changed(wd) => {
+                    for (i, keeper) in self.keepers.iter().enumerate() {
+                        if let Some(folder) = keeper.as_ref().and_then(|k| k.watched(wd)) {
+                            self.gather.note(i, folder, now);
+                        }
+                    }
+                }
+                Heard::Moved(wd) | Heard::Gone(wd) => {
+                    for (i, keeper) in self.keepers.iter_mut().enumerate() {
+                        let Some(keeper) = keeper else { continue };
+                        if let Some(folder) = keeper.watched(wd)
+                            && keeper.lost(folder)
+                        {
+                            lowered.insert(i);
+                        }
+                        if matches!(h, Heard::Gone(_)) {
+                            keeper.forget(wd);
+                        }
+                    }
+                }
+                Heard::Overflow => {
+                    for (i, keeper) in self.keepers.iter_mut().enumerate() {
+                        if let Some(keeper) = keeper {
+                            keeper.overflowed();
+                            lowered.insert(i);
+                        }
+                    }
+                }
+            }
+        }
+        if !lowered.is_empty() {
+            log("events dropped, or a watched folder lost: not live until checked");
+            self.gather.overflowed(now);
+            for i in lowered {
+                self.publish(i);
+            }
+        }
+    }
+
+    /// What is due now: gatherings done applied, the check after an
+    /// overflow, a save.
+    fn on_time(&mut self) {
+        let now = Instant::now();
+        for (root, folders) in self.gather.due(now) {
+            self.apply_heard(root, &folders);
+        }
+        if self.gather.recheck_due(now) {
+            for (i, keeper) in self.keepers.iter_mut().enumerate() {
+                if let Some(keeper) = keeper {
+                    refresh(keeper, i, self.shared, &self.cancel);
+                }
+            }
+        }
+        if self.gather.save_due(now) {
+            for keeper in self.keepers.iter_mut().flatten() {
+                if keeper.save().is_err() {
+                    log("a save failed: the index is kept in memory, the log on disk");
+                }
+            }
+            crate::memory::give_back();
+        }
+    }
+
+    /// Every gathering applied at once, as the engine stops.
+    fn flush_all(&mut self) {
+        for root in 0..self.keepers.len() {
+            let heard = self.gather.take(root);
+            self.apply_heard(root, &heard);
+        }
+    }
+
+    /// The folders of `root` heard, read again.
+    fn apply_heard(&mut self, root: usize, folders: &[FolderId]) {
+        if folders.is_empty() {
+            return;
+        }
+        let Some(keeper) = self.keepers[root].as_mut() else {
+            return;
+        };
+        match keeper.heard(folders, &self.cancel) {
+            Ok(done) if !done.records.is_empty() => self.gather.changed(Instant::now()),
+            Ok(_) => {}
+            Err(e) => log(&format!(
+                "root {root}: what was heard cannot be applied: {e}"
+            )),
+        }
+        self.publish(root);
+    }
+
+    fn publish(&self, root: usize) {
+        if let Some(keeper) = &self.keepers[root] {
+            self.shared
+                .publish(root, Published::Ready(Arc::new(keeper.snapshot())));
+        }
+    }
+
+    /// The folders clients keep live, watched: the watcher told, each root
+    /// given those below it, each new one installed.
+    fn apply_scopes(&mut self) {
+        let Some(watcher) = &self.watcher else {
+            return;
+        };
+        let scopes = resolved(&self.kept_live);
+        watcher.set_scopes(scopes.clone());
+        for root in 0..self.keepers.len() {
+            let Some(keeper) = self.keepers[root].as_mut() else {
+                continue;
+            };
+            let base = keeper.root().path().to_path_buf();
+            let rels: Vec<PathBuf> = scopes
+                .iter()
+                .filter_map(|s| s.strip_prefix(&base).ok().map(Path::to_path_buf))
+                .collect();
+            let start = Instant::now();
+            match keeper.set_scopes(&rels, &self.cancel) {
+                Ok(done) if done.checked > 0 => log(&format!(
+                    "root {root}: {} folders watched in {:.2?}, {} read again, {} crawled",
+                    watcher.watching(),
+                    start.elapsed(),
+                    done.reread,
+                    done.crawled
+                )),
+                Ok(_) => {}
+                Err(e) => log(&format!("root {root}: its folders cannot be watched: {e}")),
+            }
+            for live in keeper.live() {
+                if let Some(short) = live.short {
+                    log(&format!(
+                        "root {root}: a folder kept live is checked only: {short:?}"
+                    ));
+                }
+            }
+            self.publish(root);
+        }
     }
 
     /// Every root made to hold to the exclusions as they are now: the
@@ -388,27 +621,12 @@ impl Writing<'_> {
     /// Take a client's registrations: what it adds is purged at once, what
     /// it takes back is read again. A client takes back only what it added.
     fn register(&mut self, client: &str, add: &[PathBuf], remove: &[PathBuf]) {
-        let mut changed = false;
-        for path in add.iter().filter(|p| p.is_absolute()) {
-            let r = Registration {
-                client: client.to_owned(),
-                path: WirePath::of(path),
-            };
-            if !self.registrations.contains(&r) {
-                self.registrations.push(r);
-                changed = true;
-            }
-        }
-        let before = self.registrations.len();
-        self.registrations
-            .retain(|r| !(r.client == client && remove.iter().any(|p| WirePath::of(p) == r.path)));
-        changed |= self.registrations.len() != before;
-        if !changed {
+        if !changed(&mut self.registrations, client, add, remove) {
             return;
         }
         // Kept first: a kill before the purge's save leaves it to the next
         // open, which holds the index to what is kept.
-        save_registered(&self.config.dirs, &self.registrations);
+        save_registered(&self.config.dirs, EXCLUDED, &self.registrations);
         let (readmitting, refused) = self.hold_to_exclusions();
         log_refused(refused);
         for i in readmitting {
@@ -419,8 +637,35 @@ impl Writing<'_> {
     }
 }
 
+/// A client's registrations changed: `add` taken, `remove` let go of if it
+/// was the client's. Says whether any changed.
+fn changed(all: &mut Vec<Registration>, client: &str, add: &[PathBuf], remove: &[PathBuf]) -> bool {
+    let mut changed = false;
+    for path in add.iter().filter(|p| p.is_absolute()) {
+        let r = Registration {
+            client: client.to_owned(),
+            path: WirePath::of(path),
+        };
+        if !all.contains(&r) {
+            all.push(r);
+            changed = true;
+        }
+    }
+    let before = all.len();
+    all.retain(|r| !(r.client == client && remove.iter().any(|p| WirePath::of(p) == r.path)));
+    changed | (all.len() != before)
+}
+
+/// What `client` registered.
+fn theirs(all: &[Registration], client: &str) -> Vec<PathBuf> {
+    all.iter()
+        .filter(|r| r.client == client)
+        .map(|r| r.path.to_path())
+        .collect()
+}
+
 fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     match keeper.refresh(cancel) {
         Ok(done) => {
             if !done.records.is_empty() {

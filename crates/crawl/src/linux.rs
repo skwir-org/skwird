@@ -742,6 +742,84 @@ fn verdict(
     }
 }
 
+/// The check, each folder watched first ([`Options::watcher`]): opened
+/// by its path beneath the root, watched through its handle, then its
+/// identity, mount and change time compared through that same handle. A
+/// change made before the watch moves its change time; one made after is
+/// heard. Gives each folder's watch beside the verdicts. Slower than
+/// [`check`], which stats by path: an install pays it once.
+pub fn check_watched(
+    root: &Root,
+    stored: &Stored,
+    opts: &Options,
+    cancel: &Cancel,
+) -> Result<(Checked, Vec<Watch>), Error> {
+    let start = Instant::now();
+    let points: Vec<(&PathBuf, bool)> = root.below.iter().map(|(p, &n)| (p, n)).collect();
+    let stale = Mutex::new(Vec::new());
+    let watches = Mutex::new(vec![Watch::Unasked; stored.len()]);
+    shared(stored.len(), opts.threads, cancel, |i| {
+        let (why, watch) = verdict_watched(root, &points, stored.rel(i), stored.folder(i), opts);
+        if let Some(why) = why {
+            stale.lock().unwrap().push((i, why));
+        }
+        watches.lock().unwrap()[i] = watch;
+    });
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let mut stale = stale.into_inner().unwrap();
+    stale.sort_unstable_by_key(|&(i, _)| i);
+    Ok((
+        Checked {
+            stale,
+            took: start.elapsed(),
+        },
+        watches.into_inner().unwrap(),
+    ))
+}
+
+fn verdict_watched(
+    root: &Root,
+    points: &[(&PathBuf, bool)],
+    rel: &Path,
+    stored: StoredFolder,
+    opts: &Options,
+) -> (Option<Stale>, Watch) {
+    if let Some(&(_, network)) = points.iter().find(|(p, _)| rel.starts_with(p)) {
+        let why = if network {
+            Stale::NetworkMount
+        } else {
+            Stale::Mount
+        };
+        return (Some(why), Watch::Unasked);
+    }
+    let fd = match open_beneath(&root.fd, rel) {
+        Ok(fd) => fd,
+        Err(e) => {
+            let why = match e {
+                Errno::NOENT | Errno::NOTDIR => Stale::Gone,
+                Errno::ACCESS | Errno::PERM => Stale::Denied,
+                Errno::LOOP | Errno::XDEV => Stale::Replaced,
+                e => Stale::Failed(e.raw_os_error()),
+            };
+            return (Some(why), Watch::Unasked);
+        }
+    };
+    let watch = opts.watcher.as_ref().map_or(Watch::Unasked, |w| {
+        w.watch(fd.as_fd(), &root.path.join(rel))
+    });
+    let why = match statx_fd(&fd) {
+        Err(e) => Some(Stale::Failed(e.raw_os_error())),
+        Ok(st) if st.stx_mnt_id != root.stat.mount => Some(Stale::Mount),
+        Ok(st) if id_of(&st) != stored.id => Some(Stale::Replaced),
+        Ok(_) if stored.again => Some(Stale::Again),
+        Ok(st) if time(st.stx_ctime) != stored.ctime => Some(Stale::Changed),
+        Ok(_) => None,
+    };
+    (why, watch)
+}
+
 /// The stat of the folder at `rel` by its path, as phase 0 found fastest,
 /// no link followed at its end: through its parent's handle where the
 /// path is longer than the system resolves at once.

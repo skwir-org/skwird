@@ -742,6 +742,68 @@ committed once the gate holds.
      relists at most every 300 s. A client's sync still runs the check
      at once.
    - Tests: coverage is never overstated (below).
+
+   **Done on 2026-11-21.**
+   - **The index** (`skwird_index::update`). The refresh is cut in its
+     parts, so that an install shares them:
+     - `install` watches every folder of a subtree and compares it
+       through its handle (`skwird_crawl::check_watched`): opened, watched,
+       then its identity and change time read. A change before the watch
+       moves the change time; one after is heard.
+     - `reread_folders` reads again the folders heard.
+     - Each says what came of every folder's watch (`Refreshed::watches`),
+       `graft` gives the numbers it gave, and the packer keeps a first
+       build's watches.
+   - **The keeper** maps descriptors to folders both ways, and lets go of
+     the watch of a folder no longer in the index, or numbered again.
+     - `set_scopes` installs each new subtree, live from when its install
+       began if every folder in it was watched. A folder past the budget,
+       past the user's limit or whose watch failed keeps it checked, and
+       says why (`Live::short`).
+     - `heard` applies what was heard.
+     - `overflowed` ends every "live" at once; the next refresh brings it
+       back, the watches having stayed.
+     - `lost` does the same for a subtree whose own folder moved or went,
+       which no watch above it follows.
+     - The live subtrees travel in each snapshot (`Index::live_since`), and
+       coverage within one says live for names and attributes alike.
+   - **The engine.**
+     - One watcher for every root, listened to on a thread that waits on
+       it alone.
+     - The writer gathers what it hears a folder at a time (`live.rs`,
+       100 ms of quiet or 1 s at most), and waits with a deadline only
+       while something is due: a gathering, the check after an overflow,
+       a save 10 s after the first change unsaved.
+     - After an overflow, the check waits for 2 s of quiet, doubling to
+       60 s while overflows follow within 300 s of a check. A sync applies
+       what is gathered for its root at once, then checks.
+     - `watch {add, remove}` keeps a client's folders live, kept across
+       restarts (`$XDG_STATE_HOME/skwird/watched`), as wanted before the
+       first crawl, so that a first build watches as it reads.
+     - `skwird watch [--remove] FOLDER...`; `SKWIRD_WATCHES` sets the
+       budget, for tests.
+   - Tests pass:
+     - the watcher's checks of step 1;
+     - the keeper's, through the real watcher (`tests/live.rs`):
+       - an installed subtree is live, and only it;
+       - a folder made, filled and moved within it is applied, its new
+         folders watched before they are read;
+       - a folder moved out and back leaves nothing behind;
+       - an overflow ends "live", and the refresh after it reads what was
+         dropped and brings "live" back;
+       - a budget reached keeps a subtree from live;
+       - a folder removed lets go of its watch;
+     - the engine's, a process of its own:
+       - a watched folder answered live without a sync, within a second;
+       - a folder made, filled and moved, answered live;
+       - an engine stopped while 16,448 files were made in a watched
+         folder: its coverage lowered once it read the overflow, then live
+         again after the check, every file answered;
+       - past the budget, checked, not live;
+       - registrations kept across a restart; taken back, checked.
+   - Not done here: the sync of a live folder still runs the check of its
+     whole root (step 4 makes it a barrier). A watcher made again (a
+     second generation) does not happen yet: there is one a run.
 4. **The sync barrier** (open question 1). A cookie made in a folder of
    the engine's own, watched by the same instance, so in the same queue:
    heard, every event before it has been read. A sync of a live folder

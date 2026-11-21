@@ -100,8 +100,9 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
     };
     // As the engine builds: each folder packed as the crawl reads it.
     let start = Instant::now();
-    let (mut index, crawled) = crawl_and_build(&root, &opts, &Cancel::default(), Limits::default())
+    let built = crawl_and_build(&root, &opts, &Cancel::default(), Limits::default())
         .map_err(|e| e.to_string())?;
+    let (mut index, crawled) = (built.index, built.took);
     let s = index.sizes();
     println!(
         "crawl: {} folders in {} on {threads} threads, every entry stat-ed, each packed as read",

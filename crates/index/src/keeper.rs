@@ -16,9 +16,10 @@
 //! be written ends its epoch: the next save starts another, and every
 //! token of the old one is too old, never answered with a gap.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Why};
+use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Watch, Why};
 
 use crate::block::{FolderId, State};
 use crate::index::Index;
@@ -73,6 +74,22 @@ pub struct Reconciled {
     pub unsaved: bool,
 }
 
+/// A subtree watched (`docs/PLAN.md`, phase 2, step 3): live once every
+/// folder in it is watched and it has been proven current after.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Live {
+    /// Its folder's path below the root.
+    pub scope: PathBuf,
+    /// Since when every change below it is heard: none while it is not,
+    /// not installed yet, or since an overflow until a check.
+    pub since: Option<Time>,
+    /// Why it cannot be live: a folder in it past the budget of watches,
+    /// past the user's limit, or whose watch failed. It is checked, then.
+    pub short: Option<Watch>,
+    /// Whether every folder in it has been watched and compared.
+    installed: bool,
+}
+
 /// The index of one root, its log, and where they are kept.
 pub struct Keeper {
     dir: PathBuf,
@@ -84,6 +101,12 @@ pub struct Keeper {
     epoch: u64,
     opts: Options,
     limits: Limits,
+    /// Each watch descriptor's folder.
+    watches: HashMap<i32, FolderId>,
+    /// Each folder's descriptor: a folder renumbered, or a number given
+    /// again, never leaves a descriptor behind.
+    by_folder: HashMap<FolderId, i32>,
+    live: Vec<Live>,
 }
 
 /// An epoch not `other`: the time, and the process.
@@ -126,6 +149,9 @@ impl Keeper {
                         log,
                         opts,
                         limits,
+                        watches: HashMap::new(),
+                        by_folder: HashMap::new(),
+                        live: Vec::new(),
                     };
                     if keeper.log.is_none() {
                         // The journal cannot go on from a log not found.
@@ -148,7 +174,8 @@ impl Keeper {
         };
         let start = Time::now();
         // Packed as it is read: the crawl is never held whole.
-        let (mut index, _) = crate::build::crawl_and_build(&root, &opts, cancel, limits)?;
+        let built = crate::build::crawl_and_build(&root, &opts, cancel, limits)?;
+        let mut index = built.index;
         let tells = root.fs_name() != "fuse";
         index.set_proof(if tells {
             Proof::Checked(start)
@@ -164,7 +191,11 @@ impl Keeper {
             epoch: 0,
             opts,
             limits,
+            watches: HashMap::new(),
+            by_folder: HashMap::new(),
+            live: Vec::new(),
         };
+        keeper.note(&built.watches);
         // Saved at once, so that the next start loads it; a save that
         // fails is tried again at the next.
         let _ = keeper.save();
@@ -296,7 +327,183 @@ impl Keeper {
         // The time the index now says it was proven at, exactly.
         let proven = proven_at(self.index.proof());
         self.append(done.records.iter().cloned().chain([Record::Proven(proven)]));
+        self.note(&done.watches);
+        self.prune();
+        // Proven after an overflow, an installed subtree is live again:
+        // its watches stayed, and what came of the events lost is read.
+        if let Proof::Checked(at) = self.index.proof() {
+            for live in &mut self.live {
+                if live.installed && live.short.is_none() && live.since.is_none() {
+                    live.since = Some(at);
+                }
+            }
+        }
+        self.publish_live();
         Ok(done)
+    }
+
+    /// Watch, from now on, the subtrees at `scopes` (below the root),
+    /// through the watcher of [`Options::watcher`], which must already
+    /// want them. Each new one is installed: every folder in it watched
+    /// and compared with the index ([`update::install`]), live from when
+    /// that began if every folder was watched. A subtree no longer named
+    /// lets go of the watches only it held.
+    pub fn set_scopes(&mut self, scopes: &[PathBuf], cancel: &Cancel) -> Result<Refreshed, Error> {
+        self.live.retain(|l| scopes.contains(&l.scope));
+        let held: Vec<PathBuf> = self.live.iter().map(|l| l.scope.clone()).collect();
+        self.unwatch_where(|path| !held.iter().any(|s| path.starts_with(s)));
+        let mut done = Refreshed::default();
+        for scope in scopes.iter().filter(|s| !held.contains(s)) {
+            self.live.push(Live {
+                scope: scope.clone(),
+                since: None,
+                short: None,
+                installed: false,
+            });
+            let start = Time::now();
+            let installed =
+                update::install(&mut self.index, &mut self.root, &self.opts, cancel, scope)?;
+            self.append(installed.records.iter().cloned());
+            self.note(&installed.watches);
+            if let Some(live) = self.live.iter_mut().find(|l| &l.scope == scope) {
+                live.installed = true;
+                if live.short.is_none() {
+                    live.since = Some(start);
+                }
+            }
+            done.records.extend(installed.records);
+            done.watches.extend(installed.watches);
+            done.checked += installed.checked;
+            done.reread += installed.reread;
+            done.crawled += installed.crawled;
+        }
+        self.prune();
+        self.publish_live();
+        Ok(done)
+    }
+
+    /// The subtrees watched, live or not.
+    pub fn live(&self) -> &[Live] {
+        &self.live
+    }
+
+    /// The folder a watch descriptor watches, if this index holds it.
+    pub fn watched(&self, wd: i32) -> Option<FolderId> {
+        self.watches.get(&wd).copied()
+    }
+
+    /// Apply what was heard in `folders`: each read again, watched, its
+    /// new folders crawled, each change logged.
+    pub fn heard(&mut self, folders: &[FolderId], cancel: &Cancel) -> Result<Refreshed, Error> {
+        let done =
+            update::reread_folders(&mut self.index, &self.root, &self.opts, cancel, folders)?;
+        self.append(done.records.iter().cloned());
+        self.note(&done.watches);
+        self.prune();
+        self.publish_live();
+        Ok(done)
+    }
+
+    /// Events were dropped: no subtree is live until the next refresh.
+    pub fn overflowed(&mut self) {
+        for live in &mut self.live {
+            live.since = None;
+        }
+        self.publish_live();
+    }
+
+    /// `folder` moved, or its watch went: if it is a watched subtree's own
+    /// folder, which no watch above it follows, that subtree is not live
+    /// until the next refresh, and this says so.
+    pub fn lost(&mut self, folder: FolderId) -> bool {
+        let path = self.index.path_of(folder);
+        let mut lost = false;
+        for live in &mut self.live {
+            if live.scope == path && live.since.is_some() {
+                live.since = None;
+                lost = true;
+            }
+        }
+        self.publish_live();
+        lost
+    }
+
+    /// What came of watching folders: each descriptor's folder kept, and
+    /// each subtree holding a folder not watched made short of live.
+    fn note(&mut self, watches: &[(FolderId, Watch)]) {
+        for &(folder, watch) in watches {
+            if let Watch::Watched(wd) = watch {
+                // The folder's number held another descriptor: a number
+                // given again. That one's watch goes.
+                if let Some(old) = self.by_folder.insert(folder, wd)
+                    && old != wd
+                {
+                    self.watches.remove(&old);
+                    if let Some(watcher) = &self.opts.watcher {
+                        watcher.unwatch(old);
+                    }
+                }
+                // The descriptor watched another folder: the same folder,
+                // moved and read again under a number of its own.
+                if let Some(other) = self.watches.insert(wd, folder)
+                    && other != folder
+                    && self.by_folder.get(&other) == Some(&wd)
+                {
+                    self.by_folder.remove(&other);
+                }
+                continue;
+            }
+            let path = self.index.path_of(folder);
+            for live in &mut self.live {
+                if path.starts_with(&live.scope) {
+                    live.short = Some(watch);
+                    live.since = None;
+                }
+            }
+        }
+    }
+
+    /// Let go of the watches of folders no longer in the index.
+    fn prune(&mut self) {
+        let tree = self.index.tree();
+        let_go(
+            &mut self.watches,
+            &mut self.by_folder,
+            self.opts.watcher.as_deref(),
+            |folder| tree.loc(folder).is_none(),
+        );
+    }
+
+    /// Let go of the watches of folders whose path `drop` names.
+    fn unwatch_where(&mut self, drop: impl Fn(&Path) -> bool) {
+        let index = &self.index;
+        let_go(
+            &mut self.watches,
+            &mut self.by_folder,
+            self.opts.watcher.as_deref(),
+            |folder| drop(&index.path_of(folder)),
+        );
+    }
+
+    /// The kernel let go of this descriptor's watch: its folder removed,
+    /// or its filesystem unmounted. Its folder is read again from its
+    /// parent's events, or the next check.
+    pub fn forget(&mut self, wd: i32) {
+        if let Some(folder) = self.watches.remove(&wd)
+            && self.by_folder.get(&folder) == Some(&wd)
+        {
+            self.by_folder.remove(&folder);
+        }
+    }
+
+    /// The live subtrees, put in the index for its snapshots to answer.
+    fn publish_live(&mut self) {
+        let live = self
+            .live
+            .iter()
+            .filter_map(|l| l.since.map(|t| (l.scope.clone(), t)))
+            .collect();
+        self.index.set_live(live);
     }
 
     /// Append `records` to the log, made durable together; a log that
@@ -424,4 +631,25 @@ impl Keeper {
     pub fn limits(&self) -> Limits {
         self.limits
     }
+}
+
+/// Let go of the watches of the folders `drop` names, from both maps.
+fn let_go(
+    by_wd: &mut HashMap<i32, FolderId>,
+    by_folder: &mut HashMap<FolderId, i32>,
+    watcher: Option<&skwird_crawl::Watcher>,
+    drop: impl Fn(FolderId) -> bool,
+) {
+    by_wd.retain(|&wd, &mut folder| {
+        let keep = !drop(folder);
+        if !keep {
+            if by_folder.get(&folder) == Some(&wd) {
+                by_folder.remove(&folder);
+            }
+            if let Some(watcher) = watcher {
+                watcher.unwatch(wd);
+            }
+        }
+        keep
+    });
 }

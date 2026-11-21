@@ -1,6 +1,6 @@
 //! skwird: a user's engine, and the command line that asks it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ usage: skwird serve [--root PATH]... [--idle SECONDS | --forever] [--threads N]
        skwird find TERM [--in PATH] [--limit N] [--case]
        skwird coverage [PATH]
        skwird sync [PATH]
+       skwird watch [--remove] FOLDER...
        skwird status
 
 serve     the user's engine: it indexes the roots (the home by default),
@@ -21,10 +22,13 @@ find      the entries whose names hold TERM (a glob where it holds * ? or
           [), as skwir matches them, below PATH (the current folder)
 coverage  how far answers below PATH can be trusted
 sync      prove PATH current now, then say how far it can be trusted
+watch     keep FOLDER live: changes in it heard and applied as they come,
+          within the engine's share of watches (--remove: take it back)
 status    what the engine says of itself
 
 The commands that ask start the engine where none answers, unless
-SKWIRD_NO_START is set.";
+SKWIRD_NO_START is set. SKWIRD_WATCHES sets the most folders an engine
+watches (a quarter of the user's inotify watches by default).";
 
 struct Args {
     command: String,
@@ -33,6 +37,9 @@ struct Args {
     threads: usize,
     term: Option<String>,
     path: Option<PathBuf>,
+    /// The folders `watch` names, and whether it takes them back.
+    folders: Vec<PathBuf>,
+    remove: bool,
     limit: Option<u64>,
     case: bool,
 }
@@ -57,6 +64,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         path: None,
         limit: None,
         case: false,
+        folders: Vec::new(),
+        remove: false,
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -73,6 +82,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--in" => parsed.path = Some(PathBuf::from(it.next().ok_or("--in takes a folder")?)),
             "--limit" => parsed.limit = Some(number(it.next(), "--limit")?),
             "--case" => parsed.case = true,
+            "--remove" => parsed.remove = true,
             "-h" | "--help" => return Err(USAGE.into()),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
@@ -80,6 +90,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             word if parsed.command == "find" && parsed.term.is_none() => {
                 parsed.term = Some(word.to_owned());
             }
+            word if parsed.command == "watch" => parsed.folders.push(PathBuf::from(word)),
             word if parsed.path.is_none() => parsed.path = Some(PathBuf::from(word)),
             _ => return Err(USAGE.into()),
         }
@@ -188,6 +199,7 @@ fn run(args: &Args) -> Result<(), String> {
             print_coverage(&c);
             Ok(())
         }
+        "watch" => watch(args),
         "status" => {
             let c = client()?;
             let w = c.welcome();
@@ -218,10 +230,41 @@ fn serve(args: &Args) -> Result<(), String> {
         roots,
         idle: args.idle,
         threads: args.threads,
+        // SKWIRD_WATCHES: the most folders it watches, the user's share by
+        // default: a test gives fewer.
+        watches: std::env::var("SKWIRD_WATCHES")
+            .ok()
+            .and_then(|v| v.parse().ok()),
     })
 }
 
 #[cfg(not(target_os = "linux"))]
 fn serve(args: &Args) -> Result<(), String> {
     skwird::serve(&args.roots, args.idle)
+}
+
+/// Keep the folders named live, or take them back; then say how far
+/// answers below each can be trusted.
+fn watch(args: &Args) -> Result<(), String> {
+    if args.folders.is_empty() {
+        return Err("watch takes a folder".into());
+    }
+    let folders = args
+        .folders
+        .iter()
+        .map(|f| std::fs::canonicalize(f).map_err(|e| format!("cannot reach a folder: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let named: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
+    let mut c = client()?;
+    let (add, remove): (&[&Path], &[&Path]) = if args.remove {
+        (&[], &named)
+    } else {
+        (&named, &[])
+    };
+    let watching = c.watch(add, remove).map_err(|e| e.to_string())?;
+    for folder in &watching {
+        let coverage = c.coverage(folder).map_err(|e| e.to_string())?;
+        println!("{}: {}", folder.display(), said(coverage.names));
+    }
+    Ok(())
 }

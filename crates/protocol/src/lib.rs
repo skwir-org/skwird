@@ -280,6 +280,15 @@ pub enum Ask {
         #[serde(default)]
         remove: Vec<WirePath>,
     },
+    /// Folders the client wants live (phase 2): kept for it across
+    /// restarts, as its exclusions are. A client removes only what it
+    /// added.
+    Watch {
+        #[serde(default)]
+        add: Vec<WirePath>,
+        #[serde(default)]
+        remove: Vec<WirePath>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +369,10 @@ pub enum Answer {
     /// The token is from before what the engine keeps: walk again.
     TooOld {},
     Excluded {
+        folders: Vec<WirePath>,
+    },
+    /// The folders this client wants live, after its `watch`.
+    Watching {
         folders: Vec<WirePath>,
     },
     Error(Failure),

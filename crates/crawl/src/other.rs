@@ -212,3 +212,12 @@ impl Watcher {
         match self.never {}
     }
 }
+
+pub fn check_watched(
+    root: &Root,
+    _: &Stored,
+    _: &Options,
+    _: &Cancel,
+) -> Result<(Checked, Vec<crate::Watch>), Error> {
+    match root.never {}
+}

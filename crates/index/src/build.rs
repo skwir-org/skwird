@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use skwird_crawl::{
-    Cancel, Crawl, Crawled, Error, FolderStat, Kind, Options, Outcome, Root, crawl,
+    Cancel, Crawl, Crawled, Error, FolderStat, Kind, Options, Outcome, Root, Watch, crawl,
 };
 
 use crate::block::{Block, Facts, FolderId, Item, NameId, State};
@@ -131,16 +131,23 @@ pub fn build(crawl: Crawl, limits: Limits) -> Index {
     packer.finish(limits)
 }
 
+/// The index of the whole root, crawled now, with how long the crawl took
+/// and what came of watching each folder ([`Options::watcher`]).
+pub struct Built {
+    pub index: Index,
+    pub took: Duration,
+    pub watches: Vec<(FolderId, Watch)>,
+}
+
 /// The index of the whole root, crawled now: each folder packed as the
 /// crawl reads it, on a thread of its own, so that the crawl is never
-/// held whole (`docs/PLAN.md`, phase 1, step 7). Gives how long the crawl
-/// took.
+/// held whole (`docs/PLAN.md`, phase 1, step 7).
 pub fn crawl_and_build(
     root: &Root,
     opts: &Options,
     cancel: &Cancel,
     limits: Limits,
-) -> Result<(Index, Duration), Error> {
+) -> Result<Built, Error> {
     // A few folders ahead: the crawl waits for the packer rather than hold
     // what it has not packed yet.
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Crawled)>(256);
@@ -158,6 +165,13 @@ pub fn crawl_and_build(
         });
         drop(tx);
         let packer = packing.join().expect("the packer does not panic");
-        took.map(|took| (packer.finish(limits), took))
+        took.map(|took| {
+            let (index, watches) = packer.finish_watched(limits);
+            Built {
+                index,
+                took,
+                watches,
+            }
+        })
     })
 }

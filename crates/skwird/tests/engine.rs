@@ -60,6 +60,11 @@ impl Env {
 
     /// An engine of the home, gone after `idle` seconds without a client.
     fn engine(&mut self, idle: u64) -> usize {
+        self.engine_with(idle, &[])
+    }
+
+    /// An engine of the home, its environment given `env` too.
+    fn engine_with(&mut self, idle: u64, env: &[(&str, &str)]) -> usize {
         let idle = idle.to_string();
         let child = self
             .command(&[
@@ -71,6 +76,7 @@ impl Env {
                 OsStr::new("--threads"),
                 OsStr::new("2"),
             ])
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -475,4 +481,166 @@ fn a_cancelled_query_says_so_and_stops() {
     assert_eq!(batches, 1, "no batch handed after the cancel");
     // The connection goes on: the next query is answered whole.
     assert_eq!(answered(&mut c, &everything(&home)), walked(&home));
+}
+
+/// Wait until `done` holds, up to `seconds`.
+fn wait_for(seconds: u64, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while !done() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn is_live(c: &mut Client, path: &Path) -> bool {
+    matches!(c.coverage(path).unwrap().names, Proof::Live(_))
+}
+
+/// A folder a client watches is live, and a change made in it is
+/// answered without a sync, within the gathering's second; the rest of
+/// the home stays checked.
+#[test]
+fn a_watched_folder_is_answered_live_without_a_sync() {
+    let mut env = Env::new("engine-live");
+    tree(&env);
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    assert_eq!(c.watch(&[&docs], &[]).unwrap(), vec![docs.clone()]);
+    assert!(is_live(&mut c, &docs));
+    assert!(is_live(&mut c, &docs.join("d05")));
+    assert!(!is_live(&mut c, &home), "the home is checked only");
+    let made = env.s.file(docs.join("d05/made live.txt"));
+    let asked = Instant::now();
+    wait_for(5, "the change answered", || {
+        answered(&mut c, &named(&home, "made live")).contains(&made)
+    });
+    assert!(
+        asked.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        asked.elapsed()
+    );
+}
+
+/// A folder made, filled and moved within a watched folder is answered
+/// live: its new folders watched before they are read, nothing left
+/// under its old path.
+#[test]
+fn a_folder_made_filled_and_moved_is_answered_live() {
+    let mut env = Env::new("engine-live-moved");
+    tree(&env);
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    env.s.file(docs.join("new/a/b/first.txt"));
+    wait_for(5, "the new folder crawled", || {
+        answered(&mut c, &named(&home, "first.txt")).contains(&docs.join("new/a/b/first.txt"))
+    });
+    env.s.file(docs.join("new/a/b/later.txt"));
+    wait_for(5, "a file made in a folder crawled since", || {
+        answered(&mut c, &named(&home, "later.txt")).contains(&docs.join("new/a/b/later.txt"))
+    });
+    env.s.rename(docs.join("new"), docs.join("moved"));
+    wait_for(5, "the move answered", || {
+        let got = answered(&mut c, &named(&home, "later.txt"));
+        got.contains(&docs.join("moved/a/b/later.txt"))
+            && !got.contains(&docs.join("new/a/b/later.txt"))
+    });
+    assert!(is_live(&mut c, &docs));
+}
+
+/// Events dropped while the engine could not read them (stopped while
+/// more files were made than the queue holds): coverage is lowered at
+/// once, then the check after the quiet brings "live" back, with every
+/// file answered.
+#[test]
+fn an_overflow_lowers_coverage_and_the_check_after_brings_it_back() {
+    let mut env = Env::new("engine-live-overflow");
+    tree(&env);
+    let engine = env.engine(60);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    let most: usize = std::fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let pid = env.engines[engine].id().to_string();
+    let signal = |which: &str| {
+        assert!(
+            Command::new("kill")
+                .args([which, pid.as_str()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    // Made and watched first: what is made in it then is heard, queued.
+    let busy = env.s.dir(docs.join("busy"));
+    env.s.file(busy.join("first"));
+    wait_for(5, "the busy folder watched", || {
+        answered(&mut c, &named(&home, "first")).contains(&busy.join("first"))
+    });
+    signal("-STOP");
+    for i in 0..most + 64 {
+        std::fs::write(busy.join(format!("f{i}")), b"").unwrap();
+    }
+    signal("-CONT");
+    wait_for(5, "coverage lowered", || !is_live(&mut c, &docs));
+    wait_for(20, "live again", || is_live(&mut c, &docs));
+    let all = Query {
+        limit: None,
+        ..named(&busy, "f")
+    };
+    let got = answered(&mut c, &all);
+    let missing = (0..most + 64)
+        .filter(|i| !got.contains(&busy.join(format!("f{i}"))))
+        .count();
+    assert_eq!(missing, 0, "files missing after the check");
+    assert!(got.contains(&busy.join("first")));
+}
+
+/// Past the engine's budget of watches, a watched folder is checked, not
+/// live; taken back, it lets go of its watches.
+#[test]
+fn a_folder_past_the_budget_is_checked_not_live() {
+    let mut env = Env::new("engine-live-budget");
+    tree(&env);
+    env.engine_with(30, &[("SKWIRD_WATCHES", "5")]);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    let coverage = c.coverage(&docs).unwrap();
+    assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
+    let few = home.join("docs/d01");
+    c.watch(&[], &[&docs]).unwrap();
+    c.watch(&[&few], &[]).unwrap();
+    assert!(is_live(&mut c, &few), "a folder within the budget is live");
+}
+
+/// What a client watches is kept across a restart: the next engine
+/// watches it before any client asks again. Taken back, it is checked.
+#[test]
+fn watched_folders_are_kept_across_a_restart() {
+    let mut env = Env::new("engine-live-kept");
+    tree(&env);
+    let first = env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    drop(c);
+    env.engines[first].kill().unwrap();
+    env.engines[first].wait().unwrap();
+    env.engine(30);
+    let mut c = env.client("a test");
+    wait_for(5, "live after the restart", || is_live(&mut c, &docs));
+    assert_eq!(c.watch(&[], &[&docs]).unwrap(), Vec::<PathBuf>::new());
+    assert!(!is_live(&mut c, &docs));
 }

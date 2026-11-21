@@ -51,16 +51,16 @@ mod linux;
 pub use linux::watch::{Heard, Watcher};
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Checked, Crawl, Root, Stale, Stored, StoredFolder, check, crawl, crawl_all, crawl_below,
-    filesystem_name, read_folder, read_folder_watched,
+    Checked, Crawl, Root, Stale, Stored, StoredFolder, check, check_watched, crawl, crawl_all,
+    crawl_below, filesystem_name, read_folder, read_folder_watched,
 };
 
 #[cfg(not(target_os = "linux"))]
 mod other;
 #[cfg(not(target_os = "linux"))]
 pub use other::{
-    Checked, Crawl, Heard, Root, Stale, Stored, StoredFolder, Watcher, check, crawl, crawl_all,
-    crawl_below, read_folder, read_folder_watched,
+    Checked, Crawl, Heard, Root, Stale, Stored, StoredFolder, Watcher, check, check_watched, crawl,
+    crawl_all, crawl_below, read_folder, read_folder_watched,
 };
 
 pub use exclude::Exclusions;

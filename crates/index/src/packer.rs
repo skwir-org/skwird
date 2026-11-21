@@ -23,7 +23,7 @@ use std::collections::hash_map::Entry as Slot;
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 
-use skwird_crawl::{Attrs, Crawled, FileId, Kind, Outcome, Time};
+use skwird_crawl::{Attrs, Crawled, FileId, Kind, Outcome, Time, Watch};
 
 use crate::block::{Block, Facts, FolderId, Item, NameId, State};
 use crate::build::facts;
@@ -125,6 +125,9 @@ pub struct Packer {
     /// The order of a listing's entries by their names' bytes, kept from
     /// one folder to the next.
     order: Vec<u32>,
+    /// What came of watching each folder, where a watch was asked: a
+    /// folder's number is its slot.
+    watches: Vec<(FolderId, Watch)>,
 }
 
 impl Default for Packer {
@@ -135,6 +138,7 @@ impl Default for Packer {
             places: Vec::new(),
             weight: 0,
             order: Vec::new(),
+            watches: Vec::new(),
         }
     }
 }
@@ -278,6 +282,9 @@ impl Packer {
         if self.places.len() <= slot {
             self.places.resize(slot + 1, UNSEEN);
         }
+        if crawled.watch != Watch::Unasked {
+            self.watches.push((slot as FolderId, crawled.watch));
+        }
         self.places[slot] = Place {
             at: self.packed.len(),
             parent: crawled.parent.map_or(NONE, |p| p as u32),
@@ -322,11 +329,18 @@ impl Packer {
     /// The index of every folder packed: slot 0 is the root's, and every
     /// slot below the highest was handed.
     pub fn finish(self, limits: Limits) -> Index {
+        self.finish_watched(limits).0
+    }
+
+    /// [`Packer::finish`], and what came of watching each folder packed,
+    /// where a watch was asked.
+    pub fn finish_watched(self, limits: Limits) -> (Index, Vec<(FolderId, Watch)>) {
         let Packer {
             names,
             packed,
             places,
             weight,
+            watches,
             ..
         } = self;
         // The names first, so that their table is let go of before the
@@ -348,7 +362,7 @@ impl Packer {
             limits,
         )
         .expect("blocks unpacked in pre-order make a tree");
-        Index::new(tree, Names::new(names))
+        (Index::new(tree, Names::new(names)), watches)
     }
 }
 

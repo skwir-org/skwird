@@ -31,9 +31,14 @@ pub fn coverage_at(index: &Index, root: &Path, rel: &Path) -> Option<wire::Cover
         return Some(not_covered(why));
     }
     let c = index.coverage(folder);
+    // Within a live subtree, names and attributes are both live: a change
+    // to an entry is heard, and its folder read again, stat and all.
+    let live = index
+        .live_since(rel)
+        .map(|t| wire::Proof::Live(convert::time(t)));
     Some(wire::Coverage {
-        names: convert::proof(c.names),
-        attrs: wire::Proof::AsOf(convert::time(c.attrs)),
+        names: live.unwrap_or_else(|| convert::proof(c.names)),
+        attrs: live.unwrap_or_else(|| wire::Proof::AsOf(convert::time(c.attrs))),
         holes: c
             .holes
             .into_iter()
