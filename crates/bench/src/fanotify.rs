@@ -172,7 +172,8 @@ pub fn probe(path: &Path, seconds: u64, probes: &[PathBuf]) -> Result<(), String
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     println!("kernel: {}", release.trim());
     let fs = rustix::fs::statfs(path).map_err(|e| format!("cannot statfs the path: {e}"))?;
-    let kind = crate::walk::fs_name(&fs);
+    #[allow(clippy::unnecessary_cast)] // its type differs between architectures
+    let kind = skwird_crawl::filesystem_name(fs.f_type as u64);
     println!("filesystem: {kind}");
     let group = group()?;
     let Some(marked) = watch(&group, path, &kind)? else {

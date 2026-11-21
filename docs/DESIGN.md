@@ -158,7 +158,9 @@ concerned, until that subtree is read again.
   - Change times can be coarse: a second change within one tick of the
     clock can leave the time as it was, so a folder read within a tick
     of its last change is read again at the next check, as git does
-    with its "racily clean" entries.
+    with its "racily clean" entries. The tick is two seconds, the
+    coarsest change times local filesystems keep; a change time ahead
+    of the clock counts as within it.
   - The folder's device and inode are compared too. The check goes by
     path, which phase 0 found fastest, and a path follows a link in any
     of its folders (`O_NOFOLLOW` guards only the last name). A folder
@@ -167,8 +169,12 @@ concerned, until that subtree is read again.
     through its parent's handle, or by a path that may hold no link
     (`openat2` with `RESOLVE_NO_SYMLINKS` on Linux, `O_NOFOLLOW_ANY` on
     macOS), so another folder's names are never indexed under its path.
-    A path longer than the system allows is checked through its
-    parent's handle as well.
+    On Linux that path is also beneath the root and crosses no mount
+    (`RESOLVE_BENEATH`, `RESOLVE_NO_XDEV`), and one longer than the
+    system resolves at once is opened a part at a time. A path longer
+    than the system allows is checked through its parent's handle as
+    well. The crawl needs Linux 5.8 (`openat2`, `statx`'s mount id), and
+    refuses an older kernel, saying what it lacks.
 
   It is not a comparison against a timestamp with a margin, as fsearch
   does with modification times (every folder changed since 120 seconds
@@ -285,7 +291,10 @@ and a handle that does not open.
 It is not enough to leave them out of answers: they are never read into
 the index. skwird honours what marks them itself:
 - a `.private` file in a folder (skwir's convention);
-- default exclusions (`~/.ssh`, `~/.gnupg`, keyrings);
+- default exclusions: `~/.ssh`, `~/.gnupg`, the keyrings
+  (`~/.local/share/keyrings`, `~/.local/share/kwalletd`), and the
+  password store (`~/.password-store`), whose names are the accounts it
+  holds;
 - a user's own exclusions, in skwird's configuration;
 - folders a client registers (the user's choice, 2026-11-11).
 
@@ -315,7 +324,12 @@ compared as that folder (its identity, or its range in the index),
 never as the spelling of a path. In fsearch, an exclusion written with a
 trailing slash excluded nothing, an empty one excluded everything, and
 `/h/m` was taken to hold `/h/me`. In skwird the first would index a
-private folder.
+private folder. So the path is named as the system resolves it (links
+followed, doubled and trailing slashes dropped), the folder there is
+kept by its identity, and the resolved path is compared by whole
+components. One that names no folder yet is kept by its resolved path,
+and applies to the folder made there. An empty or relative path is
+refused, never taken to mean everything.
 
 ### 6. Answers carry identity
 

@@ -15,8 +15,10 @@ It runs in one of three ways, with the same engine and protocol:
 - **on demand**, started by its first client and ending a minute after
   its last.
 
-**Status:** design. Only the measurement tool is built. Read
-`docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the phases.
+**Status:** phase 1 under way: the crawl is built (`skwird-crawl`), and
+the measurement tool reads with it; the index, the engine and the
+protocol are not yet. Read `docs/DESIGN.md` for the decisions and
+`docs/PLAN.md` for the phases.
 
 ## Measuring
 

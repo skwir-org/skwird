@@ -1,26 +1,20 @@
-//! A walk of names, as skwird's crawl would make it: each folder read
-//! with `getdents64` (rustix's `Dir`), each entry's kind from what the
-//! listing says, a stat only for folders (their change time, which the
-//! check compares, and their mount, which tells a mount below the root)
-//! and, with `--stat`, for every entry, as an index of sizes and times
-//! needs.
+//! A walk of names, as skwird's crawl makes it (`skwird_crawl::crawl`,
+//! the crawl that is built), counted: each folder read with `getdents64`,
+//! each folder stat-ed for its identity and change time, and with
+//! `--stat` every entry, as an index of sizes and times needs. Mounts
+//! below the root are never crossed.
 
-use std::collections::{HashMap, HashSet};
-use std::ffi::{CStr, CString, OsStr};
-use std::os::unix::ffi::OsStrExt;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Duration;
 
-use rustix::fd::{AsFd, BorrowedFd};
-use rustix::fs::{AtFlags, Dev, Dir, FileType, Mode, OFlags};
+use skwird_crawl::{Cancel, Crawled, Exclusions, Kind, Outcome, Root, Stored, Why};
 
 pub struct Options {
     pub threads: usize,
     /// Stat every entry, not only folders.
     pub stat_files: bool,
-    /// Walk into other filesystems mounted below the root.
-    pub cross_mounts: bool,
 }
 
 /// A change time: seconds and nanoseconds.
@@ -34,60 +28,7 @@ pub fn ctime(st: &rustix::fs::Stat) -> Ctime {
     (st.st_ctime as i64, st.st_ctime_nsec as i64)
 }
 
-/// What a folder's stat tells the walk.
-struct Stated {
-    /// Its device and inode: a folder reached twice is walked once.
-    id: (Dev, u64),
-    ctime: Ctime,
-    /// The mount it is in: a folder in another mount than the root's is
-    /// where a mount below the root starts.
-    mount: u64,
-}
-
-/// A folder's stat, or without a name the stat of `dir` itself. Its
-/// mount is its mount id (`statx`, Linux 5.8), not its device: each btrfs
-/// subvolume has a device of its own and is no mount, and a bind mount
-/// keeps its filesystem's device. A kernel without mount ids gives the
-/// device.
-#[cfg(target_os = "linux")]
-fn stated(dir: BorrowedFd<'_>, name: Option<&CStr>) -> rustix::io::Result<Stated> {
-    use rustix::fs::StatxFlags;
-    let (name, flags) = name.map_or((c"", AtFlags::EMPTY_PATH), |name| {
-        (name, AtFlags::SYMLINK_NOFOLLOW)
-    });
-    let st = rustix::fs::statx(
-        dir,
-        name,
-        flags,
-        StatxFlags::BASIC_STATS | StatxFlags::MNT_ID,
-    )?;
-    let dev = rustix::fs::makedev(st.stx_dev_major, st.stx_dev_minor);
-    let has_mount_id = st.stx_mask & StatxFlags::MNT_ID.bits() != 0;
-    Ok(Stated {
-        id: (dev, st.stx_ino),
-        ctime: (st.stx_ctime.tv_sec, i64::from(st.stx_ctime.tv_nsec)),
-        mount: if has_mount_id { st.stx_mnt_id } else { dev },
-    })
-}
-
-/// A folder's stat, or without a name the stat of `dir` itself. Its
-/// mount is its device, which on macOS changes at every mount.
-#[cfg(not(target_os = "linux"))]
-// A device number's bits, only compared with another's.
-#[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
-fn stated(dir: BorrowedFd<'_>, name: Option<&CStr>) -> rustix::io::Result<Stated> {
-    let st = match name {
-        Some(name) => rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?,
-        None => rustix::fs::fstat(dir)?,
-    };
-    Ok(Stated {
-        id: (st.st_dev, st.st_ino as u64),
-        ctime: ctime(&st),
-        mount: st.st_dev as u64,
-    })
-}
-
-/// A folder found, with the change time the check compares.
+/// A folder read, with the change time the check compares.
 pub struct Folder {
     pub path: PathBuf,
     pub ctime: Ctime,
@@ -106,16 +47,19 @@ pub struct Walked {
     /// Names told apart, and their bytes once each.
     pub distinct: u64,
     pub distinct_bytes: u64,
-    /// Folders that could not be read (permission denied, gone meanwhile).
+    /// Folders that could not be read (permission denied, gone meanwhile,
+    /// a listing cut short).
     pub unreadable: u64,
     /// Folders where another mount starts, not walked into.
     pub mounts: u64,
-    /// Folders reached a second time (through a bind mount), walked once.
-    pub again: u64,
-    /// Every folder walked, the root first.
+    /// Folders holding a `.private` file, not walked into.
+    pub private: u64,
+    /// Every folder read, the root first, by its path.
     pub list: Vec<Folder>,
+    /// The same folders as the check takes them.
+    pub stored: Vec<Stored>,
     pub took: Duration,
-    /// The root filesystem's name, as `fs_name` gives it.
+    /// The root filesystem's name.
     pub fs: String,
 }
 
@@ -125,195 +69,122 @@ impl Walked {
     }
 }
 
-/// One thread's share, merged when the walk ends.
+/// What the sink counts while the crawl runs.
 #[derive(Default)]
-struct Share {
-    folders: u64,
-    files: u64,
-    links: u64,
-    others: u64,
-    name_bytes: u64,
-    unreadable: u64,
-    mounts: u64,
-    again: u64,
+struct Counts {
+    walked: Walked,
     /// Names by their hash, with their length.
     names: HashMap<u64, u16>,
-    list: Vec<Folder>,
+    /// Folders read, by slot, so that the root comes first.
+    read: Vec<(usize, Folder, Stored)>,
 }
 
-/// Folders waiting to be read, and how many are being read: the walk ends
-/// when none waits and none is read.
-struct Queue {
-    state: Mutex<(Vec<PathBuf>, usize)>,
-    turn: Condvar,
-    /// Every folder queued, by device and inode: a bind mount of a folder
-    /// above, on the same filesystem, would otherwise be walked forever.
-    seen: Mutex<HashSet<(Dev, u64)>>,
+/// The root, opened as the crawl opens it.
+pub fn open(root: &Path) -> Result<Root, String> {
+    Root::open(root, Exclusions::none()).map_err(|e| e.to_string())
 }
 
-impl Queue {
-    fn next(&self) -> Option<PathBuf> {
-        let mut state = self.state.lock().unwrap();
-        loop {
-            if let Some(dir) = state.0.pop() {
-                state.1 += 1;
-                return Some(dir);
-            }
-            if state.1 == 0 {
-                return None;
-            }
-            state = self.turn.wait(state).unwrap();
-        }
-    }
-
-    fn done(&self, found: Vec<PathBuf>) {
-        let mut state = self.state.lock().unwrap();
-        state.1 -= 1;
-        state.0.extend(found);
-        self.turn.notify_all();
-    }
-}
-
-pub fn walk(root: &Path, opts: &Options) -> Result<Walked, String> {
-    let start = Instant::now();
-    let fd = open(root).map_err(|e| format!("cannot open the root: {e}"))?;
-    let own = stated(fd.as_fd(), None).map_err(|e| format!("cannot stat the root: {e}"))?;
-    let fs = rustix::fs::fstatfs(&fd).map_or_else(|_| "unknown".into(), |s| fs_name(&s));
-    drop(fd);
-    let queue = Queue {
-        state: Mutex::new((vec![root.to_path_buf()], 0)),
-        turn: Condvar::new(),
-        seen: Mutex::new(HashSet::from([own.id])),
+pub fn walk(root: &Root, opts: &Options) -> Result<Walked, String> {
+    let crawl_opts = skwird_crawl::Options {
+        threads: opts.threads,
+        attrs: opts.stat_files,
+        ..skwird_crawl::Options::default()
     };
-    let shares: Vec<Share> = std::thread::scope(|scope| {
-        let threads: Vec<_> = (0..opts.threads.max(1))
-            .map(|_| scope.spawn(|| work(&queue, own.mount, opts)))
-            .collect();
-        threads.into_iter().map(|t| t.join().unwrap()).collect()
-    });
-    let took = start.elapsed();
-    let mut walked = Walked {
-        took,
-        fs,
-        folders: 1,
-        ..Walked::default()
-    };
-    walked.list.push(Folder {
-        path: root.to_path_buf(),
-        ctime: own.ctime,
-    });
-    let mut names: HashMap<u64, u16> = HashMap::new();
-    for share in shares {
-        walked.folders += share.folders;
-        walked.files += share.files;
-        walked.links += share.links;
-        walked.others += share.others;
-        walked.name_bytes += share.name_bytes;
-        walked.unreadable += share.unreadable;
-        walked.mounts += share.mounts;
-        walked.again += share.again;
-        walked.list.extend(share.list);
-        names.extend(share.names);
+    let counts = Mutex::new(Counts::default());
+    let took = skwird_crawl::crawl(
+        root,
+        Path::new(""),
+        &crawl_opts,
+        &Cancel::default(),
+        &|slot, crawled| {
+            // Counted on the crawl's thread, merged under the lock.
+            let counted = count(root, slot, crawled);
+            merge(counted, &mut counts.lock().unwrap());
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let mut counts = counts.into_inner().unwrap();
+    counts.read.sort_unstable_by_key(|(slot, ..)| *slot);
+    let mut walked = counts.walked;
+    walked.folders += 1; // the root, which no listing names
+    walked.distinct = counts.names.len() as u64;
+    walked.distinct_bytes = counts.names.values().map(|&n| u64::from(n)).sum();
+    for (_, folder, stored) in counts.read {
+        walked.list.push(folder);
+        walked.stored.push(stored);
     }
-    walked.distinct = names.len() as u64;
-    walked.distinct_bytes = names.values().map(|&n| u64::from(n)).sum();
+    walked.took = took;
+    root.fs_name().clone_into(&mut walked.fs);
     Ok(walked)
 }
 
-fn open(dir: &Path) -> rustix::io::Result<rustix::fd::OwnedFd> {
-    rustix::fs::open(
-        dir,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
+/// One folder, counted.
+#[derive(Default)]
+struct Counted {
+    walked: Walked,
+    names: Vec<(u64, u16)>,
+    read: Option<(usize, Folder, Stored)>,
 }
 
-fn work(queue: &Queue, root_mount: u64, opts: &Options) -> Share {
-    let mut share = Share::default();
-    while let Some(dir) = queue.next() {
-        let mut found = Vec::new();
-        read(&dir, root_mount, opts, &queue.seen, &mut share, &mut found);
-        queue.done(found);
-    }
-    share
-}
-
-/// Read one folder: count its entries, and queue its folders.
-fn read(
-    dir: &Path,
-    root_mount: u64,
-    opts: &Options,
-    seen: &Mutex<HashSet<(Dev, u64)>>,
-    share: &mut Share,
-    found: &mut Vec<PathBuf>,
-) {
-    let Ok(listing) = open(dir).and_then(Dir::new) else {
-        share.unreadable += 1;
-        return;
+fn count(root: &Root, slot: usize, crawled: Crawled) -> Counted {
+    let mut counted = Counted::default();
+    let listing = match crawled.outcome {
+        Outcome::Listed(listing) => listing,
+        Outcome::NotCovered(why) => {
+            let w = &mut counted.walked;
+            match why {
+                Why::Mount | Why::NetworkMount => w.mounts += 1,
+                Why::Private | Why::Excluded => w.private += 1,
+                _ => w.unreadable += 1,
+            }
+            return counted;
+        }
     };
-    let mut listing = listing;
-    let mut entries: Vec<(CString, FileType)> = Vec::new();
-    while let Some(entry) = listing.read() {
-        let Ok(entry) = entry else {
-            share.unreadable += 1;
-            break;
-        };
-        let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") {
-            continue;
+    for (name, entry) in listing.iter() {
+        let w = &mut counted.walked;
+        match entry.kind {
+            Kind::Folder => w.folders += 1,
+            Kind::File => w.files += 1,
+            Kind::Link => w.links += 1,
+            Kind::Other => w.others += 1,
         }
-        entries.push((name.to_owned(), entry.file_type()));
-    }
-    let Ok(fd) = listing.fd() else { return };
-    for (name, kind) in entries {
-        let bytes = name.to_bytes();
-        share.name_bytes += bytes.len() as u64;
-        share
+        w.name_bytes += name.len() as u64;
+        counted
             .names
-            .entry(fnv(bytes))
-            .or_insert(bytes.len().min(usize::from(u16::MAX)) as u16);
-        let stat = |name: &CStr| rustix::fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW);
-        let kind = match kind {
-            FileType::Unknown => match stat(&name) {
-                Ok(st) => FileType::from_raw_mode(st.st_mode),
-                Err(_) => FileType::Unknown,
-            },
-            kind => kind,
-        };
-        match kind {
-            FileType::Directory => {
-                share.folders += 1;
-                let Ok(st) = stated(fd, Some(&name)) else {
-                    share.unreadable += 1;
-                    continue;
-                };
-                if st.mount != root_mount && !opts.cross_mounts {
-                    share.mounts += 1;
-                    continue;
-                }
-                if !seen.lock().unwrap().insert(st.id) {
-                    share.again += 1;
-                    continue;
-                }
-                let path = dir.join(OsStr::from_bytes(bytes));
-                share.list.push(Folder {
-                    path: path.clone(),
-                    ctime: st.ctime,
-                });
-                found.push(path);
-            }
-            other => {
-                match other {
-                    FileType::RegularFile => share.files += 1,
-                    FileType::Symlink => share.links += 1,
-                    _ => share.others += 1,
-                }
-                if opts.stat_files {
-                    let _ = stat(&name);
-                }
-            }
-        }
+            .push((fnv(name), name.len().min(usize::from(u16::MAX)) as u16));
     }
+    let stat = listing.stat;
+    counted.read = Some((
+        slot,
+        Folder {
+            path: root.path().join(&crawled.rel),
+            ctime: (stat.ctime.sec, i64::from(stat.ctime.nsec)),
+        },
+        Stored {
+            rel: crawled.rel,
+            id: stat.id,
+            ctime: stat.ctime,
+            // The bench times the check itself: every folder is stat-ed.
+            again: false,
+        },
+    ));
+    counted
+}
+
+fn merge(counted: Counted, counts: &mut Counts) {
+    let (w, c) = (&mut counts.walked, counted.walked);
+    w.folders += c.folders;
+    w.files += c.files;
+    w.links += c.links;
+    w.others += c.others;
+    w.name_bytes += c.name_bytes;
+    w.unreadable += c.unreadable;
+    w.mounts += c.mounts;
+    w.private += c.private;
+    for (hash, len) in counted.names {
+        counts.names.entry(hash).or_insert(len);
+    }
+    counts.read.extend(counted.read);
 }
 
 /// FNV-1a: names told apart by a 64-bit hash, cheap enough not to weigh
@@ -328,66 +199,27 @@ fn fnv(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// A filesystem's name by its `statfs` magic, or the number.
-#[cfg(target_os = "linux")]
-pub fn fs_name(fs: &rustix::fs::StatFs) -> String {
-    match fs.f_type as u64 {
-        0x9123_683e => "btrfs".into(),
-        0xef53 => "ext4".into(),
-        0x5846_5342 => "xfs".into(),
-        0x2fc1_2fc1 => "zfs".into(),
-        0xf2f5_2010 => "f2fs".into(),
-        0xca45_1a4e => "bcachefs".into(),
-        0x0102_1994 => "tmpfs".into(),
-        0x794c_7630 => "overlayfs".into(),
-        0x6573_5546 => "fuse".into(),
-        0x6969 => "nfs".into(),
-        0xff53_4d42 | 0xfe53_4d42 => "smb".into(),
-        0 => "unknown".into(),
-        other => format!("{other:#x}"),
-    }
-}
-
-/// A filesystem's name as macOS gives it (`f_fstypename`): its `f_type`
-/// numbers are not Linux's.
-#[cfg(target_vendor = "apple")]
-pub fn fs_name(fs: &rustix::fs::StatFs) -> String {
-    let name: Vec<u8> = fs
-        .f_fstypename
-        .iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
-        .collect();
-    String::from_utf8_lossy(&name).into_owned()
-}
-
-/// A filesystem's name, which the other systems' `statfs` is not read for.
-#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-pub fn fs_name(_: &rustix::fs::StatFs) -> String {
-    "unknown on this system".into()
-}
-
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests {
     use super::*;
+    use skwird_testkit::Scratch;
 
     /// A tree of known shape is counted as it is: the root and its folders,
     /// files, links and names; a folder is listed once, with a change time.
     #[test]
     fn a_walk_counts_what_the_tree_holds() {
-        let tmp = tempdir();
-        let root = tmp.join("root");
-        std::fs::create_dir_all(root.join("a/b")).unwrap();
-        std::fs::create_dir_all(root.join("c")).unwrap();
-        std::fs::write(root.join("a/same.txt"), "").unwrap();
-        std::fs::write(root.join("c/same.txt"), "").unwrap();
-        std::fs::write(root.join("a/b/other name.txt"), "").unwrap();
-        std::os::unix::fs::symlink("a", root.join("link")).unwrap();
+        let s = Scratch::new("bench-walk");
+        s.dir("a/b");
+        s.dir("c");
+        s.file("a/same.txt");
+        s.file("c/same.txt");
+        s.file("a/b/other name.txt");
+        s.link("link", "a");
+        let root = open(s.path()).unwrap();
         for threads in [1, 4] {
             let opts = Options {
                 threads,
                 stat_files: threads == 4,
-                cross_mounts: false,
             };
             let walked = walk(&root, &opts).unwrap();
             assert_eq!(walked.folders, 4, "root, a, a/b, c");
@@ -395,66 +227,12 @@ pub(crate) mod tests {
             assert_eq!(walked.links, 1);
             assert_eq!(walked.entries(), 8);
             assert_eq!(walked.list.len(), 4);
+            assert_eq!(walked.list[0].path, s.path(), "the root first");
             // a, b, c, link, same.txt twice, other name.txt
             assert_eq!(walked.distinct, 6);
             assert_eq!(walked.distinct_bytes, 1 + 1 + 1 + 4 + 8 + 14);
             assert_eq!(walked.name_bytes, walked.distinct_bytes + 8);
             assert_eq!(walked.unreadable, 0);
         }
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    /// A btrfs subvolume below the root has a device of its own, but is
-    /// no mount: it is walked as part of the tree. Skipped where no
-    /// subvolume can be made in the scratch folder.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_btrfs_subvolume_is_walked() {
-        use std::os::unix::fs::MetadataExt;
-        let tmp = tempdir();
-        let root = tmp.join("root");
-        std::fs::create_dir_all(&root).unwrap();
-        let made = std::process::Command::new("btrfs")
-            .args(["subvolume", "create"])
-            .arg(root.join("sub"))
-            .output();
-        if !made.is_ok_and(|out| out.status.success()) {
-            eprintln!("skipped: no btrfs subvolume can be made here");
-            std::fs::remove_dir_all(&tmp).unwrap();
-            return;
-        }
-        std::fs::write(root.join("sub/file"), "").unwrap();
-        let dev = |p: &Path| std::fs::metadata(p).unwrap().dev();
-        assert_ne!(dev(&root), dev(&root.join("sub")));
-        let opts = Options {
-            threads: 2,
-            stat_files: false,
-            cross_mounts: false,
-        };
-        let walked = walk(&root, &opts).unwrap();
-        assert_eq!(walked.mounts, 0);
-        assert_eq!(walked.folders, 2, "root, sub");
-        assert_eq!(walked.files, 1);
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    /// A scratch folder of the test's own under the user's cache, not
-    /// `/tmp`, which may be a tmpfs with other change-time rules.
-    pub fn tempdir() -> PathBuf {
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .unwrap()
-            .join("skwird-tests");
-        let dir = base.join(format!(
-            "walk-{}-{}",
-            std::process::id(),
-            std::thread::current()
-                .name()
-                .unwrap_or("t")
-                .replace("::", "-")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 }

@@ -138,6 +138,27 @@ committed then.
      again; cancellation.
    - The toolchain moves to skwir's (1.99.1), so the copies of the
      client's crates meet the lints skwir runs.
+
+   **Done on 2026-11-21.** `skwird-testkit` (`Scratch`,
+   `reference_walk`, `in_namespace`, which runs a test again under
+   `unshare --user --map-root-user --mount`) and `skwird-crawl`
+   (`crawl`, `read_folder`, `check`, `mounts`, `exclude`). The crawl
+   lists what the reference walk finds, entry for entry, on a tree of
+   awkward names 300 levels deep. Of the fixtures below, those for the
+   crawl pass, the namespace's and the subvolume's run here rather than
+   skipping: times set back, the tick, a folder or one above it swapped
+   for a link, denied then readable, a listing cut short (from a listing
+   of the test's making), deeper than the system resolves, exclusion
+   spellings, `.private`, a subvolume, a tmpfs and a bind mount, a mount
+   made after the crawl, a network mount (from a table of the test's
+   making). The bench walks and checks with it. On a synthetic tree of
+   1,011,101 entries in 11,111 folders, warm, 20 threads, best of six
+   runs alternated with the walker it replaces, on a loaded machine:
+   every entry stat-ed, 417 ms against 403; names alone, 54 ms against
+   49.
+   - Not done here: a folder's ACL flag (phase 3 needs it); what a
+     root or a folder on FUSE can claim, whose change times do not tell
+     (step 3: never "checked").
 2. **The index.**
    - A spike first, on the format's one hard part: a subtree stays one
      range while chunks are rewritten. Its answer shapes the format, so

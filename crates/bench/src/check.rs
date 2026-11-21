@@ -3,9 +3,11 @@
 //! one the index stored. A folder's entries change only with its change
 //! time, so the folders that differ are the only ones to read again.
 //!
-//! Two ways are timed: by each folder's whole path, and through its parent
-//! folder held open (`statat` on each child), which costs one open per
-//! parent but no lookup of the path above it.
+//! Two ways are timed: by each folder's whole path, which is skwird's own
+//! check (`skwird_crawl::check`, the one that is built), and through its
+//! parent folder held open (`statat` on each child), which costs one open
+//! per parent but no lookup of the path above it. Phase 0 found the first
+//! faster beyond one thread.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -15,6 +17,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rustix::fs::{AtFlags, Mode, OFlags};
+
+use skwird_crawl::{Cancel, Root, Stale, Stored};
 
 use crate::walk::{Ctime, Folder, ctime};
 
@@ -61,23 +65,24 @@ impl Groups {
     }
 }
 
-/// Stat every folder by its path, on `threads` threads.
-pub fn by_path(list: &[Folder], threads: usize) -> Checked {
-    let (changed, gone) = (AtomicU64::new(0), AtomicU64::new(0));
-    let start = Instant::now();
-    shared(list.len(), threads, |i| {
-        let folder = &list[i];
-        match rustix::fs::statat(rustix::fs::CWD, &folder.path, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(st) if ctime(&st) == folder.ctime => {}
-            Ok(_) => _ = changed.fetch_add(1, Ordering::Relaxed),
-            Err(_) => _ = gone.fetch_add(1, Ordering::Relaxed),
-        }
-    });
-    Checked {
-        took: start.elapsed(),
-        changed: changed.into_inner(),
-        gone: gone.into_inner(),
-    }
+/// Stat every folder by its path, on `threads` threads: skwird's check.
+pub fn by_path(root: &Root, stored: &[Stored], threads: usize) -> Result<Checked, String> {
+    let opts = skwird_crawl::Options {
+        threads,
+        ..skwird_crawl::Options::default()
+    };
+    let checked =
+        skwird_crawl::check(root, stored, &opts, &Cancel::default()).map_err(|e| e.to_string())?;
+    let gone = checked
+        .stale
+        .iter()
+        .filter(|(_, why)| *why == Stale::Gone)
+        .count() as u64;
+    Ok(Checked {
+        took: checked.took,
+        changed: checked.stale.len() as u64 - gone,
+        gone,
+    })
 }
 
 /// Stat every folder through its parent held open, on `threads` threads.
@@ -138,44 +143,43 @@ fn shared(len: usize, threads: usize, each: impl Fn(usize) + Sync) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::walk::{Options, walk};
+    use crate::walk::{Options, open, walk};
+    use skwird_testkit::Scratch;
 
     /// Nothing changed is nothing found; a file added, a folder renamed or
     /// one removed are found by both checks, and only those.
     #[test]
     fn the_check_finds_the_folders_whose_entries_changed() {
-        let tmp = crate::walk::tests::tempdir();
-        let root = tmp.join("root");
+        let s = Scratch::new("bench-check");
         for dir in ["a/b", "c/d", "e"] {
-            std::fs::create_dir_all(root.join(dir)).unwrap();
+            s.dir(dir);
         }
+        let root = open(s.path()).unwrap();
         let opts = Options {
             threads: 2,
             stat_files: false,
-            cross_mounts: false,
         };
         let walked = walk(&root, &opts).unwrap();
         let groups = Groups::of(&walked.list);
         for threads in [1, 3] {
-            let quiet = by_path(&walked.list, threads);
+            let quiet = by_path(&root, &walked.stored, threads).unwrap();
             assert_eq!((quiet.changed, quiet.gone), (0, 0));
             let quiet = by_parent(&groups, threads);
             assert_eq!((quiet.changed, quiet.gone), (0, 0));
         }
         // A file in a/b changes a/b; renaming c/d changes c, and c/d is gone;
         // removing e changes the root, and e is gone.
-        std::fs::write(root.join("a/b/new.txt"), "").unwrap();
-        std::fs::rename(root.join("c/d"), root.join("c/d2")).unwrap();
-        std::fs::remove_dir(root.join("e")).unwrap();
+        s.file("a/b/new.txt");
+        s.rename("c/d", "c/d2");
+        s.remove("e");
         for threads in [1, 3] {
-            let found = by_path(&walked.list, threads);
+            let found = by_path(&root, &walked.stored, threads).unwrap();
             assert_eq!((found.changed, found.gone), (3, 2), "a/b, c, root; c/d, e");
             let found = by_parent(&groups, threads);
             assert_eq!((found.changed, found.gone), (3, 2));
         }
-        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

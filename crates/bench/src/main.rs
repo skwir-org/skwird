@@ -16,13 +16,13 @@ mod said;
 mod walk;
 
 const USAGE: &str = "\
-usage: skwird-bench walk ROOT [--threads N] [--stat] [--cross-mounts]
+usage: skwird-bench walk ROOT [--threads N] [--stat]
        skwird-bench check ROOT [--threads N] [--runs N] [--cold] [--drop-with CMD]
        skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
 
-walk      read every folder under ROOT as skwird's crawl would, and size
-          the index it would keep (--stat: stat every entry, as an index
-          of sizes and times needs)
+walk      read every folder under ROOT with skwird's crawl, and size the
+          index it would keep (--stat: stat every entry, as an index of
+          sizes and times needs). Mounts below ROOT are not crossed
 check     what proving that index current costs where nothing watched:
           every folder's change time, on 1, 8 and all threads (--cold:
           asks you to drop the caches before each cold pass; --drop-with
@@ -44,7 +44,6 @@ struct Args {
     threads: usize,
     runs: usize,
     stat: bool,
-    cross_mounts: bool,
     cold: bool,
     /// A command that drops the caches, run with `sh -c` before each cold pass.
     drop_with: Option<String>,
@@ -62,7 +61,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
         threads: std::thread::available_parallelism().map_or(8, std::num::NonZero::get),
         runs: 3,
         stat: false,
-        cross_mounts: false,
         cold: false,
         drop_with: None,
         seconds: 0,
@@ -78,7 +76,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--runs" => parsed.runs = number(it.next(), "--runs")?.max(1) as usize,
             "--seconds" => parsed.seconds = number(it.next(), "--seconds")?,
             "--stat" => parsed.stat = true,
-            "--cross-mounts" => parsed.cross_mounts = true,
             "--cold" => parsed.cold = true,
             "--drop-with" => {
                 parsed.drop_with = Some(it.next().ok_or("--drop-with takes a command")?.clone());
@@ -133,7 +130,8 @@ fn run(args: &Args) -> Result<(), String> {
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
         "walk" => {
-            let walked = walk::walk(&args.path, &walk_options(args, args.stat))?;
+            let root = walk::open(&args.path)?;
+            let walked = walk::walk(&root, &walk_options(args, args.stat))?;
             print_walk(&walked, args);
             Ok(())
         }
@@ -151,7 +149,6 @@ fn walk_options(args: &Args, stat_files: bool) -> walk::Options {
     walk::Options {
         threads: args.threads,
         stat_files,
-        cross_mounts: args.cross_mounts,
     }
 }
 
@@ -174,21 +171,11 @@ fn print_walk(walked: &walk::Walked, args: &Args) {
         bytes(walked.distinct_bytes)
     );
     println!(
-        "not walked: {} mounts below the root{}, {} folders unreadable",
+        "not walked: {} mounts below the root, {} folders unreadable, {} private",
         count(walked.mounts),
-        if args.cross_mounts {
-            ""
-        } else {
-            " (--cross-mounts walks them)"
-        },
-        count(walked.unreadable)
+        count(walked.unreadable),
+        count(walked.private)
     );
-    if walked.again > 0 {
-        println!(
-            "walked once: {} folders reached again through a bind mount",
-            count(walked.again)
-        );
-    }
     println!(
         "walk: {} on {} threads, {}",
         said::time(walked.took),
@@ -240,13 +227,14 @@ fn estimate(walked: &walk::Walked) -> (u64, u64, u64) {
 
 #[cfg(unix)]
 fn check(args: &Args) -> Result<(), String> {
-    let walked = walk::walk(&args.path, &walk_options(args, false))?;
+    let root = walk::open(&args.path)?;
+    let walked = walk::walk(&root, &walk_options(args, false))?;
     println!(
         "walk: {} folders in {} on {} threads ({} not walked: mounts and unreadable)",
         said::count(walked.list.len() as u64),
         said::time(walked.took),
         args.threads,
-        said::count(walked.mounts + walked.unreadable)
+        said::count(walked.mounts + walked.unreadable + walked.private)
     );
     let groups = check::Groups::of(&walked.list);
     let mut threads = vec![1, 8.min(args.threads), args.threads];
@@ -287,7 +275,7 @@ fn check(args: &Args) -> Result<(), String> {
         // check: the warm ones still run.
         let cold = |n: usize| -> Result<(check::Checked, check::Checked), String> {
             drop_caches()?;
-            let path = check::by_path(&walked.list, n);
+            let path = check::by_path(&root, &walked.stored, n)?;
             drop_caches()?;
             Ok((path, check::by_parent(&groups, n)))
         };
@@ -303,7 +291,7 @@ fn check(args: &Args) -> Result<(), String> {
     }
     for run in 1..=args.runs {
         for &n in &threads {
-            let path = check::by_path(&walked.list, n);
+            let path = check::by_path(&root, &walked.stored, n)?;
             let parent = check::by_parent(&groups, n);
             row(&format!("warm {run}"), n, &path, &parent);
         }
