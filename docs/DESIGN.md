@@ -572,7 +572,7 @@ measurement's (at `8850b44`).
 | Memory at rest, the index read back | 40 MB | 26 MB (178 MB) | met |
 | Memory after a first build, once saved | as at rest | 37 MB (253 MB) | met |
 | Memory at the peak of a first build | 150 MB | 102 MB (706 MB) | met |
-| Memory idle, after a sync | as at rest | 56 MB (384 MB) | not met |
+| Memory idle, after a sync | as at rest | 56 MB (384 MB) | not met; fixed, to be measured again |
 
 Memory is what the kernel counts resident (`VmRSS`, and `VmHWM` for the
 peak). The index's mapped files count once read, and are the page
@@ -589,7 +589,12 @@ first build. The last row is the same cause in the refresh: each
 check's list of every folder, a path in an allocation of its own. On a
 synthetic tree it adds 300 bytes a folder, once (a second sync adds
 next to nothing), whether the index was built or read back. Phase 1's
-step 8 is to meet it.
+step 8 keeps those paths in one buffer, and fixes glibc's threshold for
+giving a large allocation a mapping of its own: otherwise it rises each
+time such a mapping is freed, and the next large buffers come from an
+arena that keeps them. On the synthetic tree, an engine after five
+syncs holds what it held ready, but for 132 KB for each thread the
+check ran on. The user's home is measured again before the row is met.
 
 ## Protocol (a sketch; experimental until declared stable)
 

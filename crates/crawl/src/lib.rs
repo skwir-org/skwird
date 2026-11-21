@@ -45,15 +45,16 @@ pub mod mounts;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, crawl_below, filesystem_name,
-    read_folder,
+    Checked, Crawl, Root, Stale, Stored, StoredFolder, check, crawl, crawl_all, crawl_below,
+    filesystem_name, read_folder,
 };
 
 #[cfg(not(target_os = "linux"))]
 mod other;
 #[cfg(not(target_os = "linux"))]
 pub use other::{
-    Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, crawl_below, read_folder,
+    Checked, Crawl, Root, Stale, Stored, StoredFolder, check, crawl, crawl_all, crawl_below,
+    read_folder,
 };
 
 pub use exclude::Exclusions;

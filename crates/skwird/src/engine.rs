@@ -439,4 +439,8 @@ fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) {
         Err(e) => log(&format!("root {root} cannot be refreshed: {e}")),
     }
     shared.publish(root, Published::Ready(Arc::new(keeper.snapshot())));
+    // What the check and the rereads freed, given back before the engine
+    // waits again: an engine idle after a sync holds what one at rest
+    // holds (DESIGN 10).
+    crate::memory::give_back();
 }

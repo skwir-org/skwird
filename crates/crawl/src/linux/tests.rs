@@ -77,34 +77,65 @@ fn open(s: &Scratch) -> Root {
     Root::open(s.path(), Exclusions::none()).unwrap()
 }
 
-fn stored(crawl: &Crawl) -> Vec<Stored> {
-    crawl
-        .folders
-        .iter()
-        .filter_map(|f| {
-            let stat = f.stat?;
-            let again = match &f.outcome {
-                Outcome::Listed(listing) => listing.again,
-                Outcome::NotCovered(why) => why.retried(),
-            };
-            Some(Stored {
-                rel: f.rel.clone(),
+fn stored(crawl: &Crawl) -> Stored {
+    let mut stored = Stored::default();
+    for f in &crawl.folders {
+        let Some(stat) = f.stat else { continue };
+        let again = match &f.outcome {
+            Outcome::Listed(listing) => listing.again,
+            Outcome::NotCovered(why) => why.retried(),
+        };
+        stored.push(
+            &f.rel,
+            StoredFolder {
                 id: stat.id,
                 ctime: stat.ctime,
                 again,
-            })
-        })
-        .collect()
+            },
+        );
+    }
+    stored
 }
 
 /// The check's verdict for each folder, by its path.
-fn verdicts(root: &Root, stored: &[Stored]) -> BTreeMap<PathBuf, Stale> {
+fn verdicts(root: &Root, stored: &Stored) -> BTreeMap<PathBuf, Stale> {
     check(root, stored, &opts(3), &Cancel::default())
         .unwrap()
         .stale
         .into_iter()
-        .map(|(i, why)| (stored[i].rel.clone(), why))
+        .map(|(i, why)| (stored.rel(i).to_path_buf(), why))
         .collect()
+}
+
+/// The paths of folders given one after the other read back each its own,
+/// the root's empty one, names not UTF-8 and a path past the system's
+/// limit among them.
+#[test]
+fn stored_paths_read_back_each_its_own() {
+    let deep = "d/".repeat(3000);
+    let paths = [
+        PathBuf::new(),
+        PathBuf::from("a"),
+        PathBuf::from(OsStr::from_bytes(b"latin1-\xe9t\xe9/x")),
+        PathBuf::from(deep.trim_end_matches('/')),
+        PathBuf::from("a b/c"),
+    ];
+    let mut stored = Stored::with_capacity(paths.len(), 64);
+    for (n, p) in paths.iter().enumerate() {
+        let folder = StoredFolder {
+            id: FileId {
+                dev: 1,
+                ino: n as u64,
+            },
+            ..StoredFolder::default()
+        };
+        stored.push(p, folder);
+    }
+    assert_eq!(stored.len(), paths.len());
+    for (i, p) in paths.iter().enumerate() {
+        assert_eq!(stored.rel(i), p.as_path());
+        assert_eq!(stored.folder(i).id.ino, i as u64);
+    }
 }
 
 /// A tree that holds what trips walkers up: spaces, Unicode, bytes that
@@ -488,12 +519,8 @@ fn a_network_mount_below_the_root_is_never_entered() {
     let (_, outcome) = read_folder(&root, Path::new("nas"), &opts(1));
     assert!(matches!(outcome, Outcome::NotCovered(Why::NetworkMount)));
     // The check stats nothing at or below a network mount.
-    let stored = vec![Stored {
-        rel: PathBuf::from("nas"),
-        id: FileId::default(),
-        ctime: Time::default(),
-        again: false,
-    }];
+    let mut stored = Stored::default();
+    stored.push(Path::new("nas"), StoredFolder::default());
     assert_eq!(
         verdicts(&root, &stored).get(Path::new("nas")),
         Some(&Stale::NetworkMount)
@@ -569,7 +596,7 @@ fn a_cancelled_crawl_says_so() {
         Err(Error::Cancelled)
     ));
     assert!(matches!(
-        check(&root, &[], &opts(2), &cancel),
+        check(&root, &Stored::default(), &opts(2), &cancel),
         Err(Error::Cancelled)
     ));
 }

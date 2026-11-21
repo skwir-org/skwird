@@ -90,12 +90,46 @@ pub fn crawl_below(root: &Root, _: &Path, _: &Options, _: &Cancel) -> Result<Cra
     match root.never {}
 }
 
-#[derive(Clone, Debug)]
-pub struct Stored {
-    pub rel: PathBuf,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoredFolder {
     pub id: FileId,
     pub ctime: Time,
     pub again: bool,
+}
+
+/// The folders an index stored, as Linux's crawl keeps them, a path each
+/// here: no check runs on this system yet.
+#[derive(Clone, Debug, Default)]
+pub struct Stored {
+    folders: Vec<(PathBuf, StoredFolder)>,
+}
+
+impl Stored {
+    pub fn with_capacity(folders: usize, _bytes: usize) -> Stored {
+        Stored {
+            folders: Vec::with_capacity(folders),
+        }
+    }
+
+    pub fn push(&mut self, rel: &Path, folder: StoredFolder) {
+        self.folders.push((rel.to_path_buf(), folder));
+    }
+
+    pub fn len(&self) -> usize {
+        self.folders.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty()
+    }
+
+    pub fn rel(&self, i: usize) -> &Path {
+        &self.folders[i].0
+    }
+
+    pub fn folder(&self, i: usize) -> StoredFolder {
+        self.folders[i].1
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +149,6 @@ pub struct Checked {
     pub took: Duration,
 }
 
-pub fn check(root: &Root, _: &[Stored], _: &Options, _: &Cancel) -> Result<Checked, Error> {
+pub fn check(root: &Root, _: &Stored, _: &Options, _: &Cancel) -> Result<Checked, Error> {
     match root.never {}
 }

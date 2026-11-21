@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use skwird_crawl::{
-    Cancel, Crawled, Entry, Error, FileId, Kind, Options, Outcome, Root, Stale, Stored, Time, Why,
-    check, crawl_below, read_folder,
+    Cancel, Crawled, Entry, Error, FileId, Kind, Options, Outcome, Root, Stale, Stored,
+    StoredFolder, Time, Why, check, crawl_below, read_folder,
 };
 
 use crate::block::{Block, Facts, FolderId, Item, State};
@@ -158,21 +158,33 @@ fn same_folder(index: &Index, child: FolderId, item: &Item, entry: &Entry) -> bo
 }
 
 impl Index {
-    /// Every folder the check is to compare, with its number: each folder
+    /// Every folder the check is to compare, and its number: each folder
     /// read, and each to be tried again. Excluded folders are not.
-    pub fn stored(&self) -> Vec<(FolderId, Stored)> {
-        let mut out = Vec::new();
-        // The paths of the folders above, by depth.
-        let mut above: Vec<PathBuf> = Vec::new();
+    ///
+    /// No allocation is made for each folder (DESIGN 10): the paths go end
+    /// to end into the list's buffer, and each is made in the buffer kept
+    /// for its depth, which the next folder at that depth takes over.
+    pub fn stored(&self) -> (Vec<FolderId>, Stored) {
+        let folders = self.tree().len();
+        let mut ids = Vec::with_capacity(folders);
+        // About 64 bytes a path, grown in place if more.
+        let mut out = Stored::with_capacity(folders, folders * 64);
+        // The path of the last folder met at each depth.
+        let mut at: Vec<PathBuf> = Vec::new();
         for (_, chunk) in self.tree().chunks() {
             let view = chunk.view();
             for b in 0..chunk.len() {
                 let depth = view.depth(b) as usize;
-                above.truncate(depth);
-                let path = match above.last() {
-                    Some(parent) => parent.join(component(self.names().get(view.name(b)))),
-                    None => PathBuf::new(),
-                };
+                if at.len() <= depth {
+                    at.resize_with(depth + 1, PathBuf::new);
+                }
+                let (above, here) = at.split_at_mut(depth);
+                let path = &mut here[0];
+                path.as_mut_os_string().clear();
+                if let Some(parent) = above.last() {
+                    path.push(parent);
+                    path.push(component(self.names().get(view.name(b))));
+                }
                 let again = match view.state(b) {
                     State::Listed { again } => Some(again),
                     State::NotCovered(Why::Excluded) => None,
@@ -182,20 +194,19 @@ impl Index {
                 };
                 if let Some(again) = again {
                     let facts = view.facts(b);
-                    out.push((
-                        view.folder(b),
-                        Stored {
-                            rel: path.clone(),
+                    ids.push(view.folder(b));
+                    out.push(
+                        path,
+                        StoredFolder {
                             id: facts.map(|f| f.id).unwrap_or_default(),
                             ctime: facts.map(|f| f.ctime).unwrap_or_default(),
                             again: again || facts.is_none(),
                         },
-                    ));
+                    );
                 }
-                above.push(path);
             }
         }
-        out
+        (ids, out)
     }
 
     /// Put what a read of `folder` found in place of what the index held.
@@ -483,7 +494,7 @@ pub fn refresh(
 ) -> Result<Refreshed, Error> {
     let start = Time::now();
     root.reread_mounts().map_err(Error::Root)?;
-    let (ids, stored): (Vec<FolderId>, Vec<Stored>) = index.stored().into_iter().unzip();
+    let (ids, stored) = index.stored();
     let checked = check(root, &stored, opts, cancel)?;
     let mut done = Refreshed {
         checked: stored.len(),
@@ -509,7 +520,7 @@ pub fn refresh(
             Stale::Mount => (None, Seen::NotCovered(Why::Mount)),
             Stale::NetworkMount => (None, Seen::NotCovered(Why::NetworkMount)),
             _ => {
-                let (found, outcome) = read_folder(root, &stored[i].rel, opts);
+                let (found, outcome) = read_folder(root, stored.rel(i), opts);
                 (found, Seen::of(&outcome))
             }
         };
@@ -521,7 +532,7 @@ pub fn refresh(
         let reread = index.reread(folder, folder_facts, seen);
         fresh.extend(reread.fresh);
         done.records.push(Record::Folder(FolderRecord {
-            path: stored[i].rel.clone(),
+            path: stored.rel(i).to_path_buf(),
             facts: folder_facts.or_else(|| index.facts_of(folder)),
             state,
             changes: reread.changes,

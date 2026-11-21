@@ -567,16 +567,63 @@ pub fn crawl_below(
     Ok(Crawl { folders, took })
 }
 
-/// A folder as the index stored it, for the check.
-#[derive(Clone, Debug)]
-pub struct Stored {
-    /// Its path below the root.
-    pub rel: PathBuf,
+/// A folder as the index stored it, for the check: its path is kept in
+/// [`Stored`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoredFolder {
     pub id: FileId,
     pub ctime: Time,
     /// Read it again whatever its times say: it was read within a tick of
     /// its last change, or its read failed.
     pub again: bool,
+}
+
+/// The folders an index stored, for the check, numbered as they were
+/// given. Their paths below the root are kept end to end in one buffer:
+/// a check of a million folders makes no allocation for each, which the
+/// allocator would keep once freed (`docs/DESIGN.md`, decision 10).
+#[derive(Clone, Debug, Default)]
+pub struct Stored {
+    paths: Vec<u8>,
+    /// Each folder, with where its path ends.
+    folders: Vec<(usize, StoredFolder)>,
+}
+
+impl Stored {
+    /// Room for `folders` folders whose paths take about `bytes` in all,
+    /// made at once: one large allocation, which the allocator gives back
+    /// whole once freed, where a buffer grown by doubling leaves the
+    /// smaller ones behind in the heap.
+    pub fn with_capacity(folders: usize, bytes: usize) -> Stored {
+        Stored {
+            paths: Vec::with_capacity(bytes),
+            folders: Vec::with_capacity(folders),
+        }
+    }
+
+    /// The folder at `rel` below the root.
+    pub fn push(&mut self, rel: &Path, folder: StoredFolder) {
+        self.paths.extend_from_slice(rel.as_os_str().as_bytes());
+        self.folders.push((self.paths.len(), folder));
+    }
+
+    pub fn len(&self) -> usize {
+        self.folders.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty()
+    }
+
+    /// The `i`th folder's path below the root.
+    pub fn rel(&self, i: usize) -> &Path {
+        let start = if i == 0 { 0 } else { self.folders[i - 1].0 };
+        Path::new(OsStr::from_bytes(&self.paths[start..self.folders[i].0]))
+    }
+
+    pub fn folder(&self, i: usize) -> StoredFolder {
+        self.folders[i].1
+    }
 }
 
 /// Why the check says a folder is to be read again.
@@ -614,7 +661,7 @@ pub struct Checked {
 /// resolves is stat-ed through its parent's handle.
 pub fn check(
     root: &Root,
-    stored: &[Stored],
+    stored: &Stored,
     opts: &Options,
     cancel: &Cancel,
 ) -> Result<Checked, Error> {
@@ -622,7 +669,7 @@ pub fn check(
     let points: Vec<(&PathBuf, bool)> = root.below.iter().map(|(p, &n)| (p, n)).collect();
     let stale = Mutex::new(Vec::new());
     shared(stored.len(), opts.threads, cancel, |i| {
-        if let Some(why) = verdict(root, &points, &stored[i]) {
+        if let Some(why) = verdict(root, &points, stored.rel(i), stored.folder(i)) {
             stale.lock().unwrap().push((i, why));
         }
     });
@@ -637,8 +684,13 @@ pub fn check(
     })
 }
 
-fn verdict(root: &Root, points: &[(&PathBuf, bool)], stored: &Stored) -> Option<Stale> {
-    if let Some(&(_, network)) = points.iter().find(|(p, _)| stored.rel.starts_with(p)) {
+fn verdict(
+    root: &Root,
+    points: &[(&PathBuf, bool)],
+    rel: &Path,
+    stored: StoredFolder,
+) -> Option<Stale> {
+    if let Some(&(_, network)) = points.iter().find(|(p, _)| rel.starts_with(p)) {
         return Some(if network {
             Stale::NetworkMount
         } else {
@@ -648,7 +700,7 @@ fn verdict(root: &Root, points: &[(&PathBuf, bool)], stored: &Stored) -> Option<
     if stored.again {
         return Some(Stale::Again);
     }
-    match stat_path(root, &stored.rel) {
+    match stat_path(root, rel) {
         Err(Errno::NOENT | Errno::NOTDIR) => Some(Stale::Gone),
         Err(Errno::ACCESS | Errno::PERM) => Some(Stale::Denied),
         Err(Errno::LOOP | Errno::XDEV) => Some(Stale::Replaced),

@@ -9,8 +9,8 @@ decision changes it there.
 Phase 0 is done. Phase 1's steps 1 to 7 are done: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
 the user's home and given budgets (DESIGN 10), the two of memory
-around a first build met at the second measurement. Step 8 is left:
-idle after a sync, the engine holds more than the at-rest budget. The
+around a first build met at the second measurement. Step 8, for the
+engine idle after a sync, is built and waits for a third. The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -484,6 +484,46 @@ committed then.
      after a refresh, as after a first build (`memory.rs`).
    - Done when `tools/measure.sh --only engine` on the user's home
      meets it.
+
+   **Built on 2026-11-21, waiting for the user's measurement.** All on
+   the synthetic tree of step 7 (1.04 million entries in 70,481
+   folders), anonymous memory read in the engine's own mappings:
+   - **The list in one buffer.** `Stored` keeps every path end to end in
+     one buffer, and each folder's identity, change time and flag in
+     another, reserved at once (about 64 bytes a path). `Index::stored`
+     makes each path in a buffer kept for its depth. A sync then added
+     8 to 13 MB where it had added 18 to 23 MB. Not enough.
+   - **What was left, found.** With nothing changed, syncs still settled
+     at 7 MB more than at rest, and `malloc_trim` after each did not
+     take it back. Read by mapping:
+     - 21 thread arenas of 132 KB each, the check's threads': a constant;
+     - one arena heap of 8.9 MB, 5.2 MB of it resident, which the
+       writer's arena had grown to.
+
+     glibc gives an allocation a mapping of its own past a threshold,
+     which rises each time such a mapping is freed: here the load had
+     freed one. The next list then came from the writer's arena, and
+     `malloc_trim` never shrinks a thread arena's top.
+   - **The thresholds fixed** as the engine starts (`memory::settle`,
+     `mallopt`). Every allocation of 128 KiB or more has a mapping of
+     its own, given back whole when freed, and a heap's free top is
+     given back past 1 MiB. What is free is given back after each
+     refresh, as after a first build.
+   - Measured, five syncs after each start, one with a change made
+     behind the engine's back:
+
+     | | ready | after the syncs |
+     |---|---|---|
+     | built, 20 threads | 18.4 MB | 18.4 to 19.0 MB |
+     | read back, 20 threads | 19.0 MB | 21.7 MB |
+     | read back, 2 threads | 19.0 MB | 19.1 MB |
+
+     The 2.7 MB with 20 threads is the arenas', whatever the tree's
+     size. The build's peak (66 MB) and time (0.46 s) did not change.
+   - Tests pass: the paths given to the list read back each its own, the
+     root's empty one, names not UTF-8 and a path past the system's
+     limit among them. Every test of the check, the refresh and the
+     engine takes the list.
 
 **Tests:** coverage is never overstated. Fixtures cover:
 - a change made while the engine was down;

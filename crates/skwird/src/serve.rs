@@ -62,6 +62,8 @@ impl Live {
 /// for ever. A second engine blocks on the lock until the first is gone,
 /// then takes over: it never polls the lock.
 pub fn serve(config: &Config) -> Result<(), String> {
+    // Before any thread allocates: what a burst frees goes back.
+    crate::memory::settle();
     let socket = config.dirs.socket();
     check_socket_path(&socket)?;
     make_private(&config.dirs.runtime)?;

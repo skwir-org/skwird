@@ -66,7 +66,7 @@ impl Groups {
 }
 
 /// Stat every folder by its path, on `threads` threads: skwird's check.
-pub fn by_path(root: &Root, stored: &[Stored], threads: usize) -> Result<Checked, String> {
+pub fn by_path(root: &Root, stored: &Stored, threads: usize) -> Result<Checked, String> {
     let opts = skwird_crawl::Options {
         threads,
         ..skwird_crawl::Options::default()

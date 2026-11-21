@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use skwird_crawl::{Cancel, Crawled, Exclusions, Kind, Outcome, Root, Stored, Why};
+use skwird_crawl::{Cancel, Crawled, Exclusions, Kind, Outcome, Root, Stored, StoredFolder, Why};
 
 pub struct Options {
     pub threads: usize,
@@ -57,7 +57,7 @@ pub struct Walked {
     /// Every folder read, the root first, by its path.
     pub list: Vec<Folder>,
     /// The same folders as the check takes them.
-    pub stored: Vec<Stored>,
+    pub stored: Stored,
     pub took: Duration,
     /// The root filesystem's name.
     pub fs: String,
@@ -76,7 +76,7 @@ struct Counts {
     /// Names by their hash, with their length.
     names: HashMap<u64, u16>,
     /// Folders read, by slot, so that the root comes first.
-    read: Vec<(usize, Folder, Stored)>,
+    read: Vec<(usize, Folder, (PathBuf, StoredFolder))>,
 }
 
 /// The root, opened as the crawl opens it.
@@ -111,7 +111,7 @@ pub fn walk(root: &Root, opts: &Options) -> Result<Walked, String> {
     walked.distinct_bytes = counts.names.values().map(|&n| u64::from(n)).sum();
     for (_, folder, stored) in counts.read {
         walked.list.push(folder);
-        walked.stored.push(stored);
+        walked.stored.push(&stored.0, stored.1);
     }
     walked.took = took;
     root.fs_name().clone_into(&mut walked.fs);
@@ -123,7 +123,7 @@ pub fn walk(root: &Root, opts: &Options) -> Result<Walked, String> {
 struct Counted {
     walked: Walked,
     names: Vec<(u64, u16)>,
-    read: Option<(usize, Folder, Stored)>,
+    read: Option<(usize, Folder, (PathBuf, StoredFolder))>,
 }
 
 fn count(root: &Root, slot: usize, crawled: Crawled) -> Counted {
@@ -160,13 +160,15 @@ fn count(root: &Root, slot: usize, crawled: Crawled) -> Counted {
             path: root.path().join(&crawled.rel),
             ctime: (stat.ctime.sec, i64::from(stat.ctime.nsec)),
         },
-        Stored {
-            rel: crawled.rel,
-            id: stat.id,
-            ctime: stat.ctime,
-            // The bench times the check itself: every folder is stat-ed.
-            again: false,
-        },
+        (
+            crawled.rel,
+            StoredFolder {
+                id: stat.id,
+                ctime: stat.ctime,
+                // The bench times the check itself: every folder is stat-ed.
+                again: false,
+            },
+        ),
     ));
     counted
 }
