@@ -358,6 +358,13 @@ impl Index {
         }
     }
 
+    /// What the index knows of a folder's entries, read from its block
+    /// alone.
+    pub fn state_of(&self, folder: FolderId) -> Option<crate::block::State> {
+        let loc = self.tree.loc(folder)?;
+        Some(self.tree.chunk(loc.chunk).view().state(loc.block as usize))
+    }
+
     /// A folder's facts, read from its block alone.
     pub fn facts_of(&self, folder: FolderId) -> Option<crate::block::Facts> {
         let loc = self.tree.loc(folder)?;

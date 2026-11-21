@@ -50,6 +50,10 @@ impl Root {
         match self.never {}
     }
 
+    pub fn set_exclusions(&mut self, _: Exclusions) {
+        match self.never {}
+    }
+
     pub fn reread_mounts(&mut self) -> std::io::Result<()> {
         match self.never {}
     }

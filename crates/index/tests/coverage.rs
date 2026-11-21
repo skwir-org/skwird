@@ -449,7 +449,9 @@ fn random_edits_never_overstate_coverage() {
         }
         let mut root = open(&s);
         let mut index = first_index(&root);
-        let dir = s.path().with_extension("index");
+        // A scratch folder of its own, removed even when the test fails.
+        let store = Scratch::new("cover-random-index");
+        let dir = store.join("index");
         let mut rng = Rng(seed);
         let mut n = 0;
         let mut done = Vec::new();
@@ -476,6 +478,8 @@ fn random_edits_never_overstate_coverage() {
                 (index, _) = store::load(&dir, limits()).unwrap();
             }
             refreshed(&mut index, &mut root);
+            store::check(&index)
+                .unwrap_or_else(|e| panic!("seed {seed}, step {step}: {e}: {done:?}"));
             assert_sound(
                 &index,
                 s.path(),
@@ -485,7 +489,6 @@ fn random_edits_never_overstate_coverage() {
                 seen.insert(format!("{:?}", h.why));
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
     assert!(
         seen.contains("Denied") && seen.contains("Private"),

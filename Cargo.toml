@@ -12,6 +12,8 @@ rustix = { version = "1.1", features = ["fs"] }
 libc = "0.2.189"
 skwird-crawl = { path = "crates/crawl" }
 skwird-index = { path = "crates/index" }
+skwird-protocol = { path = "crates/protocol" }
+skwird-client = { path = "crates/client" }
 skwird-testkit = { path = "crates/testkit" }
 
 [workspace.lints.rust]

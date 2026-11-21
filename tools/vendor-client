@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Write the copies a client keeps of skwird's client crates
+# (docs/DESIGN.md, Protocol): DEST/skwird-protocol and DEST/skwird-client,
+# each with a manifest of its own (no workspace's fields; the client's
+# path to the protocol's copy beside it), the licences, and VENDORED,
+# which names the commit they were copied from.
+#
+#   tools/vendor-client DEST      e.g. ../skwir/vendor
+#
+# skwir takes no git dependency (its ADR-050): it keeps these copies in
+# its vendor folder, outside its workspace, and copies again to update.
+set -euo pipefail
+
+dest=${1:?usage: tools/vendor-client DEST (a client\'s vendor folder)}
+here=$(cd "$(dirname "$0")/.." && pwd)
+commit=$(git -C "$here" rev-parse HEAD 2>/dev/null || echo "an unknown commit")
+if [ -n "$(git -C "$here" status --porcelain -- crates/protocol crates/client 2>/dev/null)" ]; then
+  commit="$commit, with changes not committed"
+fi
+
+# A field of the workspace's [workspace.package].
+workspace_field() {
+  sed -n '/^\[workspace.package\]/,/^\[/p' "$here/Cargo.toml" | sed -n "s/^$1 = //p" | head -1
+}
+edition=$(workspace_field edition)
+rust_version=$(workspace_field rust-version)
+license=$(workspace_field license)
+
+copy() {
+  local crate=$1 name=$2
+  local from="$here/crates/$crate" out="$dest/$name"
+  rm -rf "$out"
+  mkdir -p "$out"
+  cp -R "$from/src" "$out/src"
+  if [ -d "$from/transcripts" ]; then
+    cp -R "$from/transcripts" "$out/transcripts"
+  fi
+  cp "$here/LICENSE-MIT" "$here/LICENSE-APACHE" "$out/"
+  {
+    echo "[package]"
+    # The crate's own fields, the workspace's written out.
+    sed -n '/^\[package\]/,/^\[/p' "$from/Cargo.toml" | sed '1d;/^\[/d;/^$/d' |
+      sed "s/^edition.workspace = true/edition = $edition/;
+           s/^rust-version.workspace = true/rust-version = $rust_version/;
+           s/^license.workspace = true/license = $license/"
+    echo
+    echo "[dependencies]"
+    sed -n '/^\[dependencies\]/,/^\[/p' "$from/Cargo.toml" | sed '1d;/^\[/d;/^$/d;/^#/d' |
+      sed 's|path = "../protocol"|path = "../skwird-protocol"|'
+  } > "$out/Cargo.toml"
+  cat > "$out/VENDORED" <<EOF
+A copy of skwird's $name, made by skwird's tools/vendor-client from
+$commit.
+
+Do not change it here: change skwird, and copy it again. It depends on
+serde and serde_json alone (and the client on the protocol's copy beside
+it), at versions a client's lockfile resolves.
+EOF
+}
+
+copy protocol skwird-protocol
+copy client skwird-client
+echo "copied skwird-protocol and skwird-client from $commit"

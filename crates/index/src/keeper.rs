@@ -189,6 +189,19 @@ impl Keeper {
         &self.root
     }
 
+    pub fn root_mut(&mut self) -> &mut Root {
+        &mut self.root
+    }
+
+    /// Read the folder at `rel` again at the next refresh, its exclusion
+    /// taken back: until then it is not covered, not read yet.
+    pub fn readmit(&mut self, rel: &Path) {
+        if let Some(folder) = self.index.folder_at(rel) {
+            self.index
+                .reread(folder, None, Seen::NotCovered(Why::Unread));
+        }
+    }
+
     /// A snapshot of the index, for queries to read while it changes.
     pub fn snapshot(&self) -> Index {
         self.index.clone()

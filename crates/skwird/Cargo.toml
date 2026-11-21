@@ -1,0 +1,32 @@
+[package]
+name = "skwird"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "An index of file names kept current, answered over a local socket: the engine, and its command line"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "skwird"
+path = "src/main.rs"
+
+[dependencies]
+skwird-client.workspace = true
+skwird-crawl.workspace = true
+skwird-index.workspace = true
+skwird-protocol.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event", "net", "process"] }
+
+[dev-dependencies]
+skwird-testkit.workspace = true
+
+[lints]
+workspace = true

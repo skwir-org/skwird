@@ -281,6 +281,45 @@ committed then.
      `tools/vendor-client` writes their copies, and a test builds those
      copies outside the workspace. Transcripts of the messages are kept
      as test data, for clients that write their own.
+
+   **Done on 2026-11-21.** `skwird-protocol` (the messages, JSON lines,
+   a path not UTF-8 as its bytes, a session of every message in
+   `transcripts/`), `skwird-client` (finding an engine, starting one in
+   a process group of its own, asking it; `fake`, an engine of a test's
+   making), and `skwird` (the engine: the socket in a folder its user's
+   alone, each peer's credentials checked, the lock and its takeover, a
+   writer thread owning each root's keeper and publishing snapshots,
+   syncs gathered into one refresh, a query on a thread of its own, the
+   idle minute; and `find`, `coverage`, `sync`, `status`).
+   `tools/vendor-client` writes the copies with manifests of their own:
+   `cargo package` would have turned the client's path to the protocol
+   into a version, which crates.io does not hold. Tests pass, each
+   process given a scratch home and XDG folders: the engine answers what
+   a walk finds, names not UTF-8 byte for byte; a sync answers with a
+   change made behind its back, checked at a time after it was asked;
+   queries at once by six clients answer as one by one; a second engine
+   blocked on the lock takes over when the first is killed during its
+   first crawl; a socket path too long is an error that says so; two
+   clients register folders and each takes back only its own; a query
+   cancelled after its first batch says so and stops; an engine goes
+   once idle, its socket let go of; a client starts the engine where
+   none answers; the copies build alone, offline. After every refresh of
+   the random edits (step 3), the index is checked whole: each block in
+   pre-order below its parent, each folder entry naming its block.
+   - **An incident, and its rule.** A run by hand put an `export` of the
+     scratch folders before a `&`, which took it to the background: a
+     `skwird status` then ran with the user's own folders, found no
+     engine, and started one, which crawled the user's home into the
+     user's cache (6.9 million entries, 274 MB). It was stopped, and
+     everything it wrote removed. AGENTS.md, "Shell hygiene", now says
+     how every run is kept to its own folders.
+   - Not done here: **the crawl is not yet streamed into the build**:
+     the first build of a large home holds the crawl whole (1.2 GB for
+     2.9 million entries in step 2). Step 6 measures it against the
+     budgets. A query's answers are gathered before the first batch is
+     sent, so `cancel` saves the sending, not the scan. A client's path
+     is matched to a root by its spelling: a path through a link is not
+     resolved.
 6. **The command line and the budgets,** the one step that needs the
    user.
    - `skwird find`, `coverage` and `status`; `tools/measure.sh` gains

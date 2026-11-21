@@ -15,10 +15,18 @@ It runs in one of three ways, with the same engine and protocol:
 - **on demand**, started by its first client and ending a minute after
   its last.
 
-**Status:** phase 1 under way: the crawl is built (`skwird-crawl`), and
-the measurement tool reads with it; the index, the engine and the
-protocol are not yet. Read `docs/DESIGN.md` for the decisions and
-`docs/PLAN.md` for the phases.
+**Status:** phase 1 built but for its measurement: a user's engine on
+Linux, started by its first client (`skwird serve`), answering protocol
+0, its index checked when a client asks. Its budgets (memory, the time
+to a first answer, idle CPU) wait for a measurement on a real home.
+Read `docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the
+phases.
+
+```
+skwird find report --in ~/Documents   # starts the engine if none answers
+skwird sync ~                          # prove it current now
+skwird coverage ~/Documents            # how far its answers can be trusted
+```
 
 ## Measuring
 

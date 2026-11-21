@@ -76,3 +76,13 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - `pkill -f pattern` matches the shell running it; stop a process by
   its pid.
 - Chain checks with `&&` before a commit so a failing one stops it.
+- `a && b && c &` sends the whole chain to the background, its `export`
+  with it: what follows in the foreground runs without them. Set a
+  process's environment on its own command line (`VAR=value cmd`).
+- **An engine run by hand or by a test never reaches its user's own.**
+  Give every `skwird` it runs, and every client that may start one,
+  `HOME` and `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and
+  `XDG_CONFIG_HOME` of a scratch folder, on its own command line (a
+  test: `Command::env`). Otherwise a client starts the user's engine,
+  which crawls the whole home into the user's cache: it happened once,
+  in phase 1's step 5.

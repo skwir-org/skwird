@@ -554,6 +554,26 @@ measures them.
   came from. A client may instead write its own, from this section and
   the transcripts the tests keep.
 
+**As built** (phase 1, step 5):
+- The messages are `skwird-protocol`'s types, and
+  `crates/protocol/transcripts/` holds a session of every one, which
+  the crate's test holds to them.
+- A client that finds no engine starts `skwird serve` in a process group
+  of its own, its output to `$XDG_STATE_HOME/skwird/engine.log` (counts
+  and times, never a name or a path), and waits for its socket up to
+  five seconds. `SKWIRD_IDLE` sets how long such an engine stays once
+  its last client has gone (60 seconds).
+- The user's exclusions are `$XDG_CONFIG_HOME/skwird/exclude`, one
+  path a line; what clients register is kept in
+  `$XDG_STATE_HOME/skwird/registered`; each root's index is in
+  `$XDG_CACHE_HOME/skwird/index-<the hash of its path>`.
+- A `sync` refreshes the whole root that holds the path asked: the check
+  is cheap (52 ms warm for the home phase 0 measured), and a proof is
+  kept for the whole index, not a subtree. Syncs asked while one runs
+  are answered by the next refresh.
+- A query is answered from the snapshot published when it is asked;
+  `cancel` stops the batches still to be sent, and its `done` says so.
+
 ## Open questions
 
 1. **Cookies:** where they go on each filesystem, one per notification

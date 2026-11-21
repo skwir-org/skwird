@@ -358,6 +358,22 @@ pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Mark), LoadError> {
     Ok((Index::new(tree, names), manifest.mark))
 }
 
+/// Whether `index` is sound: its blocks one tree in pre-order (each
+/// folder once, each below its parent), every name it names in its names,
+/// and every folder entry naming a folder whose block says it is that
+/// entry. A load checks as much; a test checks it after every change.
+pub fn check(index: &Index) -> Result<(), LoadError> {
+    let chunks: Vec<_> = index
+        .tree()
+        .chunks()
+        .map(|(id, c)| (id, Arc::clone(c)))
+        .collect();
+    let tree = Tree::from_chunks(chunks, Limits::default()).map_err(|_| LoadError::Damaged)?;
+    check_entries(&tree, index.names())
+}
+
+/// Every name an index names is in its names, and every folder entry
+/// names a folder whose block says it is that entry.
 fn check_entries(tree: &Tree, names: &Names) -> Result<(), LoadError> {
     let count = names.len() as u64;
     for (_, chunk) in tree.chunks() {

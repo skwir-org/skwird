@@ -124,6 +124,11 @@ impl Root {
         &self.exclusions
     }
 
+    /// Take `exclusions` from now on: a folder they name is not read again.
+    pub fn set_exclusions(&mut self, exclusions: Exclusions) {
+        self.exclusions = exclusions;
+    }
+
     /// Read the mount table again, as each check does first.
     pub fn reread_mounts(&mut self) -> std::io::Result<()> {
         self.set_table(Table::read()?);

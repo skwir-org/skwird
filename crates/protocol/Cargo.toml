@@ -1,0 +1,17 @@
+[package]
+name = "skwird-protocol"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "skwird's protocol: the messages a client and an engine say, as JSON lines"
+
+# serde and serde_json alone, at versions skwir's lockfile holds, so that
+# the copy a client keeps builds on its own (docs/DESIGN.md, Protocol).
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[lints]
+workspace = true
