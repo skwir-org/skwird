@@ -562,8 +562,17 @@ impl Writing<'_> {
             self.forget_cookie(w.cookie);
             self.check_now(w.root, w.replies);
         }
-        for (root, folders) in self.gather.due(now) {
-            self.apply_heard(root, &folders);
+        let due = self.gather.due(now);
+        if !due.is_empty() {
+            // Timed by this thread's own processor clock, so that applying
+            // what is heard keeps to its share of a core (`live::DUTY`):
+            // the waits of a busy disk are not the engine's processor time.
+            for (root, folders) in due {
+                let start = thread_time();
+                let read = self.apply_heard(root, &folders);
+                let took = thread_time().saturating_sub(start);
+                self.gather.applied(root, &read, took, Instant::now());
+            }
         }
         if self.gather.recheck_due(now) {
             for (i, keeper) in self.keepers.iter_mut().enumerate() {
@@ -591,26 +600,32 @@ impl Writing<'_> {
         }
     }
 
-    /// The folders of `root` heard, read again.
-    fn apply_heard(&mut self, root: usize, folders: &[HeardFolder]) {
+    /// The folders of `root` heard, read again; gives those read, each with
+    /// the entries its listing held.
+    fn apply_heard(&mut self, root: usize, folders: &[HeardFolder]) -> Vec<(FolderId, usize)> {
         if folders.is_empty() {
-            return;
+            return Vec::new();
         }
         let Some(keeper) = self.keepers[root].as_mut() else {
-            return;
+            return Vec::new();
         };
-        match keeper.heard_named(folders, &self.cancel) {
+        let read = match keeper.heard_named(folders, &self.cancel) {
             Ok(done) => {
                 self.done.read_again(root, &done);
                 if !done.records.is_empty() {
                     self.gather.changed(Instant::now());
                 }
+                done.folders
             }
-            Err(e) => log(&format!(
-                "root {root}: what was heard cannot be applied: {e}"
-            )),
-        }
+            Err(e) => {
+                log(&format!(
+                    "root {root}: what was heard cannot be applied: {e}"
+                ));
+                Vec::new()
+            }
+        };
         self.publish(root);
+        read
     }
 
     fn publish(&self, root: usize) {
@@ -900,7 +915,7 @@ impl Done {
         self.reread += done.reread as u64;
         self.entries += done.entries as u64;
         self.largest = self.largest.max(done.largest);
-        for &folder in &done.folders {
+        for &(folder, _) in &done.folders {
             *self.by_folder.entry((root, folder)).or_default() += 1;
         }
     }
@@ -925,4 +940,13 @@ impl Done {
             busiest
         ));
     }
+}
+
+/// The processor time this thread has taken.
+fn thread_time() -> std::time::Duration {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+    std::time::Duration::new(
+        u64::try_from(t.tv_sec).unwrap_or(0),
+        u32::try_from(t.tv_nsec).unwrap_or(0),
+    )
 }

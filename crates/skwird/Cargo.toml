@@ -23,7 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["event", "net", "process"] }
+rustix = { workspace = true, features = ["event", "net", "process", "time"] }
 
 [dev-dependencies]
 skwird-testkit.workspace = true

@@ -251,8 +251,14 @@ measure_live() {
             done
             times+=("$(since_ms "$t0")")
         done
-        printf '%s\n' "${times[@]}" | sort -n | awk '{ a[NR] = $1 }
-            END { printf "a change to its answer, live (20 files made): median %d ms, most %d ms\n", a[int((NR + 1) / 2)], a[NR] }'
+        if [ ${#times[@]} -eq 20 ]; then
+            printf '%s\n' "${times[@]}" | sort -n | awk '{ a[NR] = $1 }
+                END { printf "a change to its answer, live (20 files made): median %d ms, most %d ms\n", a[int((NR + 1) / 2)], a[NR] }'
+        fi
+        : >"$probe/before-sync"
+        start=$(now)
+        skw sync "$probe" >/dev/null
+        echo "a sync of a live folder, a change made just before: $(since_ms "$start") ms ($(skw coverage "$probe" | sed -n 's/^names: \([a-z]*\).*/\1/p'))"
         skw watch --remove "$probe" >/dev/null
         rm -rf "$probe"
         ;;

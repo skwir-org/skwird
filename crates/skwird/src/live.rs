@@ -28,6 +28,10 @@ const BACKOFF: Duration = Duration::from_secs(2);
 const BACKOFF_MOST: Duration = Duration::from_secs(60);
 /// An overflow this long after the last check starts the wait afresh.
 const CALM: Duration = Duration::from_secs(300);
+/// Applying what is heard takes at most one part in this many of the
+/// time: a folder that is large and busy costs a share of a core, never
+/// the core.
+const DUTY: u32 = 50;
 
 /// Listen to `watcher` for the writer: block until it can be read, send
 /// what it heard, and again. A read that fails is said as an overflow:
@@ -114,6 +118,9 @@ pub struct Gather {
     last_check: Option<Instant>,
     /// Since when what was heard has not been saved.
     unsaved: Option<Instant>,
+    /// Until when each folder applied is not applied again: what its
+    /// reads took, fifty times over.
+    holds: HashMap<(usize, FolderId), Instant>,
 }
 
 impl Gather {
@@ -153,13 +160,17 @@ impl Gather {
         g
     }
 
-    /// The folders whose gathering is done, by root, let go of here.
+    /// The folders whose gathering is done, and whose hold is past, by
+    /// root, let go of here.
     pub fn due(&mut self, now: Instant) -> Vec<(usize, Vec<HeardFolder>)> {
+        self.holds.retain(|_, until| now < *until);
         let mut by_root: HashMap<usize, Vec<HeardFolder>> = HashMap::new();
         let done: Vec<(usize, FolderId)> = self
             .heard
             .iter()
-            .filter(|(_, g)| now >= g.last + QUIET || now >= g.first + MOST)
+            .filter(|(key, g)| {
+                (now >= g.last + QUIET || now >= g.first + MOST) && !self.holds.contains_key(key)
+            })
             .map(|(&key, _)| key)
             .collect();
         for (root, folder) in done {
@@ -173,6 +184,31 @@ impl Gather {
         }
         due.sort_unstable_by_key(|(root, _)| *root);
         due
+    }
+
+    /// The folders of `root` read, each with the entries its listing held,
+    /// took `took` of processor time. Each is held, before it is applied
+    /// again, for its share of that time (by its entries) fifty times
+    /// over: applying takes at most one part in [`DUTY`] of the time, and
+    /// a large folder heard without pause waits for itself alone. Its
+    /// answers lag then, live still; a sync applies it at once.
+    pub fn applied(
+        &mut self,
+        root: usize,
+        read: &[(FolderId, usize)],
+        took: Duration,
+        now: Instant,
+    ) {
+        let total: usize = read.iter().map(|(_, n)| n + 1).sum();
+        if total == 0 {
+            return;
+        }
+        for &(folder, n) in read {
+            let share = took.mul_f64((n + 1) as f64 / total as f64) * (DUTY - 1);
+            if share >= Duration::from_millis(1) {
+                self.holds.insert((root, folder), now + share);
+            }
+        }
     }
 
     /// Every folder of `root` heard, done gathering or not: a sync takes
@@ -239,8 +275,12 @@ impl Gather {
     pub fn deadline(&self) -> Option<Instant> {
         let gathering = self
             .heard
-            .values()
-            .map(|g| (g.last + QUIET).min(g.first + MOST))
+            .iter()
+            .map(|(key, g)| {
+                let at = (g.last + QUIET).min(g.first + MOST);
+                // Held after its last application, a folder waits for it.
+                self.holds.get(key).map_or(at, |&until| at.max(until))
+            })
             .min();
         [gathering, self.recheck, self.unsaved.map(|at| at + SAVE)]
             .into_iter()
@@ -311,6 +351,39 @@ mod tests {
             g.note_entry(0, 3, name(&format!("n{i}")), t);
         }
         assert_eq!(g.take(0), vec![(3, None)], "past the names kept, whole");
+    }
+
+    /// After an application, each folder read waits, before it is applied
+    /// again, for its share of what the application took, by its entries,
+    /// `DUTY` - 1 times over: a large folder heard without pause costs a
+    /// share of a core, and a small one read with it does not wait for it.
+    /// A sync takes what is gathered at once, all the same.
+    #[test]
+    fn applying_keeps_to_its_share_of_a_core() {
+        let t = Instant::now();
+        let mut g = Gather::default();
+        let took = Duration::from_millis(50);
+        g.applied(0, &[(1, 62_000), (2, 10)], took, t);
+        g.note(0, 1, t);
+        g.note(0, 2, t);
+        assert_eq!(
+            g.due(t + MOST),
+            vec![(0, vec![(2, None)])],
+            "the small one waits for nothing"
+        );
+        let held = g.deadline().unwrap();
+        assert!(
+            held > t + took * (DUTY - 2),
+            "the large one held for its share"
+        );
+        assert!(
+            g.due(held.checked_sub(Duration::from_millis(1)).unwrap())
+                .is_empty()
+        );
+        assert_eq!(g.due(held), vec![(0, vec![(1, None)])]);
+        g.applied(0, &[(1, 62_000)], took, t);
+        g.note(0, 1, t);
+        assert_eq!(g.take(0), vec![(1, None)], "a sync is not held");
     }
     /// The check after an overflow waits for quiet, and longer for each
     /// overflow that follows soon.

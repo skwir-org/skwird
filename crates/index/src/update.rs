@@ -17,6 +17,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
 use std::path::{Path, PathBuf};
 
 use skwird_crawl::{
@@ -151,8 +152,9 @@ pub struct Refreshed {
     /// costs; and the most one folder held.
     pub entries: usize,
     pub largest: usize,
-    /// The folders read again, in order.
-    pub folders: Vec<FolderId>,
+    /// The folders read again, in order, each with the entries its
+    /// listing held: what its read cost.
+    pub folders: Vec<(FolderId, usize)>,
     /// What came of watching each folder read or crawled, where a watch
     /// was asked ([`Options::watcher`]).
     pub watches: Vec<(FolderId, Watch)>,
@@ -385,28 +387,25 @@ impl Index {
         items
     }
 
-    /// An entry of a block, as the log and the journal give it: a folder's
-    /// device is its own block's.
     /// The entries of `folder` as it was read, by name, but those of
     /// `touched`: what a read that stats the entries heard alone keeps.
-    pub fn known_entries(
-        &self,
-        folder: FolderId,
-        touched: &HashSet<Box<[u8]>>,
-    ) -> HashMap<&[u8], Entry> {
+    pub fn known_entries(&self, folder: FolderId, touched: &HashSet<Box<[u8]>>) -> Known<'_> {
         let Some(block) = self.tree().block(folder) else {
-            return HashMap::new();
+            return Known::default();
         };
         let dev = block.facts.map_or(0, |f| f.id.dev);
-        block
-            .items
-            .iter()
-            .map(|item| (self.names().get(item.name), item))
-            .filter(|(name, _)| !touched.contains(*name))
-            .map(|(name, item)| (name, self.entry_of(item, dev)))
-            .collect()
+        let mut known = Known::with_capacity(block.items.len());
+        for item in &block.items {
+            let name = self.names().get(item.name);
+            if !touched.contains(name) {
+                known.insert(name, self.entry_of(item, dev));
+            }
+        }
+        known
     }
 
+    /// An entry of a block, as the log and the journal give it: a folder's
+    /// device is its own block's.
     fn entry_of(&self, item: &Item, dev: u64) -> Entry {
         let dev = item
             .child
@@ -644,6 +643,9 @@ pub fn reread_folders(
     reread_named(index, root, opts, cancel, &whole)
 }
 
+/// A folder's entries by name ([`Index::known_entries`]).
+pub type Known<'a> = HashMap<&'a [u8], Entry>;
+
 /// A folder heard, and the names its events gave: none to read it whole.
 pub type HeardFolder = (FolderId, Option<HashSet<Box<[u8]>>>);
 
@@ -751,6 +753,10 @@ fn apply(
             Seen::Listed { again, .. } => State::Listed { again: *again },
             Seen::NotCovered(why) => State::NotCovered(*why),
         };
+        let size = match &seen {
+            Seen::Listed { entries, .. } => entries.len(),
+            Seen::NotCovered(_) => 0,
+        };
         let reread = index.reread(folder, folder_facts, seen);
         fresh.extend(reread.fresh);
         done.records.push(Record::Folder(FolderRecord {
@@ -760,7 +766,7 @@ fn apply(
             changes: reread.changes,
         }));
         done.reread += 1;
-        done.folders.push(folder);
+        done.folders.push((folder, size));
     }
     while let Some(folder) = fresh.pop() {
         if index.tree().loc(folder).is_none() {

@@ -960,8 +960,34 @@ committed once the gate holds.
    written to, read again with at most two stats, its new size in the
    index.
 
-   Left: the user's third run, `tools/measure.sh --no-root --only live`,
-   then the budgets.
+   **The user's third run** (at `2e7ad76`): the entries stat-ed fell to
+   2 to 21 each 10 s (from up to 776,000), but the engine still took
+   1.64 s of processor time in 30 s. Stages timed on a synthetic folder
+   of 62,000 entries showed a read costing about 40 ms without a single
+   stat: the listing, what was kept, the merge, each a microsecond or
+   less an entry. A read of such a folder costs its entries, and only
+   trusting events for names would change that. The listing keeps them.
+
+   So (DESIGN 8) applying what is heard keeps to a share of a core:
+   - after each application, each folder read waits for its share of the
+     processor time taken, by its entries, 49 times over: at most 2% of
+     a core;
+   - the time counted is the writer thread's own, not the clock's. With
+     the clock's, a busy disk's fsync held a probe folder for 10 s;
+   - each folder waits for itself alone: a small one read beside a large
+     one does not wait for it.
+
+   On a synthetic tree, a folder of 62,000 entries written every 100 ms
+   cost 1.4% of a core; a change in a small folder meanwhile was
+   answered in 122 to 282 ms; the probe's changes in 115 ms at the
+   median; a sync of a live folder, a change made just before, 6 ms.
+   The live step now times that sync too.
+
+   A hasher faster than the standard one was tried for what is kept of
+   a folder, and changed nothing: removed.
+
+   Left: the user's fourth run, `tools/measure.sh --no-root --only
+   live`, then the budgets.
 
 **Tests of live coverage:**
 - an overflow lowers coverage at once, and the check after it finds

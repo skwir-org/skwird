@@ -479,7 +479,8 @@ skwird adds:
 read again once, and its changes logged once. A sync applies what is
 gathered below the path it asks at once, so a live answer after a sync
 holds every change made before it. Without a sync, an answer lags what
-was heard by a second at most.
+was heard by a second at most, but for a folder whose reads would
+take more than their share of a core (below).
 
 The measure was a full build of skwird's own workspace, watched, into a
 scratch folder (9.7 s, 15,000 events). Applied at once, it read folders
@@ -507,6 +508,20 @@ home, one cache folder of 62,000 entries was heard about once a
 second, and each read stat-ed all of them: 60,000 stats a second, 9%
 of a core. In a folder of 2,000 entries, a file written to is now read
 again with at most two stats.
+
+**Applying what is heard keeps to a share of a core** (decided on
+2026-11-21, from the user's home). A read of a large folder still
+costs every entry its listing holds, a microsecond or less each: the
+listing, what was kept, the merge. Without its listing a folder's names
+would rest on its events alone. So, after each application, each
+folder read waits, before it is applied again, for its share of the
+processor time the application took, by its entries, 49 times over.
+That time is the writer thread's own (`CLOCK_THREAD_CPUTIME_ID`), not
+the clock's, so a busy disk's waits hold nothing. Applying takes at
+most 2% of a core; a large folder heard without pause waits for
+itself alone; a sync applies it at once. On a synthetic tree, a folder
+of 62,000 entries written every 100 ms cost 1.4% of a core, and a
+change in a small folder meanwhile was answered in 122 to 282 ms.
 
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
