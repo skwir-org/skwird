@@ -8,8 +8,9 @@ decision changes it there.
 
 Phase 0 is done. Phase 1's steps 1 to 6 are done: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
-the user's home and given budgets (DESIGN 10). Step 7 is left: two of
-the budgets, both of memory around the first build, are not met. The
+the user's home and given budgets (DESIGN 10). Step 7, for the two
+budgets the measurement found not met, both of memory around the first
+build, is built and waits for the user's home to be measured again. The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -516,7 +517,10 @@ its ADR-050). Its sessions build them, in its repository:
   crates.io through skwir's lockfile, and their advisories are checked
   as skwir's own.
 - **D. The harvest's enumeration and journal** (skwir's ADR-089):
-  `changes` from step 4, live from phase 2.
+  `changes` from step 4, live from phase 2. A `changes` that a check
+  found holds no write made in place: such a write changes no folder's
+  time. fsearch's recovery missed files that grew so (its `8e6db08`).
+  Live events, from phase 2, hold them.
 
 Kept alike in both: the four coverage words; name matching (DESIGN 7),
 so a change to one is a change to the other; and how a network mount
@@ -535,9 +539,31 @@ is told (DESIGN 2).
 - The sync barrier (cookies).
 - The journal live: changes heard, not only found by a check.
 - The mount table followed, as skwir follows it.
-- Tests, without root: an overflow (a queue left unread while more
-  files are made than `max_queued_events`) lowers coverage at once; a
-  change made while the watches are being installed is not missed.
+- Each inotify instance has its generation: an instance made again
+  leaves the old one's events applied, but proving nothing (DESIGN 2).
+- After an overflow, coverage is lowered at once, and the check runs
+  once the queue is quiet, backing off under churn that lasts. fsearch
+  0.2.2 waits 2 s, doubling up to 60 s, and relists at most every 300 s.
+  A client's sync still runs the check at once.
+- **Churn, measured before it is decided.** Every change is logged
+  (DESIGN 8), so a build's output folder or a cache that changes without
+  pause fills the log. Past 16 MB, the log ends its epoch, and clients'
+  tokens turn "too old". Measure the log's growth during a large build
+  first. fsearch 0.2.2 indexes such folders whole, but applies their
+  changes in batches: after 5 s of quiet, or 60 s at most, rereading the
+  whole folder past 2,048 folders changed. If skwird does so:
+  - a pending subtree is "as of" its first pending change, never live;
+  - a sync applies what is pending below the path asked;
+  - the folders treated so come from the index (a name query, such as
+    `CACHEDIR.TAG`), never from a set learned beside it. fsearch's
+    learned set was empty after a restart, and grew without end (its
+    `b98a7b0`, `6c9dea4`).
+- Tests, without root:
+  - an overflow (a queue left unread while more files are made than
+    `max_queued_events`) lowers coverage at once;
+  - a change made while the watches are being installed is not missed;
+  - an instance made again while the old one's events are still read:
+    "live" comes back from the new one's markers alone.
 
 ## Phase 3: Linux, the system service
 
@@ -545,6 +571,9 @@ is told (DESIGN 2).
   top-level mount when marking through a subvolume is refused (DESIGN 3).
 - Coverage tests for queue overflow, mount and subvolume changes, and
   handle resolution failures; phase 0 establishes feasibility only.
+- The generations and the backoff of phase 2, for marks made again.
+  Events dropped as they are read (under private folders) never include
+  an overflow.
 - Answers filtered per asker (DESIGN 4).
 - Each user's registered folders kept per user, each applying only to
   folders that user owns (DESIGN 5).
@@ -555,14 +584,31 @@ is told (DESIGN 2).
 ## Phase 4: Windows
 
 - A user's engine first: the walk and `ReadDirectoryChangesW`.
-- Then the service: the file table and the change journal.
+- Then the service: the file table and the change journal. A position
+  kept in the journal is used only if the journal's id is the same, and
+  the position is at least its lowest valid USN and not past its next
+  (`FSCTL_QUERY_USN_JOURNAL`). Otherwise the check runs (DESIGN 2).
 - Tried under Wine as far as Wine answers.
 
 ## Phase 5: macOS
 
 - `getattrlistbulk` and FSEvents, from fsearch:
   - events the system dropped, replayed from its log;
-  - the position kept never past a gap;
+  - the position kept never past a gap, nor past a recovery put off
+    (fsearch's `052f636`);
+  - the position kept used only where the event database is the same
+    one, and the position is not ahead of its current id (DESIGN 2).
+    macOS 26.3 numbered its events afresh, below fsearch's saved id
+    (its `2919777`). The database's identity
+    (`FSEventsCopyUUIDForDevice`) is to be verified on a Mac;
+  - each stream with its generation: an old stream's events prove
+    nothing (fsearch's `61f8c8d`, `d78a4fc`);
+  - a latency of 0.5 s with `kFSEventStreamCreateFlagNoDefer`, as
+    fsearch 0.2.2 has. A sync flushes the stream, so the latency
+    delays no sync;
+  - events below folders not covered dropped in the callback. Never
+    dropped: those on `/`, where the drop flags arrive, and "history
+    done";
   - the callback at user-initiated priority, which cut fsearch's drops
     under load;
   - the stream torn down in fsearch's order (stop, invalidate while

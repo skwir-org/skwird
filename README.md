@@ -19,7 +19,8 @@ It runs in one of three ways, with the same engine and protocol:
 started by its first client (`skwird serve`), answering protocol 0, its
 index checked when a client asks. On a home of 6.9 million entries it
 answers 0.6 s after a start, holds 177 MB and takes no processor time
-while idle. Its memory around a first build is over budget (DESIGN 10).
+while idle. Its memory around a first build, over budget when first
+measured, is fixed and waits to be measured again (DESIGN 10).
 Read `docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the
 phases.
 

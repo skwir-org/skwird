@@ -31,8 +31,9 @@ taken:
   - inotify watching per folder.
 
 The bugs both fixed are lessons too, recorded below where they apply.
-Both were last read on 2026-10-20, at fsearch 0.2.1 (`88e63fd`) and
-fsearch-crossplatform `8857eec`.
+Both were last read on 2026-11-21, at fsearch 0.2.2 (`4bc11ce`) and
+fsearch-crossplatform `8857eec`, which has not changed since
+2026-10-12.
 
 It does none of these:
 
@@ -144,7 +145,26 @@ concerned, until that subtree is read again.
 - **A dropped event ends "live"** until the replay or the reread is
   done. Where the system keeps a history (FSEvents, the change journal),
   the position kept to resume from is never past an event not yet
-  applied.
+  applied. That includes a recovery put off, a relist waiting for the
+  disk to calm, which fsearch let the position pass (its `052f636`).
+- **Only the current source proves anything.** A change source started
+  again (an inotify instance made again, fanotify marked again, an
+  FSEvents stream replaced) gets a generation. Events still queued from
+  an older one are applied, but prove nothing: only the current
+  generation's markers may move the position kept or bring coverage
+  back. Those markers are the end of a replay, a sync's cookie heard,
+  and a recovery's end. fsearch let an old stream's events move the new
+  stream's position, and its "history done" end the new stream's replay
+  early (its `61f8c8d`, `d78a4fc`).
+- **A position kept is used only where the history still holds it.**
+  The history must be the same one (its identity: the change journal's
+  id; on macOS, the event database's, to be verified in phase 5), and
+  the position must not be past the history's current end, nor before
+  what it still keeps (the journal's lowest valid USN). Otherwise the
+  engine runs the check and answers "as of" until it is done. macOS
+  26.3 numbered its events afresh, below fsearch's saved id. A stream
+  started from that id then replayed nothing, and said nothing (its
+  `2919777`).
 - **The barrier** makes "live" mean up to now. The client asks for a
   sync. skwird creates a cookie file in a folder of its own that shares
   the notification queue, and answers once it hears it. Where the
@@ -186,7 +206,11 @@ concerned, until that subtree is read again.
   It is not a comparison against a timestamp with a margin, as fsearch
   does with modification times (every folder changed since 120 seconds
   before its last sync), and its port with it: `tar` and `rsync -a` set
-  those back after filling a folder, and cannot set a change time. This
+  those back after filling a folder, and cannot set a change time. A
+  margin also depends on the time it is counted from: fsearch 0.2.2
+  fixed replayed events stamped with their arrival, which moved its
+  sync time ahead, so its catch-up looked at too little (its `182a964`,
+  `55d8845`). An equality has no time to count from. This
   holds only where change times tell: local filesystems, not network
   shares or FUSE. It proves names, not attributes: a file's size changes
   no folder's time.
@@ -420,7 +444,10 @@ From fsearch (0.2):
 
 fsearch also keeps a base and an overlay of changes with tombstones.
 skwird does without the overlay (below, "How a subtree stays one
-range").
+range"). fsearch 0.2.2 measured what its overlay costs: about 190
+bytes an entry, plus its path twice. Its old bound let the overlay
+reach about 1.7 GB over an index of 9.3 million entries, and it is now
+capped (its `c288c93`).
 
 skwird adds:
 - one file per filesystem, where fsearch keeps one for all and does not
@@ -434,8 +461,12 @@ skwird adds:
   tables keyed by path kept a removed folder's new files searchable,
   until 0.2.1;
 - a change rewrites the chunks it touches, never the whole index.
-  fsearch rewrites everything after 50,000 changes or 12 hours, about
-  280 MB by its own estimate, and its port does the same.
+  fsearch rewrites everything, about 280 MB by its own estimate, and
+  its port does the same. Since 0.2.2 it does so:
+  - past an eighth of its base in changes (at least 50,000, at most
+    175,000), once the disk has been quiet for 30 seconds;
+  - past 350,000 changes at any time;
+  - after 12 hours, once quiet.
 
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
