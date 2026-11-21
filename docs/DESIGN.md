@@ -1,9 +1,11 @@
 # skwird's design
 
-Status: design, 2026-10-10, revised on 2026-10-11 by phase 0's numbers
-and on 2026-10-20 by what fsearch and its Linux port changed since.
-Only `skwird-bench` (phase 0, `docs/PLAN.md`) is built. Each decision
-says why, so that it can be revisited knowingly.
+Status: design, 2026-10-10, revised on 2026-10-11 by phase 0's numbers,
+on 2026-10-20 by what fsearch and its Linux port changed since, and on
+2026-11-21 by the choices made before phase 1 (2026-11-11) and what
+skwir decided up to its 0.6.0. Only `skwird-bench` (phase 0,
+`docs/PLAN.md`) is built. Each decision says why, so that it can be
+revisited knowingly.
 
 ## What skwird is
 
@@ -33,7 +35,11 @@ fsearch-crossplatform `8857eec`.
 
 It does none of these:
 
-- **Search inside files.** Not for now (open question 4).
+- **Search inside files,** ever (open question 4, answered). Content,
+  and what is derived from it, is built per user by the user's own
+  client, as skwir's harvest builds it (skwir's ADR-089). An engine that
+  reads every user's files, as the system service does, keeps names and
+  attributes only.
 - **Types by extension.** Clients type files; skwir uses the desktop's
   MIME database.
 - **A query language in the protocol.** Queries are data; the command
@@ -56,13 +62,23 @@ How clients find an engine, in this order:
 1. the system service's socket;
 2. the user's socket;
 3. otherwise the client starts `skwird` itself if it is installed;
-4. otherwise it does without (a client must work without skwird).
+4. otherwise it does without (a client must work without skwird). It
+   does without an engine that speaks no protocol version it speaks,
+   too, and says so.
 
 There is one engine per scope: one for the system, one per user, held
 by a lock. A second engine blocks on the lock and takes over when the
 first exits, even during its first crawl; it does not poll the lock, as
 fsearch's followers do every 10 seconds (10). A user's engine that
 finds the system service covering its roots live (2) leaves them to it.
+
+An engine a client starts lives in that client's group of processes.
+Where a service manager runs the client, the engine ends with the
+client's run: skwir's `skwir index`, run hourly by a systemd timer
+(skwir's ADR-089), takes its engine down with it, and the next client
+starts another, which pays one check (52 ms warm, 1.9 s cold on the home
+phase 0 measured). So every save survives a kill, and the user's unit
+(phase 2) is what outlives such runs.
 
 The engine's crates can be embedded by other programs. Clients are
 supported through the protocol only, for four reasons:
@@ -81,6 +97,9 @@ supported through the protocol only, for four reasons:
   window.
 - **Isolation.** A crash or a hang in the engine is not the client's.
 
+A client takes the client crate, `skwird-proto`, as a copy in its own
+tree, or speaks the protocol with code of its own (Protocol, below).
+
 ### 2. Every answer says how far it can be trusted
 
 This is skwird's core, not search. An answer that says only "these
@@ -96,9 +115,9 @@ says one of:
 - **Checked at T**: every folder was compared with the index at T.
 - **As of T**: a snapshot, such as an index just loaded, or plocate's
   database.
-- **Not covered**, and why: excluded, permission denied, a read that
-  failed, a network share, a watch limit reached, a mount below the
-  root.
+- **Not covered**, and why: outside the engine's roots, excluded,
+  permission denied, a read that failed, a network mount, a mount below
+  the root, a watch limit reached.
 
 The kinds of fact are:
 - **names** (and kinds: file, folder, link, other);
@@ -123,7 +142,12 @@ concerned, until that subtree is read again.
   the notification queue, and answers once it hears it. Where the
   system has a flush (`FSEventStreamFlushSync`), that is used instead.
   Watchman and git's fsmonitor daemon work the same way. A rename the
-  client just made is then in the answer.
+  client just made is then in the answer. Where nothing watches the
+  root (a user's engine before phase 2, or a folder beyond its
+  watches), the sync runs the check on that root and answers "checked
+  at" a time after it was asked. skwir needs this after its own plans:
+  its lenses ask no index again after a plan, since the index learns of
+  the plan's changes after it (skwir's ADR-126).
 - **The check** proves names current without any watch. A folder's
   change time moves whenever its entries change. So comparing each
   folder's change time with the one stored, for equality, finds every
@@ -160,8 +184,12 @@ concerned, until that subtree is read again.
   still check what they show (a stat), so a stale result costs one
   check. The guarantee is about results missing.
 - **The index reaches what a walk reaches.** Hidden names are indexed
-  (clients filter them), links are never followed, and each mount below
-  a root is reported, covered or not. A mount is told by its mount id
+  (clients filter them), and so are tool stores (`node_modules`,
+  `~/.cargo`, caches): a client that leaves them out of its searches
+  filters skwird's answers, as skwir does by its ADR-125 (the user's
+  choice, 2026-11-11, to revisit if phase 1 measures the index too
+  large). Links are never followed, and each mount below a root is
+  reported, covered or not. A mount is told by its mount id
   (`statx`, Linux 5.8), not by its device: each btrfs subvolume has a
   device of its own and is no mount, and a bind mount keeps its
   filesystem's device. fsearch-crossplatform tells mounts by device, so
@@ -169,6 +197,19 @@ concerned, until that subtree is read again.
   check and a reread share one test, which holds at the mount's own
   folder as well: fsearch once crawled a whole volume when a change was
   reported on its mount point.
+- **Mounts come from the mount table,** never from reading a path: a
+  stat of a dead server's mount point blocks. The table is read again
+  at each crawl and check, and followed from phase 2, as skwir follows
+  it (`POLLPRI` on `/proc/self/mountinfo`). The mount id is the backstop
+  for a mount made since the table was read.
+- **Network mounts are never crawled** (the user's choice, 2026-11-11).
+  A network mount below a root, or a root on one, is not covered:
+  network. Requests would leave the machine (rule 6), and a share's
+  change times do not tell anyway. A mount is told as skwir tells it
+  (`skwir_core::fs::reach::network`): one of the kernel's network
+  filesystems, a FUSE subtype known to reach one, or a FUSE source that
+  names a server. skwir's walks and indexes never enter one either (its
+  `docs/invariants/remote.md`). Removable volumes: open question 8.
 
 ### 3. Privileges are detected, and become coverage
 
@@ -244,10 +285,29 @@ It is not enough to leave them out of answers: they are never read into
 the index. skwird honours what marks them itself:
 - a `.private` file in a folder (skwir's convention);
 - default exclusions (`~/.ssh`, `~/.gnupg`, keyrings);
-- a user's own exclusions.
+- a user's own exclusions, in skwird's configuration;
+- folders a client registers (the user's choice, 2026-11-11).
 
-A client cannot widen what is indexed. How a system service learns a
-user's exclusions is open (question 3).
+**A client narrows what is indexed, never widens it.** It registers
+folders over the socket, with its user's credentials, and skwird keeps
+them for that user, across restarts, until that client withdraws them.
+A folder registered after it was indexed is purged: its entries, and
+the log's entries under it. An answer says such a folder is not
+covered: excluded, so the client walks it when its user searches there.
+skwir's ADR-125 keeps its secrets from agents and from its index, not
+from the user's own searches.
+
+A registration names folders, never patterns. skwir's Secrets category
+(ADR-125) mixes folders (`~/.ssh`, password managers' and browsers'
+profiles) with names and globs that hold anywhere (`.env`, key files).
+skwir registers the folders it resolves. It keeps filtering the rest
+from its agents itself, as it filters tool stores (2): such a file's
+name is in its user's own index, never its content (ADR-089).
+
+The same registration answers how a system service learns a user's
+exclusions (open question 3). It applies only to folders the
+registering user owns, so no user can take another's folders out of
+the index.
 
 An exclusion, like a root, is resolved once to the folder it names, and
 compared as that folder (its identity, or its range in the index),
@@ -286,6 +346,16 @@ device and an inode do not name one file.
   - kinds;
   - ranges of size and of time. Times are instants, so a client
     computes calendar boundaries in its user's time zone.
+- **Names match as skwir matches them,** in protocol 0, so an answer
+  holds whatever skwir's query plugin would match (its `NamePat`):
+  - a substring, after `str::to_lowercase` of both sides, or exactly
+    when the case is asked to count;
+  - a glob, as the `globset` crate compiles it, case-insensitive unless
+    asked, with no separator rule (a name holds none);
+  - both on the name's lossy UTF-8 form. A name that is not UTF-8 is
+    still answered, and travels byte for byte.
+
+  Normalization and fuzzy scoring stay open (question 5).
 - **The command line** has a text syntax of its own, compiled to the
   same queries.
 - **Answers may be wider, never narrower.** An answer may hold more
@@ -326,6 +396,17 @@ skwird adds:
   12 hours, about 280 MB by its own estimate, and its port does the
   same.
 
+**The log is the journal.** Every change the writer applies, whatever
+found it (the first crawl, a check, an event), is appended to a
+numbered log before it reaches the overlay. One structure does three
+jobs: saves are incremental, a crash is replayed from it, and it
+answers `changes {root, since}`, which skwir's harvest consumes (its
+ADR-089). Its entries carry each entry's identity and kind. A token is
+an epoch and a sequence, opaque to clients. "Too old" answers a token
+from before what the log keeps, or from another epoch: a rebuilt index
+starts a new one. So the journal comes in phase 1, with the log, not
+in phase 2.
+
 The index is a cache: a damaged file, or one of another version or
 layout, is rebuilt. Its header records every array's width, so two
 layouts never pass for one: the port keeps kinds in 4 bits on macOS and
@@ -364,22 +445,39 @@ measures them.
   engine. A named pipe on Windows: `\\.\pipe\skwird`, and one per user
   named by its SID. A socket path longer than the system allows (108
   bytes on Linux, 104 on macOS) is an error that says so, not the crash
-  it was in fsearch.
+  it was in fsearch. The user's folder is the user's alone (mode 0700),
+  checked so before the socket is bound, as skwir keeps its own runtime
+  folder.
 - **Framing.** JSON lines at first, for readability; each message has
   an id.
 - **Messages:**
   - `hello`: the protocol versions spoken, the scope, a summary of
     coverage;
   - `coverage {root}`;
-  - `sync {root}`: the barrier (2);
+  - `sync {root}`: the barrier, or the check where nothing watches the
+    root (2);
   - `query {root, names, kinds, sizes, times, limit, rank}`: streamed
     batches of results, then `done` with the coverage that held;
   - `cancel {id}`;
-  - `changes {root, since}`: what changed since a token, or "too old"
-    (a journal for clients that keep state of their own).
+  - `changes {root, since}`: what changed since a token, with each
+    entry's identity and kind, then the token to resume from; or "too
+    old" (8). A journal for clients that keep state of their own;
+  - `exclude {add, remove}`: folders the client keeps out of the index
+    (5). A client removes only what it added.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
-  older versions.
+  older versions. A client and an engine with no version in common do
+  without each other, and the client says so (1).
+- **The client crate.** `skwird-proto` holds the messages, a client,
+  and a fake engine for clients' tests. It depends on serde and
+  serde_json alone, and is not published on crates.io (the user's
+  choice, 2026-11-11). A client copies it into its own tree: skwir
+  takes no git dependency (its ADR-050), and keeps it as
+  `vendor/skwird-proto`, as it keeps gpui and syntect. skwird's
+  `tools/vendor-proto` writes that copy as `cargo package` writes a
+  crate, its manifest standing alone, outside skwird's workspace, and
+  names the commit it came from. A client may instead write its own,
+  from this section and the transcripts the tests keep.
 
 ## Open questions
 
@@ -388,17 +486,22 @@ measures them.
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
    - which folders a user's engine watches on Linux.
-3. **A user's exclusions:** how a system service learns them. Perhaps
-   the user's client registers them over the socket, with the user's
-   credentials, and the service keeps them per user.
-4. **Content search:** whether a trigram index belongs in skwird or in
-   each client. skwir measured one: 11% of the text, 5 to 175 times
-   faster than scanning.
-5. **Names:** their exact meaning (Unicode case folding and
-   normalization), and fuzzy scoring. fsearch keeps names as the disk
-   has them and searches each query in both its composed and decomposed
-   forms (NFC and NFD), a way to meet normalization without changing
-   names.
+3. **A user's exclusions:** answered on 2026-11-11 (5). The user's
+   client registers folders over the socket, with the user's
+   credentials, and the service keeps them per user, each applying only
+   to folders that user owns.
+4. **Content search:** answered on 2026-10-26 by skwir's ADR-089, and
+   taken in on 2026-11-21: never in skwird. Derived facts and their
+   indexes are per user, built by the user's own client, never by a
+   service that reads other users' files. skwir measured a trigram
+   index at 11% of the text, 5 to 175 times faster than scanning, and
+   builds it in its own run.
+5. **Names:** protocol 0 matches as skwir does (7). Open: Unicode case
+   folding beyond `to_lowercase`, normalization, and fuzzy scoring.
+   fsearch keeps names as the disk has them and searches each query in
+   both its composed and decomposed forms (NFC and NFD), a way to meet
+   normalization without changing names. A change here changes skwir's
+   matching with it, or answers would hold less than skwir matches.
 6. **fanotify on btrfs subvolumes:** answered by phase 0, as far as a
    trial goes (decision 3). A mark through the top-level subvolume,
    mounted read-only and detached, heard the changes made in three
@@ -406,6 +509,9 @@ measures them.
    3's tests decide whether it holds live.
 7. **Windows:** whether NTFS folder times can serve as the check; ReFS;
    how fast the file table reads.
-8. **Removable and network volumes:** indexed unasked, or asked first.
-9. **The name:** whether `skwird` is free on crates.io and in the
-   distributions.
+8. **Removable volumes:** indexed unasked, or asked first, perhaps once
+   per volume by its UUID, as skwir's harvest asks. Roots under the
+   home reach none, so phase 1 does not meet them. Network volumes are
+   answered (2): never crawled.
+9. **The name:** whether `skwird` is free in the distributions. No
+   crate is published on crates.io (the user's choice, 2026-11-11).
