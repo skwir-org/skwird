@@ -13,7 +13,8 @@ the user's home and given budgets (DESIGN 10), the three of memory
 third measurements. Phase 2 is done, its seven steps: the engine as a
 user service, folders its clients register watched and answered live,
 a sync of them a barrier, the mount table followed, within budgets of
-its own (DESIGN 10). The
+its own (DESIGN 10). Phase 3's first step is done: the virtual
+machines its tests need, the flake's checks. The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -1030,6 +1031,39 @@ committed once the gate holds.
 - Tests that need root run in a virtual machine, never on the
   developer's own system.
 
+### Steps
+
+1. **The machine** (done on 2026-11-22). The flake's `checks` are the
+   virtual machines, made by NixOS's test framework
+   (`pkgs.testers.runNixOSTest`, QEMU): a machine declared as a NixOS
+   system, with its users, its units and its disks, the kernel the
+   flake's nixpkgs pins, and the host's store shared. Neither a
+   container, which would mark the host's own filesystems, nor a
+   one-command machine (virtme-ng, vmtest), which sets up no users or
+   services. The flake also gained what such a machine installs, made
+   as skwir's are: the package (`dist/nix/package.nix`, in nixpkgs'
+   manner, built with the pinned Rust alone) and a NixOS module
+   (`dist/nix/module.nix`, `services.skwird`: skwird installed, and
+   with `session`, on by default, the user service for every user).
+
+   The first machine, `user-service` (`tools/vm/user-service.nix`),
+   proves phase 2's service on a system of its own, with two synthetic
+   users. Every client in it sets `SKWIRD_NO_START`, so what answers is
+   the service's or nothing:
+   - the socket starts no engine before a client;
+   - the first client starts the service's engine, which answers what
+     the user made (a name with a space, one with an accent), and it is
+     the only engine;
+   - a folder watched is answered live, with no sync;
+   - restarted, the engine watches what was registered again;
+   - each user's engine is their own, and the other user cannot reach
+     their socket.
+
+   It passed on the developer's machine with its virtualization off,
+   the processor emulated: 187 s to boot, 228 s in all. With KVM, a
+   boot takes seconds.
+2. fanotify, in a machine of its own (the bullets above).
+
 ## Phase 4: Windows
 
 - A user's engine first: the walk and `ReadDirectoryChangesW`.
@@ -1070,7 +1104,9 @@ committed once the gate holds.
 ## Later
 
 - Packages, beside skwir's: skwir.org's apt and dnf repositories, the
-  AUR, a Nix package in nixpkgs' manner (as skwir's ADR-124), Homebrew,
-  winget. Whether the name is free there is DESIGN's open question 9.
+  AUR, Homebrew, winget, and a copy in nixpkgs of the flake's package
+  (`dist/nix/package.nix`, written in nixpkgs' manner as skwir's ADR-124
+  asks, since phase 3's first step). Whether the name is free there is
+  DESIGN's open question 9.
 - CI once there are crates to check on three systems. The development
   shell (`flake.nix`) already carries the Windows and macOS targets.

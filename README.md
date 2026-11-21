@@ -58,6 +58,19 @@ systemctl --user enable --now skwird.socket
 
 The socket starts the engine at the first client.
 
+### With Nix
+
+The flake gives the package (`nix build`, built as skwir's is) and a
+NixOS module, which installs skwird and enables the user service for
+every user:
+
+```nix
+# flake.nix: inputs.skwird.url = "git+file:/path/to/skwird";
+imports = [ skwird.nixosModules.default ];
+services.skwird.enable = true;
+# services.skwird.session = false;   # installed only: clients start it
+```
+
 ## Measuring
 
 `skwird-bench` measures what an index would cost on a real tree. It

@@ -71,7 +71,12 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   times, hard links) use a scratch folder under the user's cache
   (`~/.cache/skwird-tests/`), never `/tmp`, which may be a tmpfs.
 - Tests that need root (fanotify, a system service) run in a virtual
-  machine, never on a developer's own system.
+  machine, never on a developer's own system. The flake's `checks` are
+  those machines (`tools/vm/`, NixOS's test framework, QEMU):
+  `nix build .#checks.x86_64-linux.user-service -L`, or its
+  `.driverInteractive` to work in the machine by hand. They use KVM
+  where the processor's virtualization is on; otherwise QEMU emulates
+  the processor, many times slower.
 - Assert what an answer holds, not merely that it parses.
 
 ## Shell hygiene
@@ -93,4 +98,6 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   private folders, and sets `SKWIRD_NO_START`, so that no client of it
   starts another engine. Otherwise a client starts the user's engine,
   which crawls the whole home into the user's cache: it happened once,
-  in phase 1's step 5.
+  in phase 1's step 5, and again in phase 3's first step, from a
+  package's `skwird status` run for a glance. Any `skwird` is such a
+  client, a build's or a package's, whatever it is run for.
