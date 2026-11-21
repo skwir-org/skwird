@@ -6,6 +6,10 @@
 //!   folders, on threads of its own, and hands each folder to a sink as it
 //!   is read.
 //! - [`read_folder`] reads one folder again.
+//! - [`Watcher`] watches folders as they are read (inotify, phase 2): a
+//!   folder is watched through its open handle before its entries are
+//!   read, so the folder watched is the folder read, and a change
+//!   between the two is heard.
 //! - [`check`] compares each folder's identity and change time with what
 //!   was stored, and says which to read again.
 //!
@@ -44,17 +48,19 @@ pub mod mounts;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+pub use linux::watch::{Heard, Watcher};
+#[cfg(target_os = "linux")]
 pub use linux::{
     Checked, Crawl, Root, Stale, Stored, StoredFolder, check, crawl, crawl_all, crawl_below,
-    filesystem_name, read_folder,
+    filesystem_name, read_folder, read_folder_watched,
 };
 
 #[cfg(not(target_os = "linux"))]
 mod other;
 #[cfg(not(target_os = "linux"))]
 pub use other::{
-    Checked, Crawl, Root, Stale, Stored, StoredFolder, check, crawl, crawl_all, crawl_below,
-    read_folder,
+    Checked, Crawl, Heard, Root, Stale, Stored, StoredFolder, Watcher, check, crawl, crawl_all,
+    crawl_below, read_folder, read_folder_watched,
 };
 
 pub use exclude::Exclusions;
@@ -268,11 +274,33 @@ pub struct Crawled {
     /// its parent's stat of it when it was not.
     pub stat: Option<FolderStat>,
     pub outcome: Outcome,
+    /// What came of watching it ([`Options::watcher`]).
+    pub watch: Watch,
+}
+
+/// What came of watching a folder as it was read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Watch {
+    /// No watch was asked for it: no watcher, or the folder is outside
+    /// every subtree the watcher watches, or it was not read.
+    #[default]
+    Unasked,
+    /// Watched, by this descriptor of the watcher's instance.
+    Watched(i32),
+    /// Not watched: the watcher's budget of watches is spent.
+    Budget,
+    /// Not watched: the user's limit of watches is reached.
+    Limit,
+    /// Not watched, with this error number.
+    Failed(i32),
 }
 
 /// How a crawl or a check runs.
 #[derive(Clone, Debug)]
 pub struct Options {
+    /// A watcher, for every folder a crawl or a reread reads within its
+    /// subtrees to be watched before its entries are read.
+    pub watcher: Option<Arc<Watcher>>,
     pub threads: usize,
     /// Stat every entry, for its attributes. Without, only folders are
     /// stat-ed (their identity and mount), and entries carry no
@@ -287,6 +315,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            watcher: None,
             threads: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
             attrs: true,
             tick: Duration::from_secs(2),

@@ -14,10 +14,12 @@ use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, Statx, StatxFlags};
 use rustix::io::Errno;
 
+pub mod watch;
+
 use crate::mounts::{self, Mount, Table, component};
 use crate::{
     Attrs, Cancel, Crawled, Entry, Error, Exclusions, FileId, FolderStat, Kind, Listing, Options,
-    Outcome, Time, Why,
+    Outcome, Time, Watch, Why,
 };
 
 /// The longest path the system resolves at once, its final NUL included.
@@ -296,6 +298,15 @@ fn names_of(entries: impl Iterator<Item = rustix::io::Result<Named>>) -> Result<
 /// [`Options::attrs`], folders alone without). Gives its stat where it
 /// was taken, and what came of it.
 pub fn read_folder(root: &Root, rel: &Path, opts: &Options) -> (Option<FolderStat>, Outcome) {
+    read(root, rel, opts, &mut Watch::Unasked)
+}
+
+fn read(
+    root: &Root,
+    rel: &Path,
+    opts: &Options,
+    watch: &mut Watch,
+) -> (Option<FolderStat>, Outcome) {
     let not_covered = |stat, why| (stat, Outcome::NotCovered(why));
     if root.excluded_by_path(rel) {
         return not_covered(None, Why::Excluded);
@@ -326,6 +337,9 @@ pub fn read_folder(root: &Root, rel: &Path, opts: &Options) -> (Option<FolderSta
     }
     if stat.mount != root.stat.mount {
         return not_covered(Some(stat), Why::Mount);
+    }
+    if let Some(watcher) = &opts.watcher {
+        *watch = watcher.watch(fd.as_fd(), &root.path.join(rel));
     }
     let mut dir = match Dir::new(fd) {
         Ok(dir) => dir,
@@ -386,6 +400,19 @@ pub fn read_folder(root: &Root, rel: &Path, opts: &Options) -> (Option<FolderSta
         listing.push(name.to_bytes(), entry);
     }
     (Some(stat), Outcome::Listed(listing))
+}
+
+/// [`read_folder`], and what came of watching the folder: with
+/// [`Options::watcher`], a folder within its subtrees is watched through
+/// its handle before its entries are read.
+pub fn read_folder_watched(
+    root: &Root,
+    rel: &Path,
+    opts: &Options,
+) -> (Option<FolderStat>, Outcome, Watch) {
+    let mut watch = Watch::Unasked;
+    let (stat, outcome) = read(root, rel, opts, &mut watch);
+    (stat, outcome, watch)
 }
 
 fn mount_why(network: bool) -> Why {
@@ -490,7 +517,7 @@ fn visit(
     next_slot: &AtomicUsize,
     sink: &(dyn Fn(usize, Crawled) + Sync),
 ) -> Vec<Job> {
-    let (stat, outcome) = read_folder(root, &job.rel, opts);
+    let (stat, outcome, watch) = read_folder_watched(root, &job.rel, opts);
     let mut found = Vec::new();
     if let Outcome::Listed(listing) = &outcome {
         for (name, entry) in listing.iter() {
@@ -504,6 +531,7 @@ fn visit(
                 parent: Some(job.slot),
                 stat: None,
                 outcome: Outcome::NotCovered(why),
+                watch: Watch::Unasked,
             };
             if let Some(network) = root.mount_at(&rel) {
                 sink(slot, not_read(mount_why(network)));
@@ -525,6 +553,7 @@ fn visit(
             parent: job.parent,
             stat,
             outcome,
+            watch,
         },
     );
     found

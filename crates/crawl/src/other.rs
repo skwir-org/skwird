@@ -67,6 +67,14 @@ pub fn read_folder(root: &Root, _: &Path, _: &Options) -> (Option<FolderStat>, O
     match root.never {}
 }
 
+pub fn read_folder_watched(
+    root: &Root,
+    _: &Path,
+    _: &Options,
+) -> (Option<FolderStat>, Outcome, crate::Watch) {
+    match root.never {}
+}
+
 pub fn crawl(
     root: &Root,
     _: &Path,
@@ -151,4 +159,56 @@ pub struct Checked {
 
 pub fn check(root: &Root, _: &Stored, _: &Options, _: &Cancel) -> Result<Checked, Error> {
     match root.never {}
+}
+
+/// What a watcher heard (Linux's inotify; none here yet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Heard {
+    Changed(i32),
+    Moved(i32),
+    Gone(i32),
+    Overflow,
+}
+
+/// A watcher, which no system but Linux makes yet (rule 7): [`Watcher::new`]
+/// says so.
+#[derive(Debug)]
+pub struct Watcher {
+    never: Infallible,
+}
+
+impl Watcher {
+    pub fn new(_: u64, _: usize) -> std::io::Result<Watcher> {
+        Err(std::io::Error::other(format!(
+            "skwird watches no folder on {SYSTEM} yet"
+        )))
+    }
+
+    pub fn share() -> usize {
+        0
+    }
+
+    pub fn generation(&self) -> u64 {
+        match self.never {}
+    }
+
+    pub fn watching(&self) -> usize {
+        match self.never {}
+    }
+
+    pub fn set_scopes(&self, _: Vec<PathBuf>) {
+        match self.never {}
+    }
+
+    pub fn wants(&self, _: &Path) -> bool {
+        match self.never {}
+    }
+
+    pub fn unwatch(&self, _: i32) {
+        match self.never {}
+    }
+
+    pub fn read(&self, _: &mut Vec<Heard>) -> std::io::Result<()> {
+        match self.never {}
+    }
 }

@@ -651,6 +651,35 @@ committed once the gate holds.
        its events carry the old generation;
      - a budget of watches reached is reported, never a folder silently
        unwatched.
+
+   **Done on 2026-11-21.** `skwird_crawl::Watcher` (`linux/watch.rs`).
+   - An inotify instance of a generation, non-blocking, its handle given
+     for a caller to wait on.
+   - It is given the subtrees to watch. Every folder a crawl or a reread
+     reads within them is watched through `/proc/self/fd/N` once opened,
+     before its entries are read (`Options::watcher`). Each folder read
+     says what came of it (`Crawled::watch`, `read_folder_watched`):
+     watched by a descriptor, not asked, past the budget, past the
+     user's limit, or failed.
+   - What it hears is named by descriptor, never mapped to a folder by
+     the watcher itself: whoever applies it maps descriptors to folders,
+     and reads each folder named again. So an event heard during a crawl,
+     before the index has numbered the folder, is kept, not dropped.
+   - `Heard`: a folder changed, moved, its watch gone (removed, or its
+     filesystem unmounted), or an overflow.
+   - Its share of the user's watches: a quarter of `max_user_watches`.
+   - Tests pass:
+     - a change heard, named by its folder alone; a folder removed, its
+       watch gone and let go of;
+     - 300 folders written to without pause while the crawl reads and
+       watches them: each whose files differ from its listing was heard
+       changed. With the watch moved after the listing, the test failed
+       in two runs of three;
+     - 16,448 files made in a folder unread: an overflow said;
+     - an instance made again: the old one still hears, each with its
+       generation;
+     - a budget of 3 over 5 folders: 3 watched, 2 said past it;
+     - only the subtrees given are watched, an excluded folder never.
 2. **Churn, measured before it is decided.** Every change is logged
    (DESIGN 8), so a build's output folder or a cache that changes without
    pause fills the log. Past 16 MB, the log ends its epoch, and clients'
