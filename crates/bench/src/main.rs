@@ -11,6 +11,8 @@ mod check;
 #[cfg(target_os = "linux")]
 mod fanotify;
 #[cfg(unix)]
+mod index;
+#[cfg(unix)]
 mod said;
 #[cfg(unix)]
 mod walk;
@@ -18,6 +20,7 @@ mod walk;
 const USAGE: &str = "\
 usage: skwird-bench walk ROOT [--threads N] [--stat]
        skwird-bench check ROOT [--threads N] [--runs N] [--cold] [--drop-with CMD]
+       skwird-bench index ROOT [--threads N] [--keep DIR]
        skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
 
 walk      read every folder under ROOT with skwird's crawl, and size the
@@ -27,6 +30,9 @@ check     what proving that index current costs where nothing watched:
           every folder's change time, on 1, 8 and all threads (--cold:
           asks you to drop the caches before each cold pass; --drop-with
           CMD: runs CMD with sh to drop them instead, and implies --cold)
+index     build skwird's index of ROOT from a crawl: its size against the
+          estimate, a save and a load, and a few queries, each timed
+          (--keep DIR: save it there, not in the cache)
 fanotify  whether a system service could watch the whole filesystem
           holding FOLDER (root only). Refused in a btrfs subvolume, it
           tries through the filesystem's top-level subvolume, mounted
@@ -48,6 +54,8 @@ struct Args {
     /// A command that drops the caches, run with `sh -c` before each cold pass.
     drop_with: Option<String>,
     seconds: u64,
+    /// Where `index` saves the index.
+    keep: Option<PathBuf>,
     /// Folders where `fanotify` makes, renames and removes a file of its own.
     probes: Vec<PathBuf>,
 }
@@ -64,6 +72,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         cold: false,
         drop_with: None,
         seconds: 0,
+        keep: None,
         probes: Vec::new(),
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
@@ -80,6 +89,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--drop-with" => {
                 parsed.drop_with = Some(it.next().ok_or("--drop-with takes a command")?.clone());
                 parsed.cold = true;
+            }
+            "--keep" => {
+                parsed.keep = Some(PathBuf::from(it.next().ok_or("--keep takes a folder")?));
             }
             "--probe" => {
                 let dir = it.next().ok_or("--probe takes a folder")?;
@@ -119,7 +131,7 @@ fn main() -> ExitCode {
 #[cfg(not(unix))]
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
-        "walk" | "check" | "fanotify" => {
+        "walk" | "check" | "index" | "fanotify" => {
             Err("skwird-bench measures Unix filesystems so far; Windows comes with phase 4".into())
         }
         _ => Err(USAGE.into()),
@@ -136,6 +148,7 @@ fn run(args: &Args) -> Result<(), String> {
             Ok(())
         }
         "check" => check(args),
+        "index" => index::run(&args.path, args.threads, args.keep.clone()),
         #[cfg(target_os = "linux")]
         "fanotify" => fanotify::probe(&args.path, args.seconds, &args.probes),
         #[cfg(not(target_os = "linux"))]

@@ -1,0 +1,408 @@
+//! An index: its folders' tree and its names, and the queries on them
+//! (`docs/DESIGN.md`, decision 7). Queries are data: names matched as
+//! skwir matches them, kinds, ranges of size and of modification time,
+//! all under one folder, whose subtree is one range of the index.
+
+use std::collections::HashMap;
+use std::ops::{Range, RangeInclusive};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use skwird_crawl::{Attrs, FileId, Kind, Time};
+
+use crate::block::{FolderId, NameId};
+use crate::chunk::{View, ZONE, kind_code};
+use crate::matching::{Matcher, NameQuery};
+use crate::names::Names;
+use crate::packed::RUN;
+use crate::packed::from_signed;
+use crate::tree::ChunkId;
+use crate::tree::Tree;
+
+/// What to look for below a folder. Every part given must hold.
+#[derive(Clone, Debug, Default)]
+pub struct Query {
+    pub name: Option<NameQuery>,
+    pub kinds: Option<Vec<Kind>>,
+    /// Sizes, in bytes. An entry whose attributes the index does not hold
+    /// (a mount point) matches no size.
+    pub size: Option<RangeInclusive<u64>>,
+    /// Modification times. As for sizes, an entry without attributes
+    /// matches none.
+    pub mtime: Option<RangeInclusive<Time>>,
+    /// At most this many answers, in the index's order.
+    pub limit: Option<usize>,
+}
+
+/// An entry that answers a query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    /// Its path below the index's root.
+    pub path: PathBuf,
+    pub kind: Kind,
+    pub id: FileId,
+    /// Its folder's identity.
+    pub folder: FileId,
+    pub attrs: Option<Attrs>,
+}
+
+/// The index of one root.
+#[derive(Clone, Debug)]
+pub struct Index {
+    tree: Tree,
+    names: Arc<Names>,
+    /// The folder whose saved names these are, mapped: a save there need
+    /// not write them again.
+    names_saved: Option<PathBuf>,
+}
+
+/// A name's bytes as a path's component.
+#[cfg(unix)]
+pub fn component(name: &[u8]) -> &Path {
+    use std::os::unix::ffi::OsStrExt;
+    Path::new(std::ffi::OsStr::from_bytes(name))
+}
+
+/// A name's bytes as a path's component: elsewhere than Unix, its UTF-8.
+#[cfg(not(unix))]
+pub fn component(name: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(name).into_owned())
+}
+
+impl Index {
+    pub fn new(tree: Tree, names: Arc<Names>) -> Index {
+        Index {
+            tree,
+            names,
+            names_saved: None,
+        }
+    }
+
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    pub fn tree_mut(&mut self) -> &mut Tree {
+        &mut self.tree
+    }
+
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
+    /// Whether its names are those saved in `dir`.
+    pub fn names_mapped_from(&self, dir: &Path) -> bool {
+        self.names_saved.as_deref() == Some(dir)
+    }
+
+    /// Take `names`, the same names read from their file in `dir`.
+    pub fn set_names(&mut self, names: Arc<Names>, dir: &Path) {
+        self.names = names;
+        self.names_saved = Some(dir.to_path_buf());
+    }
+
+    /// Say that its names are those saved in `dir`.
+    pub fn mark_names_from(&mut self, dir: &Path) {
+        self.names_saved = Some(dir.to_path_buf());
+    }
+
+    /// The root's folder: the first block's.
+    pub fn root(&self) -> Option<FolderId> {
+        self.tree.chunks().next().map(|(_, c)| c.view().folder(0))
+    }
+
+    /// The folder at `rel` below the root, by its names: none if it is
+    /// not in the index, or is not a folder.
+    pub fn folder_at(&self, rel: &Path) -> Option<FolderId> {
+        let mut folder = self.root()?;
+        for part in rel.components() {
+            let name = part.as_os_str().as_encoded_bytes();
+            let loc = self.tree.loc(folder)?;
+            let view = self.tree.chunk(loc.chunk).view();
+            let entries = view.entries(loc.block as usize);
+            // Entries are in the order of their names' bytes.
+            let (mut lo, mut hi) = (entries.start, entries.end);
+            while lo < hi {
+                let mid = usize::midpoint(lo, hi);
+                if self.names.get(view.item_name(mid)) < name {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if lo == entries.end || self.names.get(view.item_name(lo)) != name {
+                return None;
+            }
+            folder = view.item_child(lo)?;
+        }
+        Some(folder)
+    }
+
+    /// A folder's path below the root.
+    pub fn path_of(&self, folder: FolderId) -> PathBuf {
+        let mut names: Vec<NameId> = Vec::new();
+        let mut at = Some(folder);
+        while let Some(f) = at {
+            let Some(loc) = self.tree.loc(f) else { break };
+            let view = self.tree.chunk(loc.chunk).view();
+            let parent = view.parent(loc.block as usize);
+            if parent.is_some() {
+                names.push(view.name(loc.block as usize));
+            }
+            at = parent;
+        }
+        names
+            .iter()
+            .rev()
+            .map(|&n| component(self.names.get(n)))
+            .collect()
+    }
+
+    /// Which names match, a bit each, scored on threads of their own.
+    fn matching(&self, matcher: &Matcher) -> Vec<u64> {
+        let count = self.names.len();
+        let words = count.div_ceil(64);
+        let threads = std::thread::available_parallelism()
+            .map_or(4, std::num::NonZero::get)
+            .clamp(1, 8);
+        let per = words.div_ceil(threads).max(1);
+        let names = &self.names;
+        std::thread::scope(|scope| {
+            let parts: Vec<_> = (0..words)
+                .step_by(per)
+                .map(|from| {
+                    scope.spawn(move || {
+                        let to = (from + per).min(words);
+                        let mut bits = vec![0u64; to - from];
+                        for w in from..to {
+                            for b in 0..64 {
+                                let id = w * 64 + b;
+                                if id >= count {
+                                    break;
+                                }
+                                let id = id as NameId;
+                                if matcher.could(names.mask(id)) && matcher.matches(names.get(id)) {
+                                    bits[w - from] |= 1 << b;
+                                }
+                            }
+                        }
+                        bits
+                    })
+                })
+                .collect();
+            parts
+                .into_iter()
+                .flat_map(|p| p.join().expect("a scoring thread does not panic"))
+                .collect()
+        })
+    }
+
+    /// The entries below `root` that answer `query`, in the index's
+    /// order, or why the query cannot run (a glob that does not compile).
+    /// The names are scored once; the subtree's ranges are then scanned
+    /// on threads of their own, a run of 64 entries at a time, passing
+    /// over every zone whose sizes, times or kinds cannot answer.
+    pub fn query(&self, root: FolderId, query: &Query) -> Result<Vec<Hit>, String> {
+        let names = query
+            .name
+            .as_ref()
+            .map(|q| Matcher::new(q).map(|m| self.matching(&m)))
+            .transpose()?;
+        let filter = Filter {
+            names: names.as_deref(),
+            kinds: query.kinds.as_ref().map_or(0b1111, |ks| {
+                ks.iter().fold(0, |m, &k| m | 1 << kind_code(k))
+            }),
+            times: query
+                .mtime
+                .as_ref()
+                .map(|r| from_signed(r.start().sec)..=from_signed(r.end().sec)),
+            query,
+        };
+        let limit = query.limit.unwrap_or(usize::MAX);
+        let ranges = self.tree.ranges(root);
+        let threads = std::thread::available_parallelism()
+            .map_or(4, std::num::NonZero::get)
+            .clamp(1, 8)
+            .min(ranges.len().max(1));
+        let per = ranges.len().div_ceil(threads).max(1);
+        let parts: Vec<Vec<Hit>> = std::thread::scope(|scope| {
+            let filter = &filter;
+            let handles: Vec<_> = ranges
+                .chunks(per)
+                .map(|group| {
+                    scope.spawn(move || {
+                        let mut hits = Vec::new();
+                        let mut paths = HashMap::new();
+                        for (chunk, blocks) in group {
+                            if hits.len() >= limit {
+                                break;
+                            }
+                            self.scan(*chunk, blocks.clone(), filter, limit, &mut hits, &mut paths);
+                        }
+                        hits
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a scanning thread does not panic"))
+                .collect()
+        });
+        let mut hits: Vec<Hit> = parts.into_iter().flatten().collect();
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    /// Scan the entries of `blocks` in `chunk`, adding those that answer.
+    fn scan(
+        &self,
+        chunk: ChunkId,
+        blocks: Range<usize>,
+        filter: &Filter<'_>,
+        limit: usize,
+        hits: &mut Vec<Hit>,
+        paths: &mut HashMap<FolderId, PathBuf>,
+    ) {
+        let view = self.tree.chunk(chunk).view();
+        let items = view.entries(blocks.start).start..view.entries(blocks.end - 1).end;
+        let names_col = view.item_names();
+        let kinds_col = view.item_kinds();
+        let mut names = [0u64; RUN];
+        let mut kinds = [0u64; RUN];
+        let mut i = items.start;
+        while i < items.end {
+            let zone = i / ZONE;
+            let zone_end = ((zone + 1) * ZONE).min(items.end);
+            let (largest, tmin, tmax, present) = view.zone(zone);
+            let passed = present & filter.kinds == 0
+                || filter
+                    .query
+                    .size
+                    .as_ref()
+                    .is_some_and(|r| largest < *r.start())
+                || filter
+                    .times
+                    .as_ref()
+                    .is_some_and(|r| tmax < *r.start() || tmin > *r.end());
+            if passed {
+                i = zone_end;
+                continue;
+            }
+            // A zone's first entry begins a run: zones are runs' multiples.
+            while i < zone_end {
+                let run = i / RUN;
+                let first = run * RUN;
+                let end = (first + RUN).min(zone_end);
+                if filter.names.is_some() {
+                    names_col.decode_run(run, &mut names);
+                }
+                if filter.kinds != 0b1111 {
+                    kinds_col.decode_run(run, &mut kinds);
+                }
+                for j in i..end {
+                    if let Some(bits) = filter.names {
+                        let n = names[j - first] as usize;
+                        if bits[n / 64] & (1 << (n % 64)) == 0 {
+                            continue;
+                        }
+                    }
+                    if filter.kinds != 0b1111 && (1 << (kinds[j - first] & 3)) & filter.kinds == 0 {
+                        continue;
+                    }
+                    if filter.attrs_answer(&view, j) {
+                        if hits.len() >= limit {
+                            return;
+                        }
+                        hits.push(self.hit(&view, j, paths));
+                    }
+                }
+                i = end;
+            }
+        }
+    }
+
+    fn hit(&self, view: &View<'_>, j: usize, paths: &mut HashMap<FolderId, PathBuf>) -> Hit {
+        let b = view.block_of(j);
+        let folder = view.folder(b);
+        let path = paths
+            .entry(folder)
+            .or_insert_with(|| self.path_of(folder))
+            .join(component(self.names.get(view.item_name(j))));
+        let item = view.item(j);
+        let folder_id = view.facts(b).map(|f| f.id).unwrap_or_default();
+        // A folder's device is its own block's: a btrfs subvolume's top
+        // has a device of its own.
+        let dev = item
+            .child
+            .and_then(|c| self.facts_of(c))
+            .map_or(folder_id.dev, |f| f.id.dev);
+        Hit {
+            path,
+            kind: item.kind,
+            id: FileId { dev, ino: item.ino },
+            folder: folder_id,
+            attrs: item.attrs,
+        }
+    }
+
+    /// A folder's facts, read from its block alone.
+    pub fn facts_of(&self, folder: FolderId) -> Option<crate::block::Facts> {
+        let loc = self.tree.loc(folder)?;
+        self.tree.chunk(loc.chunk).view().facts(loc.block as usize)
+    }
+
+    /// What the index holds, and its bytes.
+    pub fn sizes(&self) -> Sizes {
+        let mut s = Sizes {
+            names: self.names.len() as u64,
+            names_bytes: self.names.bytes().len() as u64,
+            ..Sizes::default()
+        };
+        for (_, chunk) in self.tree.chunks() {
+            s.chunks += 1;
+            s.folders += chunk.len() as u64;
+            s.entries += chunk.entries() as u64;
+            s.chunk_bytes += chunk.bytes().len() as u64;
+        }
+        s
+    }
+}
+
+/// An index's counts and bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub chunks: u64,
+    pub folders: u64,
+    pub entries: u64,
+    pub names: u64,
+    pub chunk_bytes: u64,
+    pub names_bytes: u64,
+}
+
+/// A query's parts, compiled for a scan.
+struct Filter<'a> {
+    /// Which names answer, a bit each.
+    names: Option<&'a [u64]>,
+    /// Which kinds answer, a bit each.
+    kinds: u64,
+    /// The modification times' seconds that answer, as zones keep them.
+    times: Option<RangeInclusive<u64>>,
+    query: &'a Query,
+}
+
+impl Filter<'_> {
+    /// Whether entry `j`'s size and time answer: any entry where neither is
+    /// asked; none whose attributes the index does not hold where one is.
+    fn attrs_answer(&self, view: &View<'_>, j: usize) -> bool {
+        let q = self.query;
+        if q.size.is_none() && q.mtime.is_none() {
+            return true;
+        }
+        let Some(attrs) = view.item(j).attrs else {
+            return false;
+        };
+        q.size.as_ref().is_none_or(|r| r.contains(&attrs.size))
+            && q.mtime.as_ref().is_none_or(|r| r.contains(&attrs.mtime))
+    }
+}

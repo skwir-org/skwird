@@ -172,9 +172,40 @@ committed then.
      (matched as skwir matches, DESIGN 7), kind, size, time and root.
    - Done when every query equals a filter over a fresh walk, and the
      size is measured against the estimate of 59 bytes per entry.
+
+   **Done on 2026-11-21.** `skwird-index`: packed columns in runs of 64
+   (`packed`), chunks of 31 columns with zones of 1,024 entries
+   (`chunk`), the names each once with a mask of what they hold
+   (`names`), names matched as skwir matches them (`matching`, held to
+   skwir's rules on terms that trip Unicode up: `İ`, the Kelvin sign,
+   `ſ`, a final sigma, bytes that are not UTF-8), the build from a
+   crawl, queries, and a store whose files are written once and mapped
+   back (`store`, `map`). Every query of a test tree (names, kinds,
+   sizes, times, mixed, below seven folders) equals a filter over a
+   fresh walk, in one chunk and in many, built and mapped back; a
+   damaged chunk, a manifest of another layout and a missing index are
+   refused. `skwird-bench index` measures it. On a developer's work
+   folder (2,882,900 entries in 233,322 folders, 711,496 distinct
+   names; btrfs, warm, 20 threads):
+   - **Size:** 84.4 MB, 29.3 bytes an entry (chunks 53.8 MB, names
+     30.6 MB): 63% of the estimate at full widths for that tree (46.8
+     bytes an entry). The home phase 0 measured would take about
+     215 MB if it packs alike; its names are a larger share (44% of
+     its entries are distinct, against 25% here).
+   - **Times:** crawl 1.5 s, build 1.8 s, save 0.7 s, load (mapped and
+     every file checked) 0.23 s. Queries after the load: a name
+     matching one entry 5.5 ms, `report` 11 ms (1,558 hits), `*.pdf`
+     71 ms (142,746 hits), `e` about 1 s (1.38 million hits: building
+     each hit's path is most of it).
+   - Not done here: **memory.** The first build peaked at 1.2 GB, the
+     crawl held whole before the blocks are made, and the blocks whole
+     before they are cut. Step 5 streams the crawl into the build. A
+     hit's path costs about half a microsecond: answers stream in
+     batches with a limit (step 5).
 3. **Coverage.**
-   - Load ("as of"), check, reread, and the diff into the overlay.
-     Coverage per root, each subtree not covered with its reason.
+   - Load ("as of"), check, reread, and the diff into the chunks it
+     touches. Coverage per root, each subtree not covered with its
+     reason.
    - A randomized test against a fresh walk. Random edits while the
      engine is down and while it runs: make, rename, swap for a link,
      remove, deny, add `.private`. After each, the index equals the

@@ -10,6 +10,7 @@ description = "What an index of names costs on a real tree, measured before skwi
 [dependencies]
 rustix.workspace = true
 skwird-crawl.workspace = true
+skwird-index.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

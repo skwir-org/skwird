@@ -461,10 +461,13 @@ file and lost every change since, until 0.2.1.
 `skwird-bench walk` estimates its size, every field at its full width:
 33 bytes per entry, 16 per distinct name plus its bytes, and 40 per
 folder. For the home phase 0 measured, 341 MB for 5.8 million entries.
-Packing as fsearch does should shrink it; phase 1 measures it. Its
-distinct names were 44% of its entries, so a query scores fewer than
-half as many names as entries, and storing each name once cost no more
-than storing every entry's (124 MB either way).
+Packed, it is smaller: on a developer's work folder of 2.9 million
+entries, 29.3 bytes an entry, 63% of the estimate for that tree
+(`docs/PLAN.md`, phase 1, step 2). The measured home's own size waits
+for step 6. That home's distinct names were 44% of its entries, so a
+query scores fewer than half as many names as entries, and storing
+each name once cost no more than storing every entry's (124 MB either
+way).
 
 ### 9. Every system
 

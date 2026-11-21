@@ -97,6 +97,75 @@ impl Tree {
         tree
     }
 
+    /// The tree of chunks read back, in order, each with the number that
+    /// names it: refused unless their blocks are one tree in pre-order,
+    /// each folder once, each depth its parent's and one.
+    pub fn from_chunks(
+        chunks: Vec<(ChunkId, Arc<Chunk>)>,
+        limits: Limits,
+    ) -> Result<Tree, crate::packed::Malformed> {
+        use crate::packed::Malformed;
+        let mut tree = Tree {
+            order: Vec::with_capacity(chunks.len()),
+            chunks: HashMap::with_capacity(chunks.len()),
+            locs: Pages::new(None),
+            free: Vec::new(),
+            next_chunk: chunks.iter().map(|(id, _)| id + 1).max().unwrap_or(0),
+            limits,
+        };
+        // The folders above the block being read, with their depths.
+        let mut above: Vec<(FolderId, u32)> = Vec::new();
+        let mut rooted = false;
+        for (id, chunk) in chunks {
+            if chunk.is_empty() || tree.chunks.contains_key(&id) {
+                return Err(Malformed);
+            }
+            let view = chunk.view();
+            for b in 0..chunk.len() {
+                let (folder, depth, parent) = (view.folder(b), view.depth(b), view.parent(b));
+                if tree.loc(folder).is_some() {
+                    return Err(Malformed);
+                }
+                while above.last().is_some_and(|&(_, d)| d >= depth) {
+                    above.pop();
+                }
+                match (above.last(), parent) {
+                    (None, None) if depth == 0 && !rooted => rooted = true,
+                    (Some(&(top, d)), Some(p)) if top == p && depth == d + 1 => {}
+                    _ => return Err(Malformed),
+                }
+                above.push((folder, depth));
+                tree.locs.set(
+                    folder as usize,
+                    Some(Loc {
+                        chunk: id,
+                        block: b as u32,
+                    }),
+                );
+            }
+            tree.order.push(id);
+            tree.chunks.insert(id, chunk);
+        }
+        for f in 0..tree.locs.len() {
+            if tree.locs.get(f).copied().flatten().is_none() {
+                tree.free.push(f as FolderId);
+            }
+        }
+        Ok(tree)
+    }
+
+    /// The chunks' numbers, in order.
+    pub fn chunk_ids(&self) -> &[ChunkId] {
+        &self.order
+    }
+
+    /// Put `chunk`, the same blocks read another way (its file, mapped),
+    /// in place of chunk `id`.
+    pub fn set_chunk(&mut self, id: ChunkId, chunk: Arc<Chunk>) {
+        debug_assert_eq!(self.chunks[&id].len(), chunk.len());
+        self.chunks.insert(id, chunk);
+    }
+
     /// A number for a folder to be made.
     pub fn alloc(&mut self) -> FolderId {
         if let Some(id) = self.free.pop() {
@@ -150,12 +219,21 @@ impl Tree {
         };
         let first = &self.chunks[&start.chunk];
         let depth = first.depth(start.block as usize);
+        // The root's subtree is everything: no depth need be read.
+        if depth == 0 {
+            return self
+                .order
+                .iter()
+                .map(|&id| (id, 0..self.chunks[&id].len()))
+                .collect();
+        }
         let mut ranges = Vec::new();
         let mut from = start.block as usize + 1;
         for &id in &self.order[self.position(start.chunk)..] {
             let chunk = &self.chunks[&id];
+            let view = chunk.view();
             let mut end = from;
-            while end < chunk.len() && chunk.depth(end) > depth {
+            while end < chunk.len() && view.depth(end) > depth {
                 end += 1;
             }
             let begin = if id == start.chunk {
@@ -251,18 +329,21 @@ impl Tree {
                 (ours < self.limits.min || theirs < self.limits.min)
                     && ours + theirs <= self.limits.max
             };
+            let join_previous = previous.is_some_and(|p| joins(first, p));
+            let join_next = next.is_some_and(|n| joins(last, n));
+            if !join_previous && !join_next {
+                break groups;
+            }
             blocks = groups.into_iter().flatten().collect();
-            if previous.is_some_and(|p| joins(first, p)) {
+            if join_previous {
                 let mut taken = self.chunks[&self.order[at - 1]].decode();
                 taken.append(&mut blocks);
                 blocks = taken;
                 at -= 1;
                 remove += 1;
-            } else if next.is_some_and(|n| joins(last, n)) {
+            } else {
                 blocks.extend(self.chunks[&self.order[at + remove]].decode());
                 remove += 1;
-            } else {
-                break self.cut(blocks);
             }
         };
         let made: Vec<ChunkId> = groups
@@ -279,7 +360,7 @@ impl Tree {
                         }),
                     );
                 }
-                self.chunks.insert(id, Arc::new(Chunk::new(group)));
+                self.chunks.insert(id, Arc::new(Chunk::new(&group)));
                 id
             })
             .collect();

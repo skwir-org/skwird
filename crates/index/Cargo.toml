@@ -8,9 +8,15 @@ publish = false
 description = "skwird's index: names in folder blocks, depth first, in chunks rewritten alone"
 
 [dependencies]
+# The version skwir's query plugin uses, so that globs match alike.
+globset = "0.4.21"
 skwird-crawl.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["mm"] }
+
 [dev-dependencies]
+globset = "0.4.21"
 skwird-testkit.workspace = true
 
 [lints]
