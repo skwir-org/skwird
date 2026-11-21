@@ -534,8 +534,19 @@ pub struct Crawl {
 
 /// Crawl the whole root, and keep every folder reached.
 pub fn crawl_all(root: &Root, opts: &Options, cancel: &Cancel) -> Result<Crawl, Error> {
+    crawl_below(root, Path::new(""), opts, cancel)
+}
+
+/// Crawl the folder at `from` below the root and every folder below it,
+/// and keep every folder reached, by slot: `from` first.
+pub fn crawl_below(
+    root: &Root,
+    from: &Path,
+    opts: &Options,
+    cancel: &Cancel,
+) -> Result<Crawl, Error> {
     let slots: Mutex<Vec<Option<Crawled>>> = Mutex::new(Vec::new());
-    let took = crawl(root, Path::new(""), opts, cancel, &|slot, crawled| {
+    let took = crawl(root, from, opts, cancel, &|slot, crawled| {
         let mut slots = slots.lock().unwrap();
         if slots.len() <= slot {
             slots.resize_with(slot + 1, || None);

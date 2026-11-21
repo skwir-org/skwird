@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use skwird_crawl::{Attrs, FileId, Kind, Time};
 
@@ -18,6 +17,7 @@ use crate::packed::RUN;
 use crate::packed::from_signed;
 use crate::tree::ChunkId;
 use crate::tree::Tree;
+use crate::update::Proof;
 
 /// What to look for below a folder. Every part given must hold.
 #[derive(Clone, Debug, Default)]
@@ -50,10 +50,10 @@ pub struct Hit {
 #[derive(Clone, Debug)]
 pub struct Index {
     tree: Tree,
-    names: Arc<Names>,
-    /// The folder whose saved names these are, mapped: a save there need
-    /// not write them again.
-    names_saved: Option<PathBuf>,
+    names: Names,
+    proof: Proof,
+    /// When it was last crawled whole: its attributes are as of then.
+    crawled_at: Time,
 }
 
 /// A name's bytes as a path's component.
@@ -70,12 +70,36 @@ pub fn component(name: &[u8]) -> PathBuf {
 }
 
 impl Index {
-    pub fn new(tree: Tree, names: Arc<Names>) -> Index {
+    /// An index of `tree` and `names`, proven as of no time at all until
+    /// told ([`Index::set_proof`]).
+    pub fn new(tree: Tree, names: Names) -> Index {
         Index {
             tree,
             names,
-            names_saved: None,
+            proof: Proof::AsOf(Time::default()),
+            crawled_at: Time::default(),
         }
+    }
+
+    pub fn proof(&self) -> Proof {
+        self.proof
+    }
+
+    pub fn set_proof(&mut self, proof: Proof) {
+        self.proof = proof;
+    }
+
+    pub fn crawled_at(&self) -> Time {
+        self.crawled_at
+    }
+
+    pub fn set_crawled_at(&mut self, at: Time) {
+        self.crawled_at = at;
+    }
+
+    /// The tree and the names, each to be changed.
+    pub fn parts_mut(&mut self) -> (&mut Tree, &mut Names) {
+        (&mut self.tree, &mut self.names)
     }
 
     pub fn tree(&self) -> &Tree {
@@ -90,20 +114,8 @@ impl Index {
         &self.names
     }
 
-    /// Whether its names are those saved in `dir`.
-    pub fn names_mapped_from(&self, dir: &Path) -> bool {
-        self.names_saved.as_deref() == Some(dir)
-    }
-
-    /// Take `names`, the same names read from their file in `dir`.
-    pub fn set_names(&mut self, names: Arc<Names>, dir: &Path) {
-        self.names = names;
-        self.names_saved = Some(dir.to_path_buf());
-    }
-
-    /// Say that its names are those saved in `dir`.
-    pub fn mark_names_from(&mut self, dir: &Path) {
-        self.names_saved = Some(dir.to_path_buf());
+    pub fn names_mut(&mut self) -> &mut Names {
+        &mut self.names
     }
 
     /// The root's folder: the first block's.
@@ -356,7 +368,7 @@ impl Index {
     pub fn sizes(&self) -> Sizes {
         let mut s = Sizes {
             names: self.names.len() as u64,
-            names_bytes: self.names.bytes().len() as u64,
+            names_bytes: self.names.bytes_len(),
             ..Sizes::default()
         };
         for (_, chunk) in self.tree.chunks() {

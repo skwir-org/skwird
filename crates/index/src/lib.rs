@@ -17,7 +17,9 @@ pub mod packed;
 pub mod pages;
 pub mod store;
 pub mod tree;
+pub mod update;
 
 pub use build::build;
 pub use index::{Hit, Index, Query, Sizes};
 pub use matching::{NameQuery, Pattern};
+pub use update::{Coverage, Hole, Proof, Refreshed, refresh};

@@ -118,8 +118,9 @@ says one of:
 - **As of T**: a snapshot, such as an index just loaded, or plocate's
   database.
 - **Not covered**, and why: outside the engine's roots, excluded,
-  permission denied, a read that failed, a network mount, a mount below
-  the root, a watch limit reached.
+  private (a `.private` file), permission denied, a read that failed or
+  was cut short, gone or replaced since its parent was read, a mount
+  below the root, a network mount, not read yet, a watch limit reached.
 
 The kinds of fact are:
 - **names** (and kinds: file, folder, link, other);
@@ -135,6 +136,9 @@ concerned, until that subtree is read again.
   index held under it stays, as of when it was read. fsearch and its
   port both did otherwise: a folder refused with `EACCES` was indexed as
   empty, and a listing cut short by an error was taken as complete.
+  What is let go of at once is what the folder no longer shows as its
+  own: a folder made private or excluded (its names are never kept), and
+  a folder a mount now covers (the names there are the mount's).
 - **A dropped event ends "live"** until the replay or the reread is
   done. Where the system keeps a history (FSEvents, the change journal),
   the position kept to resume from is never past an event not yet

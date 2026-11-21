@@ -210,6 +210,34 @@ committed then.
      engine is down and while it runs: make, rename, swap for a link,
      remove, deny, add `.private`. After each, the index equals the
      walk, and the coverage claims no more. Phases 2 and 3 reuse it.
+
+   **Done on 2026-11-21.** `skwird_index::update`: `refresh` (the
+   mount table read again, the check, each stale folder read again and
+   put in place by `Index::reread`, each new folder crawled by
+   `Index::graft`), and `Index::coverage` (the names' proof, the time
+   the attributes are as of, each topmost hole with why). A folder kept
+   by identity keeps what is below it; one gone or replaced takes its
+   subtree. What failed stays as read and is a hole; what is private,
+   excluded or under a mount is let go of at once. Names given since a
+   save are a segment of their own, saved as one more file: a reread
+   reuses its folder's names. `skwird_crawl::Why` gained `Unread`.
+   - **Fixtures** pass: a change while the engine was down (saved,
+     changed, loaded as of its save, then checked), a folder that gains
+     entries then is removed or replaced by a file, denied then
+     readable, made private then not, a listing cut short (kept as
+     read), a mount made below the root then let go of (in a namespace
+     of the test's own).
+   - **Random edits** (made, removed, moved, swapped for a link, denied
+     and allowed, `.private` added and taken, several while the engine
+     is down, some across a save and a load): 150 seeds of 60 refreshes
+     held, with the tick and with a tick of zero, where the comparison
+     of change times alone finds what changed (sound on Linux 6.13,
+     whose change times are fine once observed). The test requires its
+     edits to make holes, denied and private among them.
+   - Not done here: a root on FUSE, whose change times do not tell, is
+     never "checked" (`refresh` says "as of"), but no test makes one.
+     Attributes are as of the last whole crawl: rereads do not advance
+     that time.
 4. **The log.**
    - Appends, and background merges of the chunks touched.
    - The journal (`changes`, DESIGN 8).

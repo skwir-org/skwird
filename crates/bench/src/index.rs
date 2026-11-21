@@ -135,7 +135,8 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
         cache.join("skwird-bench").join("index")
     });
     let start = Instant::now();
-    store::save(&mut index, &dir, Time::now()).map_err(|e| format!("cannot save: {e}"))?;
+    let now = Time::now();
+    store::save(&mut index, &dir, now, now).map_err(|e| format!("cannot save: {e}"))?;
     println!("save: {}", time(start.elapsed()));
     drop(index);
     let start = Instant::now();

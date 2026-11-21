@@ -9,7 +9,7 @@
 //! empty name, the root's.
 
 use std::collections::HashMap;
-use std::ops::Range;
+use std::sync::Arc;
 
 use crate::block::NameId;
 use crate::chunk::Bytes;
@@ -53,7 +53,7 @@ pub fn lowered(name: &[u8]) -> String {
 }
 
 /// Names as they are given, each once, numbered in that order.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Builder {
     numbers: HashMap<Box<[u8]>, NameId>,
     list: Vec<Box<[u8]>>,
@@ -108,20 +108,25 @@ impl Builder {
     }
 }
 
-/// The names, read in place.
+/// A names file, read in place: a run of names numbered from where the
+/// one before ends.
 #[derive(Debug)]
-pub struct Names {
+pub struct Segment {
     bytes: Bytes,
     count: usize,
+    /// The save that wrote it, which names its file: none for one not yet
+    /// saved.
+    file: Option<u64>,
 }
 
 fn word(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or_default())
 }
 
-impl Names {
+impl Segment {
     /// The names in `bytes`, refused if they do not read as a names file.
-    pub fn from_bytes(bytes: Bytes) -> Result<Names, Malformed> {
+    /// The first segment's first name is the empty one, the root's.
+    pub fn from_bytes(bytes: Bytes, first: bool, file: Option<u64>) -> Result<Segment, Malformed> {
         if bytes.len() < 16 || &bytes[..4] != MAGIC || bytes[4..8] != VERSION.to_le_bytes() {
             return Err(Malformed);
         }
@@ -141,10 +146,10 @@ impl Names {
             }
             end = next;
         }
-        if end != (bytes.len() - head) as u64 || word(&bytes, 16) != 0 {
+        if end != (bytes.len() - head) as u64 || (first && word(&bytes, 16) != 0) {
             return Err(Malformed);
         }
-        Ok(Names { bytes, count })
+        Ok(Segment { bytes, count, file })
     }
 
     pub fn len(&self) -> usize {
@@ -159,29 +164,148 @@ impl Names {
         16 + self.count * 16
     }
 
-    fn span(&self, id: NameId) -> Range<usize> {
-        let i = id as usize;
+    /// Its `i`th name's bytes.
+    pub fn get(&self, i: usize) -> &[u8] {
         let start = if i == 0 {
             0
         } else {
             word(&self.bytes, 16 + (i - 1) * 8) as usize
         };
         let end = word(&self.bytes, 16 + i * 8) as usize;
-        self.head() + start..self.head() + end
+        &self.bytes[self.head() + start..self.head() + end]
+    }
+
+    pub fn mask(&self, i: usize) -> u64 {
+        word(&self.bytes, 16 + self.count * 8 + i * 8)
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn file(&self) -> Option<u64> {
+        self.file
+    }
+
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.bytes, Bytes::Mapped(_))
+    }
+}
+
+/// Names given since the last save, in memory.
+#[derive(Clone, Debug, Default)]
+struct Pending {
+    builder: Builder,
+}
+
+/// Every name of an index: its saved segments, then the names given
+/// since. Names given since are told apart from each other, not from the
+/// saved ones: a name a folder already held keeps its number when the
+/// folder is read again, so only names new to their folder are given.
+/// Cloned for a snapshot, it shares every segment.
+#[derive(Clone, Debug)]
+pub struct Names {
+    segments: Vec<Arc<Segment>>,
+    /// Each segment's first number.
+    starts: Vec<NameId>,
+    pending: Arc<Pending>,
+}
+
+impl Names {
+    /// The names of a first segment.
+    pub fn new(first: Segment) -> Names {
+        Names::from_segments(vec![first])
+    }
+
+    pub fn from_segments(segments: Vec<Segment>) -> Names {
+        let mut starts = Vec::with_capacity(segments.len());
+        let mut at = 0;
+        for s in &segments {
+            starts.push(at);
+            at += s.len() as NameId;
+        }
+        Names {
+            segments: segments.into_iter().map(Arc::new).collect(),
+            starts,
+            pending: Arc::new(Pending {
+                builder: Builder::default(),
+            }),
+        }
+    }
+
+    fn saved(&self) -> usize {
+        self.segments
+            .last()
+            .map_or(0, |s| *self.starts.last().unwrap_or(&0) as usize + s.len())
+    }
+
+    pub fn len(&self) -> usize {
+        self.saved() + self.pending.builder.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The segment holding `id`, and its place in it; none for a name
+    /// given since the last save.
+    fn place(&self, id: NameId) -> Option<(usize, usize)> {
+        if id as usize >= self.saved() {
+            return None;
+        }
+        let s = self.starts.partition_point(|&start| start <= id) - 1;
+        Some((s, (id - self.starts[s]) as usize))
     }
 
     /// The name's bytes, as the filesystem holds them.
     pub fn get(&self, id: NameId) -> &[u8] {
-        &self.bytes[self.span(id)]
+        match self.place(id) {
+            Some((s, i)) => self.segments[s].get(i),
+            None => &self.pending.builder.list[id as usize - self.saved()],
+        }
     }
 
     pub fn mask(&self, id: NameId) -> u64 {
-        word(&self.bytes, 16 + self.count * 8 + id as usize * 8)
+        match self.place(id) {
+            Some((s, i)) => self.segments[s].mask(i),
+            None => mask(&lowered(self.get(id))),
+        }
     }
 
-    /// Every name's bytes and size, for the index's size.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    /// A number for `name`: the one given since the last save, or a new
+    /// one.
+    pub fn intern(&mut self, name: &[u8]) -> NameId {
+        let saved = self.saved() as NameId;
+        if let Some(&n) = self.pending.builder.numbers.get(name) {
+            return saved + n;
+        }
+        saved + Arc::make_mut(&mut self.pending).builder.intern(name)
+    }
+
+    pub fn segments(&self) -> &[Arc<Segment>] {
+        &self.segments
+    }
+
+    /// The names given since the last save, as a segment's bytes, or none.
+    pub fn pending_bytes(&self) -> Option<Vec<u8>> {
+        (!self.pending.builder.is_empty()).then(|| self.pending.builder.clone().finish())
+    }
+
+    /// Put `segments` in place of the saved ones and what was pending,
+    /// the same names read from their files.
+    pub fn sealed(&mut self, segments: Vec<Segment>) {
+        let keep = std::mem::replace(self, Names::from_segments(segments));
+        debug_assert_eq!(self.len(), keep.len());
+    }
+
+    /// The bytes every name takes, saved or not.
+    pub fn bytes_len(&self) -> u64 {
+        let pending: usize = self.pending.builder.list.iter().map(|n| n.len() + 16).sum();
+        self.segments
+            .iter()
+            .map(|s| s.bytes().len() as u64)
+            .sum::<u64>()
+            + pending as u64
     }
 }
 
@@ -196,7 +320,9 @@ mod tests {
         let c = b.intern(b"\xffnot utf-8");
         assert_eq!(b.intern("Report 2026.PDF".as_bytes()), a);
         assert_eq!((a, c), (1, 2));
-        let names = Names::from_bytes(Bytes::Owned(b.finish().into_boxed_slice())).unwrap();
+        let names = Names::new(
+            Segment::from_bytes(Bytes::Owned(b.finish().into_boxed_slice()), true, None).unwrap(),
+        );
         assert_eq!(names.len(), 3);
         assert_eq!(names.get(0), b"");
         assert_eq!(names.get(a), "Report 2026.PDF".as_bytes());
@@ -213,6 +339,37 @@ mod tests {
         );
     }
 
+    /// Names given after a save follow the saved ones; a clone taken
+    /// before keeps what it had.
+    #[test]
+    fn names_given_since_follow_the_saved_and_a_snapshot_keeps_its_own() {
+        let mut b = Builder::new();
+        b.intern(b"one");
+        let mut names = Names::new(
+            Segment::from_bytes(Bytes::Owned(b.finish().into_boxed_slice()), true, None).unwrap(),
+        );
+        let before = names.clone();
+        let two = names.intern(b"two");
+        assert_eq!(two, 2);
+        assert_eq!(names.intern(b"two"), 2);
+        assert_eq!(names.get(two), b"two");
+        assert_eq!(names.mask(two), mask("two"));
+        assert_eq!(before.len(), 2);
+        let pending = names.pending_bytes().unwrap();
+        let second =
+            Segment::from_bytes(Bytes::Owned(pending.into_boxed_slice()), false, Some(1)).unwrap();
+        let first = Segment::from_bytes(
+            Bytes::Owned(names.segments()[0].bytes().to_vec().into_boxed_slice()),
+            true,
+            Some(0),
+        )
+        .unwrap();
+        names.sealed(vec![first, second]);
+        assert_eq!(names.len(), 3);
+        assert_eq!(names.get(2), b"two");
+        assert!(names.pending_bytes().is_none());
+    }
+
     #[test]
     fn a_damaged_names_file_is_refused() {
         let mut b = Builder::new();
@@ -222,7 +379,7 @@ mod tests {
         let owned = |b: &[u8]| Bytes::Owned(b.to_vec().into_boxed_slice());
         for cut in [0, 15, 20, bytes.len() - 1] {
             assert!(
-                Names::from_bytes(owned(&bytes[..cut])).is_err(),
+                Segment::from_bytes(owned(&bytes[..cut]), true, None).is_err(),
                 "cut at {cut}"
             );
         }

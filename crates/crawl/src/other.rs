@@ -82,6 +82,10 @@ pub fn crawl_all(root: &Root, _: &Options, _: &Cancel) -> Result<Crawl, Error> {
     match root.never {}
 }
 
+pub fn crawl_below(root: &Root, _: &Path, _: &Options, _: &Cancel) -> Result<Crawl, Error> {
+    match root.never {}
+}
+
 #[derive(Clone, Debug)]
 pub struct Stored {
     pub rel: PathBuf,

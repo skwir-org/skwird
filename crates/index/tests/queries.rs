@@ -317,7 +317,7 @@ fn saved_and_mapped_back_it_answers_alike() {
         sec: 1_790_000_000,
         nsec: 7,
     };
-    store::save(&mut index, &dir, saved_at).unwrap();
+    store::save(&mut index, &dir, saved_at, saved_at).unwrap();
     assert!(index.tree().chunks().all(|(_, c)| c.is_mapped()));
     assert_answers_as_the_walk(
         &index,
@@ -327,8 +327,8 @@ fn saved_and_mapped_back_it_answers_alike() {
             .filter(|(p, _)| !p.starts_with("cache"))
             .collect(),
     );
-    let (loaded, when) = store::load(&dir, limits).unwrap();
-    assert_eq!(when, saved_at);
+    let (loaded, saved) = store::load(&dir, limits).unwrap();
+    assert_eq!((saved.saved_at, saved.crawled_at), (saved_at, saved_at));
     assert_eq!(loaded.sizes(), index.sizes());
     let walked: Walked = walked
         .into_iter()
@@ -346,7 +346,7 @@ fn saved_and_mapped_back_it_answers_alike() {
         .map(|e| e.unwrap().file_name())
         .collect();
     let mut again = loaded;
-    store::save(&mut again, &dir, saved_at).unwrap();
+    store::save(&mut again, &dir, saved_at, saved_at).unwrap();
     let after: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())

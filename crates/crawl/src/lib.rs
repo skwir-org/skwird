@@ -45,13 +45,16 @@ pub mod mounts;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, filesystem_name, read_folder,
+    Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, crawl_below, filesystem_name,
+    read_folder,
 };
 
 #[cfg(not(target_os = "linux"))]
 mod other;
 #[cfg(not(target_os = "linux"))]
-pub use other::{Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, read_folder};
+pub use other::{
+    Checked, Crawl, Root, Stale, Stored, check, crawl, crawl_all, crawl_below, read_folder,
+};
 
 pub use exclude::Exclusions;
 
@@ -223,6 +226,9 @@ pub enum Why {
     Mount,
     /// A network mount starts there: never crawled (decision 2).
     NetworkMount,
+    /// Found, not read yet: a folder made since its parent was read,
+    /// waiting for its crawl.
+    Unread,
 }
 
 impl Why {
@@ -232,7 +238,12 @@ impl Why {
     pub fn retried(self) -> bool {
         matches!(
             self,
-            Why::Denied | Why::Failed(_) | Why::CutShort(_) | Why::Gone | Why::Replaced
+            Why::Denied
+                | Why::Failed(_)
+                | Why::CutShort(_)
+                | Why::Gone
+                | Why::Replaced
+                | Why::Unread
         )
     }
 }

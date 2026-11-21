@@ -2,11 +2,12 @@
 //! (`docs/DESIGN.md`, decision 8).
 //!
 //! The folder holds a manifest, the chunks, each in a file named by its
-//! number, and the names. A file is written once and never again: a save
-//! writes what is new under a temporary name, makes it durable, renames
-//! it, and then switches the manifest the same way, so that a save cut
-//! short leaves the last manifest and every file it names. What no
-//! manifest names is removed after. The folder is its user's alone
+//! number, and the names, in segments: what the index was built with,
+//! then what each save added. A file is written once and never again: a
+//! save writes what is new under a temporary name, makes it durable,
+//! renames it, and then switches the manifest the same way, so that a
+//! save cut short leaves the last manifest and every file it names. What
+//! no manifest names is removed after. The folder is its user's alone
 //! (mode 0700), and so is each file (0600): an index is a list of what is
 //! on its user's disk.
 //!
@@ -14,9 +15,11 @@
 //! does not read as its layout, is refused whole, and the index rebuilt.
 //!
 //! The manifest, little-endian: `SKWM`, its version, the chunks' and the
-//! names' layout versions (4 bytes each), the save's number (8), when it
-//! was saved (8 and 4), the number of the save whose names it takes (8),
-//! the number of chunks (4), and each chunk's number (4 each).
+//! names' layout versions (4 bytes each); the save's number (8); when it
+//! was saved, and when the index was last crawled whole (8 and 4 each);
+//! the number the next names segment takes (8); the number of names
+//! segments (4) and each one's number (8 each); the number of chunks (4)
+//! and each one's number (4 each).
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -29,11 +32,11 @@ use crate::block::Item;
 use crate::chunk::{self, Bytes, Chunk};
 use crate::index::Index;
 use crate::map::Map;
-use crate::names::{self, Names};
+use crate::names::{self, Names, Segment};
 use crate::tree::{ChunkId, Limits, Tree};
 
 const MAGIC: &[u8; 4] = b"SKWM";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MANIFEST: &str = "manifest";
 
 /// Why an index could not be read back.
@@ -65,16 +68,52 @@ impl std::error::Error for LoadError {}
 struct Manifest {
     generation: u64,
     saved_at: Time,
-    names: u64,
+    crawled_at: Time,
+    next_segment: u64,
+    segments: Vec<u64>,
     chunks: Vec<ChunkId>,
+}
+
+/// What an index read back says of itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub saved_at: Time,
+    /// When it was last crawled whole: its attributes are as of then.
+    pub crawled_at: Time,
 }
 
 fn chunk_file(id: ChunkId) -> String {
     format!("chunk-{id:010}")
 }
 
-fn names_file(generation: u64) -> String {
-    format!("names-{generation:020}")
+fn names_file(id: u64) -> String {
+    format!("names-{id:020}")
+}
+
+/// Reads a manifest's fields in turn.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Reader<'_> {
+    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let part = self.bytes.get(self.at..self.at + N)?.try_into().ok()?;
+        self.at += N;
+        Some(part)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take().map(u32::from_le_bytes)
+    }
+    fn u64(&mut self) -> Option<u64> {
+        self.take().map(u64::from_le_bytes)
+    }
+    fn time(&mut self) -> Option<Time> {
+        Some(Time {
+            sec: self.take().map(i64::from_le_bytes)?,
+            nsec: self.u32()?,
+        })
+    }
 }
 
 fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
@@ -83,36 +122,34 @@ fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LoadError::Missing),
         Err(e) => return Err(LoadError::Io(e)),
     };
-    let u32_at = |at: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    let mut r = Reader {
+        bytes: &bytes,
+        at: 0,
     };
-    let u64_at = |at: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-    };
-    if bytes.get(..4) != Some(MAGIC.as_slice()) {
+    if r.take::<4>().as_ref() != Some(MAGIC) {
         return Err(LoadError::Damaged);
     }
-    if u32_at(4) != Some(VERSION)
-        || u32_at(8) != Some(chunk::VERSION)
-        || u32_at(12) != Some(names::VERSION)
+    if r.u32() != Some(VERSION)
+        || r.u32() != Some(chunk::VERSION)
+        || r.u32() != Some(names::VERSION)
     {
         return Err(LoadError::Layout);
     }
-    let parse = || -> Option<Manifest> {
-        let generation = u64_at(16)?;
-        let saved_at = Time {
-            sec: i64::from_le_bytes(bytes.get(24..32)?.try_into().ok()?),
-            nsec: u32_at(32)?,
-        };
-        let names = u64_at(36)?;
-        let count = u32_at(44)? as usize;
-        let chunks: Vec<ChunkId> = (0..count)
-            .map(|i| u32_at(48 + i * 4))
-            .collect::<Option<_>>()?;
-        (bytes.len() == 48 + count * 4).then_some(Manifest {
+    let mut parse = || -> Option<Manifest> {
+        let generation = r.u64()?;
+        let saved_at = r.time()?;
+        let crawled_at = r.time()?;
+        let next_segment = r.u64()?;
+        let count = r.u32()? as usize;
+        let segments = (0..count).map(|_| r.u64()).collect::<Option<Vec<_>>>()?;
+        let count = r.u32()? as usize;
+        let chunks = (0..count).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
+        (r.at == bytes.len() && !segments.is_empty()).then_some(Manifest {
             generation,
             saved_at,
-            names,
+            crawled_at,
+            next_segment,
+            segments,
             chunks,
         })
     };
@@ -162,22 +199,40 @@ fn make_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Save `index` in `dir`, as of `saved_at`: what is new in it written, the
-/// manifest switched, what no manifest names removed. What was written is
-/// mapped back in place of what was in memory, so its pages are the
-/// system's to drop. A save that fails leaves the index as it was, and
-/// the last manifest as it was.
-pub fn save(index: &mut Index, dir: &Path, saved_at: Time) -> std::io::Result<()> {
+/// Save `index` in `dir`, as of `saved_at`, its attributes as of
+/// `crawled_at`: what is new in it written (chunks in memory, names
+/// given since), the manifest switched, what no manifest names removed.
+/// What was written is mapped back in place of what was in memory, so its
+/// pages are the system's to drop. A save that fails leaves the index as
+/// it was, and the last manifest as it was.
+pub fn save(
+    index: &mut Index,
+    dir: &Path,
+    saved_at: Time,
+    crawled_at: Time,
+) -> std::io::Result<()> {
     make_dir(dir)?;
     let previous = read_manifest(dir).ok();
     let generation = previous.as_ref().map_or(0, |m| m.generation + 1);
-    let names_generation = match &previous {
-        Some(m) if index.names_mapped_from(dir) => m.names,
-        _ => {
-            write_file(dir, &names_file(generation), index.names().bytes())?;
-            generation
+    let mut next_segment = previous.as_ref().map_or(0, |m| m.next_segment);
+    let mut segments = Vec::new();
+    for segment in index.names().segments() {
+        match segment.file() {
+            Some(id) if segment.is_mapped() && dir.join(names_file(id)).is_file() => {
+                segments.push(id);
+            }
+            _ => {
+                write_file(dir, &names_file(next_segment), segment.bytes())?;
+                segments.push(next_segment);
+                next_segment += 1;
+            }
         }
-    };
+    }
+    if let Some(bytes) = index.names().pending_bytes() {
+        write_file(dir, &names_file(next_segment), &bytes)?;
+        segments.push(next_segment);
+        next_segment += 1;
+    }
     let mut written = Vec::new();
     for (id, chunk) in index.tree().chunks() {
         // A chunk read from this folder's file is there already.
@@ -187,50 +242,71 @@ pub fn save(index: &mut Index, dir: &Path, saved_at: Time) -> std::io::Result<()
         }
     }
     let ids = index.tree().chunk_ids().to_vec();
-    let mut manifest = Vec::with_capacity(48 + ids.len() * 4);
-    manifest.extend_from_slice(MAGIC);
-    manifest.extend_from_slice(&VERSION.to_le_bytes());
-    manifest.extend_from_slice(&chunk::VERSION.to_le_bytes());
-    manifest.extend_from_slice(&names::VERSION.to_le_bytes());
-    manifest.extend_from_slice(&generation.to_le_bytes());
-    manifest.extend_from_slice(&saved_at.sec.to_le_bytes());
-    manifest.extend_from_slice(&saved_at.nsec.to_le_bytes());
-    manifest.extend_from_slice(&names_generation.to_le_bytes());
-    manifest.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+    let mut m = Vec::with_capacity(64 + segments.len() * 8 + ids.len() * 4);
+    m.extend_from_slice(MAGIC);
+    for v in [VERSION, chunk::VERSION, names::VERSION] {
+        m.extend_from_slice(&v.to_le_bytes());
+    }
+    m.extend_from_slice(&generation.to_le_bytes());
+    for t in [saved_at, crawled_at] {
+        m.extend_from_slice(&t.sec.to_le_bytes());
+        m.extend_from_slice(&t.nsec.to_le_bytes());
+    }
+    m.extend_from_slice(&next_segment.to_le_bytes());
+    m.extend_from_slice(&(segments.len() as u32).to_le_bytes());
+    for s in &segments {
+        m.extend_from_slice(&s.to_le_bytes());
+    }
+    m.extend_from_slice(&(ids.len() as u32).to_le_bytes());
     for id in &ids {
-        manifest.extend_from_slice(&id.to_le_bytes());
+        m.extend_from_slice(&id.to_le_bytes());
     }
     sync_dir(dir)?;
-    write_file(dir, MANIFEST, &manifest)?;
+    write_file(dir, MANIFEST, &m)?;
     sync_dir(dir)?;
     // Saved: what is written is read from its file from now on.
     for id in written {
-        let path = dir.join(chunk_file(id));
-        if let Ok(chunk) = Map::open(&path).map(Bytes::Mapped).and_then(|b| {
-            Chunk::from_bytes(b).map_err(|_| std::io::Error::other("a chunk just written"))
-        }) {
+        if let Ok(chunk) = open(dir, &chunk_file(id))
+            .ok()
+            .and_then(|b| Chunk::from_bytes(b).ok())
+            .ok_or(())
+        {
             index.tree_mut().set_chunk(id, Arc::new(chunk));
         }
     }
-    if names_generation == generation
-        && let Ok(names) = Map::open(&dir.join(names_file(generation)))
-            .map(Bytes::Mapped)
-            .map_err(|_| ())
-            .and_then(|b| Names::from_bytes(b).map_err(|_| ()))
+    if let Some(mapped) = segments
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            let bytes = open(dir, &names_file(id)).ok()?;
+            Segment::from_bytes(bytes, i == 0, Some(id)).ok()
+        })
+        .collect::<Option<Vec<_>>>()
     {
-        index.set_names(Arc::new(names), dir);
+        index.names_mut().sealed(mapped);
     }
-    remove_unnamed(dir, names_generation, &ids);
+    remove_unnamed(dir, &segments, &ids);
     Ok(())
+}
+
+fn open(dir: &Path, name: &str) -> Result<Bytes, LoadError> {
+    Map::open(&dir.join(name)).map(Bytes::Mapped).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            LoadError::Damaged
+        } else {
+            LoadError::Io(e)
+        }
+    })
 }
 
 /// Remove what the manifest does not name: older chunks and names, and
 /// what a save cut short left.
-fn remove_unnamed(dir: &Path, names_generation: u64, ids: &[ChunkId]) {
+fn remove_unnamed(dir: &Path, segments: &[u64], ids: &[ChunkId]) {
     let keep: HashSet<String> = ids
         .iter()
         .map(|&id| chunk_file(id))
-        .chain([names_file(names_generation), MANIFEST.to_owned()])
+        .chain(segments.iter().map(|&s| names_file(s)))
+        .chain([MANIFEST.to_owned()])
         .collect();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -245,39 +321,41 @@ fn remove_unnamed(dir: &Path, names_generation: u64, ids: &[ChunkId]) {
     }
 }
 
-/// The index saved in `dir`, its files mapped, and when it was saved.
-/// Every file is checked as it is read; any that does not read as its
-/// layout refuses the whole.
-pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Time), LoadError> {
+/// The index saved in `dir`, its files mapped, and what it says of
+/// itself. Every file is checked as it is read; any that does not read
+/// as its layout refuses the whole.
+pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Saved), LoadError> {
     let manifest = read_manifest(dir)?;
-    let open = |name: String| -> Result<Bytes, LoadError> {
-        Map::open(&dir.join(name)).map(Bytes::Mapped).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                LoadError::Damaged
-            } else {
-                LoadError::Io(e)
-            }
+    let segments = manifest
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            Segment::from_bytes(open(dir, &names_file(id))?, i == 0, Some(id))
+                .map_err(|_| LoadError::Damaged)
         })
-    };
-    let names =
-        Names::from_bytes(open(names_file(manifest.names))?).map_err(|_| LoadError::Damaged)?;
+        .collect::<Result<Vec<_>, _>>()?;
+    let names = Names::from_segments(segments);
     let chunks = manifest
         .chunks
         .iter()
         .map(|&id| {
-            let chunk = Chunk::from_bytes(open(chunk_file(id))?).map_err(|_| LoadError::Damaged)?;
+            let chunk =
+                Chunk::from_bytes(open(dir, &chunk_file(id))?).map_err(|_| LoadError::Damaged)?;
             Ok((id, Arc::new(chunk)))
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
     let tree = Tree::from_chunks(chunks, limits).map_err(|_| LoadError::Damaged)?;
     check_entries(&tree, &names)?;
-    let mut index = Index::new(tree, Arc::new(names));
-    index.mark_names_from(dir);
-    Ok((index, manifest.saved_at))
+    Ok((
+        Index::new(tree, names),
+        Saved {
+            saved_at: manifest.saved_at,
+            crawled_at: manifest.crawled_at,
+        },
+    ))
 }
 
-/// Every name an index names is in its names, and every folder entry
-/// names a folder whose block says it is that entry.
 fn check_entries(tree: &Tree, names: &Names) -> Result<(), LoadError> {
     let count = names.len() as u64;
     for (_, chunk) in tree.chunks() {
