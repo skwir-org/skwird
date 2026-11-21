@@ -18,9 +18,9 @@ It runs in one of three ways, with the same engine and protocol:
 **Status:** phase 1 built and measured: a user's engine on Linux,
 started by its first client (`skwird serve`), answering protocol 0, its
 index checked when a client asks. On a home of 6.9 million entries it
-answers 0.6 s after a start, holds 177 MB and takes no processor time
-while idle. Its memory around a first build, over budget when first
-measured, is fixed and waits to be measured again (DESIGN 10).
+answers 0.6 s after a start and holds 178 MB, takes no processor time
+while idle, and builds its index in 5.6 s, at most 706 MB. After a
+sync it holds 384 MB, over its budget (DESIGN 10).
 Read `docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the
 phases.
 

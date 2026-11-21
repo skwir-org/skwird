@@ -6,11 +6,11 @@ decision changes it there.
 
 ## Where it stands (2026-11-21)
 
-Phase 0 is done. Phase 1's steps 1 to 6 are done: a user's engine on
+Phase 0 is done. Phase 1's steps 1 to 7 are done: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
-the user's home and given budgets (DESIGN 10). Step 7, for the two
-budgets the measurement found not met, both of memory around the first
-build, is built and waits for the user's home to be measured again. The
+the user's home and given budgets (DESIGN 10), the two of memory
+around a first build met at the second measurement. Step 8 is left:
+idle after a sync, the engine holds more than the at-rest budget. The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -449,9 +449,41 @@ committed then.
        chunk's most, one empty, one excluded;
      - names whose hashes are alike are two names;
      - every test of the index and the engine, which build through it.
-   - Left: the user's home, through `tools/measure.sh --only engine`. Its
-     folders hold fewer entries each, and its names repeat less, than
-     the synthetic tree's.
+
+   **Done on 2026-11-21.** The user ran `tools/measure.sh --only engine`
+   on their home at `bab36bc` (6.9 million entries in 867,128 folders):
+   - after the first build, 253 MB, where 1,873 MB were: 37 MB per
+     million, within the budget of 40;
+   - at the peak, 706 MB, where 2,268 MB were: 102 MB per million,
+     within the budget of 150;
+   - the first answer, building, at 5.6 s, where 9.3 s were: the crawl
+     and the packing overlap;
+   - a warm sync in 0.65 s, where 0.83 s were;
+   - read back: 178 MB, a first answer in 0.57 s; idle, no processor
+     time.
+
+   Its folders hold fewer entries, and its names repeat less, than the
+   synthetic tree's, hence 37 MB per million after a build where the
+   synthetic tree took 18.
+
+   **Found by it:** idle after a sync, the engine held 384 MB, 56 MB
+   per million, over the at-rest budget. On the synthetic tree, a sync
+   adds about 20 MB of anonymous memory for 70,481 folders, whether the
+   index was built or read back. A second sync adds about 1 MB, and the
+   mapped files do not change. So it is the refresh's own allocations,
+   freed and kept: the check's list of every folder, each with its path
+   in an allocation of its own. The first measurement could not show
+   it, since the allocator held 1.9 GB of freed memory for the refresh
+   to take from. Step 8 is to meet it.
+8. **The memory of a sync** (DESIGN 10): idle after a sync, at most the
+   at-rest budget, 40 MB per million entries (56 measured).
+   - The check's list of folders without an allocation for each: their
+     paths in one buffer. What a check is handed (`skwird_crawl::Stored`)
+     changes with it.
+   - Then measured: if what is left is still over, it is given back
+     after a refresh, as after a first build (`memory.rs`).
+   - Done when `tools/measure.sh --only engine` on the user's home
+     meets it.
 
 **Tests:** coverage is never overstated. Fixtures cover:
 - a change made while the engine was down;
