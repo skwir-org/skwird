@@ -15,10 +15,11 @@ It runs in one of three ways, with the same engine and protocol:
 - **on demand**, started by its first client and ending a minute after
   its last.
 
-**Status:** phase 1 built but for its measurement: a user's engine on
-Linux, started by its first client (`skwird serve`), answering protocol
-0, its index checked when a client asks. Its budgets (memory, the time
-to a first answer, idle CPU) wait for a measurement on a real home.
+**Status:** phase 1 built and measured: a user's engine on Linux,
+started by its first client (`skwird serve`), answering protocol 0, its
+index checked when a client asks. On a home of 6.9 million entries it
+answers 0.6 s after a start, holds 177 MB and takes no processor time
+while idle. Its memory around a first build is over budget (DESIGN 10).
 Read `docs/DESIGN.md` for the decisions and `docs/PLAN.md` for the
 phases.
 

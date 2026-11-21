@@ -6,12 +6,15 @@ decision changes it there.
 
 ## Where it stands (2026-11-21)
 
-Phase 0 is done. Phase 1 is planned below and not started. The choices
-it waited on were made on 2026-11-11 (DESIGN 2, 5 and the Protocol):
-private folders a client registers, tool stores indexed, network
-mounts never crawled, no crate on crates.io. skwir released 0.6.0 on
-2026-11-21, and skwird's steps are next in its plan (below, "skwir, the
-first client").
+Phase 0 is done. Phase 1's steps 1 to 6 are done: a user's engine on
+Linux, started by its first client, answering protocol 0, measured on
+the user's home and given budgets (DESIGN 10). Step 7 is left: two of
+the budgets, both of memory around the first build, are not met. The
+choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
+Protocol): private folders a client registers, tool stores indexed,
+network mounts never crawled, no crate on crates.io. skwir released
+0.6.0 on 2026-11-21, and its steps for skwird (below, "skwir, the first
+client") can take the client's copies now.
 
 ## Phase 0: measure (done)
 
@@ -343,9 +346,54 @@ committed then.
    Both print counts, sizes and times alone, and remove what they built
    (the index of the folder measured), even when cut short. Tried on a
    synthetic tree of 1,530 entries: the engine answered first in 0.07 s,
-   held 5 MB, and took no processor time in 30 idle seconds. What is
-   left is the user's: `tools/measure.sh` on their home, then the
-   budgets set in DESIGN 10 from what it says.
+   held 5 MB, and took no processor time in 30 idle seconds.
+
+   **Done on 2026-11-21.** The user ran `tools/measure.sh` on their home
+   at `8850b44`: 6.9 million entries in 867,000 folders, 3.0 million
+   distinct names, on btrfs on a solid-state disk, 20 threads, 32 GB.
+   The budgets are in DESIGN 10, with what met them and what did not.
+   Beside them:
+   - **The index:** 286 MB on disk, 41.6 bytes an entry, 70% of
+     `skwird-bench`'s estimate (63% on step 2's tree, whose names repeat
+     more): chunks 141.5 MB, names 144.9 MB. Built in 4.2 s, saved in
+     0.69 s, mapped and checked in 0.69 s.
+   - **Queries,** the index read back:
+     - a name with 12 matches in 10 ms; "report" (4,274) in 30 ms;
+     - `*.pdf` (144,028) in 107 ms; every folder (866,580) in 0.54 s;
+     - a name in most entries (4.1 million) in 1.7 s.
+
+     Past the scan, a hit costs about 0.4 µs, since a query gathers its
+     hits whole before its first batch (step 5).
+   - **The engine:**
+     - Its first answer, building, came at 9.3 s with the caches warm.
+       The bench's crawl before it took 15.3 s with the files' inodes
+       mostly cold: the check before it had dropped the caches, and
+       stats folders alone. A walk with every entry stat-ed takes 17.7 s
+       cold and 4.1 s warm.
+     - A sync's refresh took 0.66 s, of which the check (by path, 20
+       threads) is 82 ms. The rest is the engine's: each folder's path
+       and stored stat, the comparison. That is within the budget, but
+       it is where a sync's time goes.
+     - Read back, it replayed no record and answered in 0.62 s, at
+       177 MB. Idle, it took no processor time in 30 s.
+   - **As in phase 0:**
+     - A watch per folder would take 866,584 of the user's 524,288
+       inotify watches.
+     - On btrfs, the fanotify mark through the top-level subvolume was
+       accepted, and every probe was heard.
+7. **The memory budgets** (DESIGN 10): the two the measurement found
+   not met.
+   - **The first build streamed from the crawl,** the crawl never held
+     whole: at most 150 MB per million entries at the peak, where
+     329 MB were measured (step 5 said why).
+   - **After the first build, back to the memory of an index read
+     back.** The chunks and names built are mapped from their files
+     once saved (`store::save`), and yet the engine stayed at 1,873 MB,
+     against 177 MB read back. What holds it is found first, then fixed
+     by its cause. The likely one is the allocator keeping what the
+     crawl's 20 threads freed.
+   - Done when `tools/measure.sh --only engine` on the user's home meets
+     both.
 
 **Tests:** coverage is never overstated. Fixtures cover:
 - a change made while the engine was down;

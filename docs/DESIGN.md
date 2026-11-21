@@ -73,13 +73,15 @@ first exits, even during its first crawl; it does not poll the lock, as
 fsearch's followers do every 10 seconds (10). A user's engine that
 finds the system service covering its roots live (2) leaves them to it.
 
-An engine a client starts lives in that client's group of processes.
-Where a service manager runs the client, the engine ends with the
+An engine a client starts runs in a process group of its own, so that a
+terminal's interrupt does not reach it, but in the client's control
+group. Where a service manager runs the client, the engine ends with the
 client's run: skwir's `skwir index`, run hourly by a systemd timer
 (skwir's ADR-089), takes its engine down with it, and the next client
-starts another, which pays one check (52 ms warm, 1.9 s cold on the home
-phase 0 measured). So every save survives a kill, and the user's unit
-(phase 2) is what outlives such runs.
+starts another. On the home phase 1 measured (6.9 million entries), that
+one reads its index back and answers in 0.6 s, as of its last save, and
+a sync proves it current in 0.8 s, warm. So every save survives a kill,
+and the user's unit (phase 2) is what outlives such runs.
 
 The engine's crates can be embedded by other programs. Clients are
 supported through the protocol only, for four reasons:
@@ -504,9 +506,30 @@ Linux, macOS and Windows:
 ### 10. Idle is idle, and nothing leaves the machine
 
 There is no polling loop: the engine sleeps until the system notifies
-it. It never uses the network. Budgets (memory per million entries,
-idle CPU, time to the first answer after a start) are set once phase 1
-measures them.
+it. It never uses the network.
+
+**Budgets.** Set on 2026-11-21 from phase 1's measurement of a home of
+6.9 million entries in 867,000 folders: btrfs on a solid-state disk, 20
+threads, 32 GB. They are per million entries, so that they scale with
+the tree. A slower disk lengthens what is the disk's (a cold crawl, a
+cold check), not what is the engine's.
+
+| What | Budget, per million entries | Measured, per million (whole home) | |
+|---|---|---|---|
+| Processor time while idle | none measurable (the kernel counts in 10 ms ticks) | 0.00 s in 30 s | met |
+| First answer after a start, the index read back | 0.15 s | 0.09 s (0.62 s), as of its last save | met |
+| A sync, warm | 0.15 s | 0.12 s (0.83 s) | met |
+| The build, from a crawl | 1 s | 0.61 s (4.2 s) | met |
+| Memory at rest, the index read back | 40 MB | 26 MB (177 MB) | met |
+| Memory after a first build, once saved | as at rest | 272 MB (1,873 MB) | not met |
+| Memory at the peak of a first build | 150 MB | 329 MB (2,268 MB) | not met |
+
+Memory is what the kernel counts resident (`VmRSS`, and `VmHWM` for the
+peak). The index's mapped files count once read, and are the page
+cache's to drop. A first start, with no index yet, answers once the
+whole tree is crawled and built: 9.3 s with the caches warm, about 20 s
+cold by the crawl's and the build's times measured apart. Meeting the
+two budgets not met is phase 1's step 7 (PLAN).
 
 ## Protocol (a sketch; experimental until declared stable)
 
@@ -567,8 +590,9 @@ measures them.
   path a line; what clients register is kept in
   `$XDG_STATE_HOME/skwird/registered`; each root's index is in
   `$XDG_CACHE_HOME/skwird/index-<the hash of its path>`.
-- A `sync` refreshes the whole root that holds the path asked: the check
-  is cheap (52 ms warm for the home phase 0 measured), and a proof is
+- A `sync` refreshes the whole root that holds the path asked: it is
+  cheap (0.83 s warm for the home phase 1 measured, 82 ms of it the
+  check of every folder), and a proof is
   kept for the whole index, not a subtree. Syncs asked while one runs
   are answered by the next refresh.
 - A query is answered from the snapshot published when it is asked;
