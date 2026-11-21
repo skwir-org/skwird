@@ -622,42 +622,101 @@ is told (DESIGN 2).
 
 ## Phase 2: Linux, a user service
 
-- A systemd user unit. It outlives a client's run, which removes phase
-  1's accepted limit. Socket activation where a package installs it.
-- inotify, read through rustix, for the folders clients ask for:
-  skwir's harvest scope, the folders open in its panes. Within a share
-  of the user's watch limit, with the check covering the rest (DESIGN
-  3). A wrapper can pass an overflow on as an ordinary event: `notify`
-  does, and fsearch-crossplatform misses it.
-- Each folder watched before it is read or checked (DESIGN 2).
-- The sync barrier (cookies).
-- The journal live: changes heard, not only found by a check.
-- The mount table followed, as skwir follows it.
-- Each inotify instance has its generation: an instance made again
-  leaves the old one's events applied, but proving nothing (DESIGN 2).
-- After an overflow, coverage is lowered at once, and the check runs
-  once the queue is quiet, backing off under churn that lasts. fsearch
-  0.2.2 waits 2 s, doubling up to 60 s, and relists at most every 300 s.
-  A client's sync still runs the check at once.
-- **Churn, measured before it is decided.** Every change is logged
-  (DESIGN 8), so a build's output folder or a cache that changes without
-  pause fills the log. Past 16 MB, the log ends its epoch, and clients'
-  tokens turn "too old". Measure the log's growth during a large build
-  first. fsearch 0.2.2 indexes such folders whole, but applies their
-  changes in batches: after 5 s of quiet, or 60 s at most, rereading the
-  whole folder past 2,048 folders changed. If skwird does so:
-  - a pending subtree is "as of" its first pending change, never live;
-  - a sync applies what is pending below the path asked;
-  - the folders treated so come from the index (a name query, such as
-    `CACHEDIR.TAG`), never from a set learned beside it. fsearch's
-    learned set was empty after a restart, and grew without end (its
-    `b98a7b0`, `6c9dea4`).
-- Tests, without root:
-  - an overflow (a queue left unread while more files are made than
-    `max_queued_events`) lowers coverage at once;
-  - a change made while the watches are being installed is not missed;
-  - an instance made again while the old one's events are still read:
-    "live" comes back from the new one's markers alone.
+The engine as a systemd user unit, outliving a client's run (phase 1's
+accepted limit), with inotify watching the folders clients register.
+There, its answers are live; elsewhere, checked as in phase 1. The
+choices it makes are in DESIGN 2, 3 and open question 2; each step is
+committed once the gate holds.
+
+1. **The watcher** (`skwird_crawl`, Linux).
+   - An inotify instance, read through rustix, with its generation: an
+     instance made again leaves the old one's events applied, but
+     proving nothing (DESIGN 2).
+   - A folder watched through its open handle before its entries are
+     read, so that the folder watched is the folder read, and a change
+     between the two is heard.
+   - Events named by folder (the watch descriptor's), an overflow and a
+     watch that fails reported as such: a wrapper can pass an overflow on
+     as an ordinary event, as `notify` does, and fsearch-crossplatform
+     misses it.
+   - Within a budget of watches: past it, a folder is not watched, and
+     says so.
+   - Tests, without root:
+     - a change in a watched folder is heard, named by its folder;
+     - a change made while the watches are being installed is not
+       missed;
+     - an overflow (a queue left unread while more files are made than
+       `max_queued_events`) is reported;
+     - an instance made again while the old one's events are still read:
+       its events carry the old generation;
+     - a budget of watches reached is reported, never a folder silently
+       unwatched.
+2. **Churn, measured before it is decided.** Every change is logged
+   (DESIGN 8), so a build's output folder or a cache that changes without
+   pause fills the log. Past 16 MB, the log ends its epoch, and clients'
+   tokens turn "too old".
+   - `skwird-bench churn FOLDER`: the folder watched, and what a busy
+     time makes of it counted: events, folders changed, rereads, and the
+     log's growth, applied at once and in batches.
+   - Measured on a large build into a scratch folder of the tests'.
+   - fsearch 0.2.2 indexes such folders whole, but applies their changes
+     in batches: after 5 s of quiet, or 60 s at most, rereading the whole
+     folder past 2,048 folders changed. If skwird does so:
+     - a pending subtree is "as of" its first pending change, never live;
+     - a sync applies what is pending below the path asked;
+     - the folders treated so come from the index (a name query, such as
+       `CACHEDIR.TAG`), never from a set learned beside it. fsearch's
+       learned set was empty after a restart, and grew without end (its
+       `b98a7b0`, `6c9dea4`).
+   - Decided in DESIGN 8 from the numbers.
+3. **Live folders in the engine.**
+   - Protocol: `watch {add, remove}`, the folders a client wants live,
+     kept per client across restarts as its exclusions are (DESIGN 5),
+     and `skwird watch`.
+   - The writer applies what is heard: each folder an event names is
+     read again, events gathered, as the check reads it. The journal is
+     live: changes heard, not only found by a check.
+   - Coverage: live since the time a registered folder's subtree was
+     wholly watched and checked, for names and attributes. A folder
+     past the budget is checked, not live: a watch limit reached.
+   - After an overflow, or a watch that fails, coverage is lowered at
+     once, and the check runs once the queue is quiet, backing off under
+     churn that lasts. fsearch 0.2.2 waits 2 s, doubling up to 60 s, and
+     relists at most every 300 s. A client's sync still runs the check
+     at once.
+   - Tests: coverage is never overstated (below).
+4. **The sync barrier** (open question 1). A cookie made in a folder of
+   the engine's own, watched by the same instance, so in the same queue:
+   heard, every event before it has been read. A sync of a live folder
+   answers once the cookie is heard and what came before applied: live,
+   up to a time after the sync was asked. Elsewhere, the check, as in
+   phase 1.
+5. **The mount table followed,** as skwir follows it (`POLLPRI` on
+   `/proc/self/mountinfo`): a mount made or taken below a root lowers
+   coverage at once, for its subtree.
+6. **The user unit.** `dist/systemd/skwird.service` and `skwird.socket`:
+   the engine for the session, idle never ending it. Socket activation
+   (`LISTEN_FDS`) where a package installs the socket. Tested with
+   `systemd-socket-activate`; no test installs a unit on the developer's
+   own system.
+7. **Measured,** by the user, on their home: `tools/measure.sh` gains a
+   live step (memory and processor time with the watches of a large
+   folder, idle with them, the time from a change to its answer).
+   Budgets added to DESIGN 10.
+
+**Tests of live coverage:**
+- an overflow lowers coverage at once, and the check after it finds
+  what the dropped events held;
+- a folder made, filled and moved within a watched subtree is answered
+  live, its new folders watched before they are read;
+- a folder moved out of a watched subtree and back: nothing of it under
+  its old path;
+- an instance made again while the old one's events are still read:
+  "live" comes back from the new one's markers alone;
+- a watch that fails, or a budget reached, lowers coverage for that
+  subtree alone;
+- a sync of a live folder answers with a change made just before it;
+- a mount made below a watched folder: not covered, a mount.
 
 ## Phase 3: Linux, the system service
 

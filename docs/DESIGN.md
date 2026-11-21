@@ -619,6 +619,10 @@ after a first build and after each refresh (`malloc_trim`).
     old" (8). A journal for clients that keep state of their own;
   - `exclude {add, remove}`: folders the client keeps out of the index
     (5). A client removes only what it added.
+  - `watch {add, remove}` (phase 2): folders the client wants live,
+    kept as its exclusions are (open question 2). An event in one is
+    applied by reading its folder again, as the check reads it, so a
+    live answer and a checked one never disagree.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
@@ -666,7 +670,14 @@ after a first build and after each refresh (`malloc_trim`).
    queue (fanotify has one queue for all its marks).
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
-   - which folders a user's engine watches on Linux.
+   - which folders a user's engine watches on Linux: answered on
+     2026-11-21, for phase 2. Those its clients register (`watch`), kept
+     per client across restarts as exclusions are, within a quarter of
+     the user's inotify watches: editors, file managers and build tools
+     share the rest. The check covers every other folder, and a folder
+     past the share is checked, not live (a watch limit reached). A
+     watch per folder for a whole home does not fit: phase 1 counted
+     866,584 folders against a limit of 524,288.
 3. **A user's exclusions:** answered on 2026-11-11 (5). The user's
    client registers folders over the socket, with the user's
    credentials, and the service keeps them per user, each applying only
