@@ -122,6 +122,8 @@ pub enum Command {
         remove: Vec<PathBuf>,
         reply: Sender<Vec<PathBuf>>,
     },
+    /// The mount table changed ([`crate::live::listen`]).
+    Mounts,
     /// What the watcher of this generation heard ([`crate::live::listen`]).
     Heard {
         generation: u64,
@@ -466,6 +468,7 @@ impl Writing<'_> {
                 let _ = reply.send(theirs(&self.kept_live, &client));
             }
             Command::Heard { generation, heard } => self.heard(generation, heard),
+            Command::Mounts => self.mounts_changed(),
         }
         true
     }
@@ -829,6 +832,30 @@ impl Writing<'_> {
         self.gather.checked(Instant::now());
         for reply in replies {
             let _ = reply.send(());
+        }
+    }
+}
+
+impl Writing<'_> {
+    /// The mount table changed: each root reads it again, and the folders
+    /// at mount points made or taken below it are read again at once.
+    fn mounts_changed(&mut self) {
+        for root in 0..self.keepers.len() {
+            let Some(keeper) = self.keepers[root].as_mut() else {
+                continue;
+            };
+            match keeper.mounts_changed(&self.cancel) {
+                Ok(done) if done.reread > 0 => {
+                    log(&format!(
+                        "root {root}: the mounts changed, {} folders read again",
+                        done.reread
+                    ));
+                    self.gather.changed(Instant::now());
+                }
+                Ok(_) => {}
+                Err(e) => log(&format!("root {root}: its mounts cannot be read: {e}")),
+            }
+            self.publish(root);
         }
     }
 }

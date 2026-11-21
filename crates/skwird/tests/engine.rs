@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use skwird_client::{Client, Find};
 use skwird_protocol::{Match, NameTerm, Proof, Query, Why, WirePath};
-use skwird_testkit::{Scratch, reference_walk};
+use skwird_testkit::{Scratch, in_namespace, reference_walk};
 
 /// A scratch home, its XDG folders, and the engines run in it.
 struct Env {
@@ -694,4 +694,48 @@ fn a_sync_of_a_live_folder_checks_nothing_else() {
     let coverage = c.sync(&home).unwrap();
     assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
     assert!(answered(&mut c, &named(&home, "unseen")).contains(&unwatched));
+}
+
+/// A mount made below a watched folder is a hole at once, "a mount": its
+/// names are the mount's, never the folder's, and the rest stays live.
+/// Taken away, the folder is read again.
+#[test]
+fn a_mount_made_below_a_watched_folder_is_a_hole_at_once() {
+    if !in_namespace() {
+        return;
+    }
+    let mut env = Env::new("engine-live-mount");
+    tree(&env);
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let target = docs.join("d03");
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    let report = named(&home, "report 3.txt");
+    assert_eq!(answered(&mut c, &report).len(), 1);
+    env.s.mount_tmpfs(&target);
+    wait_for(5, "the mount a hole", || {
+        c.coverage(&docs)
+            .unwrap()
+            .holes
+            .iter()
+            .any(|h| h.path.to_path() == target && h.why == Why::Mount)
+    });
+    assert!(
+        answered(&mut c, &report).is_empty(),
+        "the folder's names let go of"
+    );
+    assert!(is_live(&mut c, &docs), "the rest stays live");
+    assert!(
+        Command::new("umount")
+            .arg(&target)
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_for(5, "read again once the mount is gone", || {
+        answered(&mut c, &report).len() == 1
+    });
+    assert!(c.coverage(&docs).unwrap().holes.is_empty());
 }

@@ -131,6 +131,12 @@ impl Root {
         self.exclusions = exclusions;
     }
 
+    /// Where mounts start below it, by path below it, as its table last
+    /// said.
+    pub fn mounts_below(&self) -> Vec<PathBuf> {
+        self.below.keys().cloned().collect()
+    }
+
     /// Read the mount table again, as each check does first.
     pub fn reread_mounts(&mut self) -> std::io::Result<()> {
         self.set_table(Table::read()?);

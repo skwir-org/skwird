@@ -31,19 +31,45 @@ const CALM: Duration = Duration::from_secs(300);
 
 /// Listen to `watcher` for the writer: block until it can be read, send
 /// what it heard, and again. A read that fails is said as an overflow:
-/// nothing heard since proves anything.
+/// nothing heard since proves anything. The mount table is followed too,
+/// as skwir follows it: `/proc/self/mountinfo` signals a change with
+/// `POLLPRI`, and is read through so that it signals the next.
 pub fn listen(watcher: &Watcher, commands: &Sender<Command>) {
+    use std::io::{Read, Seek};
     let mut heard = Vec::new();
+    let mut table = std::fs::File::open("/proc/self/mountinfo").ok();
+    let mut skip = Vec::new();
+    if let Some(t) = table.as_mut() {
+        let _ = t.read_to_end(&mut skip);
+    }
     loop {
         let fd = watcher.fd();
-        let mut fds = [rustix::event::PollFd::new(
+        let mut fds = vec![rustix::event::PollFd::new(
             &fd,
             rustix::event::PollFlags::IN,
         )];
+        if let Some(t) = &table {
+            fds.push(rustix::event::PollFd::new(t, rustix::event::PollFlags::PRI));
+        }
         match rustix::event::poll(&mut fds, None) {
             Ok(_) | Err(rustix::io::Errno::INTR) => {}
             Err(e) => {
                 log(&format!("cannot wait on the watcher: {e}"));
+                return;
+            }
+        }
+        let mounts = fds.get(1).is_some_and(|f| !f.revents().is_empty());
+        drop(fds);
+        if mounts && let Some(t) = table.as_mut() {
+            skip.clear();
+            let read = t
+                .rewind()
+                .and_then(|()| t.read_to_end(&mut skip).map(|_| ()));
+            if read.is_err() {
+                log("cannot read the mount table again: it is not followed");
+                table = None;
+            }
+            if commands.send(Command::Mounts).is_err() {
                 return;
             }
         }

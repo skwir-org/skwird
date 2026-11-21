@@ -54,6 +54,10 @@ impl Root {
         match self.never {}
     }
 
+    pub fn mounts_below(&self) -> Vec<PathBuf> {
+        match self.never {}
+    }
+
     pub fn reread_mounts(&mut self) -> std::io::Result<()> {
         match self.never {}
     }

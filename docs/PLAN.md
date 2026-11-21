@@ -835,6 +835,23 @@ committed once the gate holds.
 5. **The mount table followed,** as skwir follows it (`POLLPRI` on
    `/proc/self/mountinfo`): a mount made or taken below a root lowers
    coverage at once, for its subtree.
+
+   **Done on 2026-11-21.**
+   - The engine's listening thread waits on `/proc/self/mountinfo` for
+     `POLLPRI` beside the watcher, and reads it through after each
+     change, so that it signals the next. A change sends the writer
+     `Command::Mounts`.
+   - Each keeper reads its table again (`Keeper::mounts_changed`), and
+     reads again the folder at each mount point made or taken below its
+     root. A mount made is a hole at once: its names are the mount's,
+     never the folder's. A mount taken lets the folder be read and
+     crawled.
+   - Without a watcher, nothing is followed: each check reads the table
+     first, as in phase 1.
+   - Test, in a namespace of its own: a tmpfs mounted over a folder
+     below a watched one is a hole ("a mount") at once, its names gone,
+     the rest still live; unmounted, it is read again. With the writer
+     ignoring changes to the table, it failed.
 6. **The user unit.** `dist/systemd/skwird.service` and `skwird.socket`:
    the engine for the session, idle never ending it. Socket activation
    (`LISTEN_FDS`) where a package installs the socket. Tested with

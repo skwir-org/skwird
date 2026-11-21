@@ -404,6 +404,26 @@ impl Keeper {
         Ok(done)
     }
 
+    /// The mount table changed (`POLLPRI` on `/proc/self/mountinfo`): read
+    /// it again, and read again the folder at each mount point made or
+    /// taken below the root. A mount made is a hole at once, its names the
+    /// mount's and not the folder's; a mount taken lets the folder be read
+    /// and crawled.
+    pub fn mounts_changed(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
+        let before = self.root.mounts_below();
+        self.root.reread_mounts().map_err(Error::Root)?;
+        let after = self.root.mounts_below();
+        let mut folders: Vec<FolderId> = before
+            .iter()
+            .filter(|p| !after.contains(p))
+            .chain(after.iter().filter(|p| !before.contains(p)))
+            .filter_map(|rel| self.index.folder_at(rel))
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+        self.heard(&folders, cancel)
+    }
+
     /// Events were dropped: no subtree is live until the next refresh.
     pub fn overflowed(&mut self) {
         for live in &mut self.live {
