@@ -97,8 +97,9 @@ supported through the protocol only, for four reasons:
   window.
 - **Isolation.** A crash or a hang in the engine is not the client's.
 
-A client takes the client crate, `skwird-proto`, as a copy in its own
-tree, or speaks the protocol with code of its own (Protocol, below).
+A client takes `skwird-client` and `skwird-protocol` as copies in its
+own tree, or speaks the protocol with code of its own (Protocol,
+below).
 
 ### 2. Every answer says how far it can be trusted
 
@@ -468,16 +469,21 @@ measures them.
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
   without each other, and the client says so (1).
-- **The client crate.** `skwird-proto` holds the messages, a client,
-  and a fake engine for clients' tests. It depends on serde and
-  serde_json alone, and is not published on crates.io (the user's
-  choice, 2026-11-11). A client copies it into its own tree: skwir
-  takes no git dependency (its ADR-050), and keeps it as
-  `vendor/skwird-proto`, as it keeps gpui and syntect. skwird's
-  `tools/vendor-proto` writes that copy as `cargo package` writes a
-  crate, its manifest standing alone, outside skwird's workspace, and
-  names the commit it came from. A client may instead write its own,
-  from this section and the transcripts the tests keep.
+- **The crates clients take** (named on 2026-11-21):
+  - `skwird-protocol`: the messages, which the engine speaks too;
+  - `skwird-client`: a client (finding an engine, starting one, asking
+    it) and a fake engine for clients' tests, built on
+    `skwird-protocol`.
+
+  Both depend on serde and serde_json alone, and neither is published
+  on crates.io (the user's choice, 2026-11-11). A client copies them
+  into its own tree: skwir takes no git dependency (its ADR-050), and
+  keeps them as `vendor/skwird-protocol` and `vendor/skwird-client`, as
+  it keeps gpui and syntect. skwird's `tools/vendor-client` writes
+  those copies as `cargo package` writes a crate, their manifests
+  standing alone, outside skwird's workspace, and names the commit they
+  came from. A client may instead write its own, from this section and
+  the transcripts the tests keep.
 
 ## Open questions
 

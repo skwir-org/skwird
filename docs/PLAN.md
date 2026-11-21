@@ -95,9 +95,10 @@ live: that is phase 3's (DESIGN 3).
     table. Other systems get an error naming them (rule 7);
   - `skwird-index`: the format, the overlay and the log, and queries on
     them, with fsearch 0.2's packed arrays and zones (DESIGN 8);
-  - `skwird-proto`: the messages, a client and a fake engine for
-    clients' tests. It depends on serde and serde_json alone, so a
-    copy builds on its own (DESIGN, Protocol);
+  - `skwird-protocol`: the messages, which the engine speaks too;
+  - `skwird-client`: a client and a fake engine for clients' tests.
+    Like `skwird-protocol`, it depends on serde and serde_json alone,
+    so their copies build on their own (DESIGN, Protocol);
   - `skwird`: the program, which serves and is the command line. It is a
     library too, so the engine is tested without a socket.
 - **Roots:** the user's home, and folders the user's configuration
@@ -135,8 +136,8 @@ committed then.
      the mount table and mount ids; `.private` and the default
      exclusions resolved to folders; a folder read within a tick read
      again; cancellation.
-   - The toolchain moves to skwir's (1.99.1), so the copy of
-     `skwird-proto` meets the lints skwir runs.
+   - The toolchain moves to skwir's (1.99.1), so the copies of the
+     client's crates meet the lints skwir runs.
 2. **The index.**
    - A spike first, on the format's one hard part: a subtree stays one
      range while chunks are rewritten. Its answer shapes the format, so
@@ -166,10 +167,10 @@ committed then.
      Names that are not UTF-8 travel byte for byte.
    - The lock and its takeover; the client starts the engine; the idle
      minute.
-   - `skwird-proto` stands alone. `tools/vendor-proto` writes its copy,
-     and a test builds that copy outside the workspace. Transcripts of
-     the messages are kept as test data, for clients that write their
-     own.
+   - `skwird-protocol` and `skwird-client` stand alone.
+     `tools/vendor-client` writes their copies, and a test builds those
+     copies outside the workspace. Transcripts of the messages are kept
+     as test data, for clients that write their own.
 6. **The command line and the budgets,** the one step that needs the
    user.
    - `skwird find`, `coverage` and `status`; `tools/measure.sh` gains
@@ -229,13 +230,14 @@ its ADR-050). Its sessions build them, in its repository:
   of, or not covered and why, for a root and the facts a search needs.
   It needs nothing from skwird, and is tested with a fake provider. It
   can start now.
-- **B. A skwird provider,** after step 5. skwird's `tools/vendor-proto`
-  writes the copy. skwir's session commits it as `vendor/skwird-proto`,
-  with its `README.skwir.md`, and takes it by path, outside its
-  workspace as `vendor/zed` is. It also amends its ADR-050, whose point
-  7 waited for a crate on crates.io. The copy's two dependencies come
-  from crates.io through skwir's lockfile, and its advisories are
-  checked as skwir's own.
+- **B. A skwird provider,** after step 5. skwird's
+  `tools/vendor-client` writes the copies. skwir's session commits them
+  as `vendor/skwird-protocol` and `vendor/skwird-client`, with their
+  `README.skwir.md`, and takes them by path, outside its workspace as
+  `vendor/zed` is. It also amends its ADR-050, whose point 7 waited for
+  a crate on crates.io. The copies' two dependencies come from
+  crates.io through skwir's lockfile, and their advisories are checked
+  as skwir's own.
 - **D. The harvest's enumeration and journal** (skwir's ADR-089):
   `changes` from step 4, live from phase 2.
 
