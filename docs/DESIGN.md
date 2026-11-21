@@ -500,8 +500,8 @@ loss.
 The blocks are in pre-order, each with its depth: a folder's subtree is
 its block and every block after it that is deeper, so no block stores
 where its subtree ends, and no change writes a folder above the one it
-changes. The blocks are cut into chunks of about 64k entries (a chunk
-is cut past 96k, but for a single block; one below 16k joins a
+changes. The blocks are cut into chunks of about 16k entries (a chunk
+is cut past 24k, but for a single block; one below 4k joins a
 neighbour that can take it in). A change keeps pre-order:
 - a folder made is inserted right after its parent's own block, which
   pre-order allows, so only that chunk is rewritten;
@@ -519,6 +519,23 @@ durable until the chunk is written. The spike held the promise through
 and moved; nested ones), every folder's range compared with a model
 tree after each, with chunks of a few dozen entries so that every edit
 cut or joined some.
+
+**A chunk's size is a folder read's price** (decided on 2026-11-21, by
+phase 2's live measurement). A change rewrites its whole chunk, however
+small the change, so a folder read again costs what its chunk holds.
+With chunks of 64k entries, a folder of 100 entries read again cost
+3.6 ms, changed or not. Watching the user's home as far as its share
+went, the engine took 7.5% of a core while no client asked, its busy
+folders read again over and over. Two changes:
+- A folder read back as it was is not written again: 97 µs.
+- Chunks of 16k entries make a read that changes something cost
+  1.1 ms. 4k entries would make it 0.4 ms, but on a synthetic tree of
+  a million entries, loading was 49% slower at 16k and 69% at 8k (38%
+  at 4k: one run each, noisy). The user's home loaded in 0.6 s with
+  64k chunks, against a budget of about 1 s.
+
+An index saved with larger chunks is cut down to the new size a chunk
+at a time, as changes rewrite them.
 
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a

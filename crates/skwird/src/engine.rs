@@ -275,6 +275,7 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
+        done: Done::default(),
         pending: Vec::new(),
     };
     w.apply_scopes();
@@ -398,6 +399,8 @@ struct Writing<'a> {
     next_cookie: u64,
     /// Syncs waiting for their cookie.
     waiting: Vec<Waiting>,
+    /// What was done for what was heard, since the last save.
+    done: Done,
     /// Commands taken while gathering syncs, to answer next.
     pending: Vec<Command>,
 }
@@ -483,6 +486,7 @@ impl Writing<'_> {
     /// check due once the queue is quiet.
     fn heard(&mut self, generation: u64, heard: Vec<Heard>) {
         let now = Instant::now();
+        self.done.events += heard.len() as u64;
         // An older watcher's changes are applied all the same (a read is
         // never wrong), but its cookies prove nothing (DESIGN 2).
         let mut lowered = BTreeSet::new();
@@ -519,6 +523,7 @@ impl Writing<'_> {
                     }
                 }
                 Heard::Overflow => {
+                    self.done.overflows += 1;
                     for (i, keeper) in self.keepers.iter_mut().enumerate() {
                         if let Some(keeper) = keeper {
                             keeper.overflowed();
@@ -561,6 +566,7 @@ impl Writing<'_> {
             }
         }
         if self.gather.save_due(now) {
+            self.done.say();
             for keeper in self.keepers.iter_mut().flatten() {
                 if keeper.save().is_err() {
                     log("a save failed: the index is kept in memory, the log on disk");
@@ -587,8 +593,12 @@ impl Writing<'_> {
             return;
         };
         match keeper.heard(folders, &self.cancel) {
-            Ok(done) if !done.records.is_empty() => self.gather.changed(Instant::now()),
-            Ok(_) => {}
+            Ok(done) => {
+                self.done.read_again(root, &done);
+                if !done.records.is_empty() {
+                    self.gather.changed(Instant::now());
+                }
+            }
             Err(e) => log(&format!(
                 "root {root}: what was heard cannot be applied: {e}"
             )),
@@ -862,5 +872,50 @@ impl Writing<'_> {
             }
             self.publish(root);
         }
+    }
+}
+
+/// What was done for what was heard, said at each save (counts alone, so
+/// that the log can be shared): what a live folder costs, and where.
+#[derive(Default)]
+struct Done {
+    events: u64,
+    overflows: u64,
+    reread: u64,
+    entries: u64,
+    largest: usize,
+    /// How often each folder was read again.
+    by_folder: std::collections::HashMap<(usize, FolderId), u32>,
+}
+
+impl Done {
+    fn read_again(&mut self, root: usize, done: &skwird_index::Refreshed) {
+        self.reread += done.reread as u64;
+        self.entries += done.entries as u64;
+        self.largest = self.largest.max(done.largest);
+        for &folder in &done.folders {
+            *self.by_folder.entry((root, folder)).or_default() += 1;
+        }
+    }
+
+    /// Said, and begun again.
+    fn say(&mut self) {
+        let done = std::mem::take(self);
+        if done.events == 0 {
+            return;
+        }
+        let busiest = done.by_folder.values().max().copied().unwrap_or(0);
+        log(&format!(
+            "since the last save: {} events heard, {} overflows; {} folders read again \
+             ({} distinct), {} entries stat-ed, the largest folder {} entries, the busiest \
+             read {} times",
+            done.events,
+            done.overflows,
+            done.reread,
+            done.by_folder.len(),
+            done.entries,
+            done.largest,
+            busiest
+        ));
     }
 }

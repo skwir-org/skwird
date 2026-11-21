@@ -51,9 +51,9 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            target: 65_536,
-            max: 98_304,
-            min: 16_384,
+            target: 16_384,
+            max: 24_576,
+            min: 4_096,
         }
     }
 }

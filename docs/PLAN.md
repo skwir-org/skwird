@@ -911,6 +911,33 @@ committed once the gate holds.
    - a sync of them, live, in 0.02 s;
    - 30 s idle with them: no processor time.
 
+   **The user's first run** (at `1439be6`, 6.9 million entries in 867,327
+   folders):
+   - a change answered in 158 ms at the median, 179 ms at most;
+   - the home watched as far as the share goes, 131,072 folders, in
+     5.6 s, the engine at 276 MB;
+   - a sync of it, checked: the home needs more than the share;
+   - 30 s with no client asking: **2.27 s of processor time**, 7.5% of a
+     core.
+
+   Taken folders in name order, the share watched the dot folders first:
+   caches and profiles that applications write to without pause. A trial
+   of what a read costs, on a synthetic tree, showed why it cost so much.
+   A folder of 100 entries read again cost 3.6 ms, changed or not, since
+   a change rewrites its whole chunk of 64k entries. Fixed (DESIGN 8):
+   - a folder read back as it was is not written again (97 µs);
+   - chunks of 16k entries (a read that changes something, 1.1 ms).
+
+   The engine also says, at each save, what it did for what it heard
+   since the last one: events, folders read again, entries stat-ed, the
+   largest folder and the busiest's count. These are counts alone, so a
+   measurement shows where the time goes. `--only` takes several steps
+   (`engine,live`), since the chunks' size touches the load the engine
+   step measures.
+
+   Left: the user's second run, `tools/measure.sh --no-root --only
+   engine,live`, then the budgets.
+
 **Tests of live coverage:**
 - an overflow lowers coverage at once, and the check after it finds
   what the dropped events held;

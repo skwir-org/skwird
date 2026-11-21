@@ -145,6 +145,12 @@ pub struct Refreshed {
     pub reread: usize,
     /// Folders new since, crawled.
     pub crawled: usize,
+    /// Entries the folders read again held, each stat-ed: what a read
+    /// costs; and the most one folder held.
+    pub entries: usize,
+    pub largest: usize,
+    /// The folders read again, in order.
+    pub folders: Vec<FolderId>,
     /// What came of watching each folder read or crawled, where a watch
     /// was asked ([`Options::watcher`]).
     pub watches: Vec<(FolderId, Watch)>,
@@ -245,12 +251,21 @@ impl Index {
             Seen::NotCovered(why) => (State::NotCovered(why), old.items.clone()),
         };
         let fresh: Vec<FolderId> = m.made.iter().map(|b| b.folder).collect();
-        self.tree_mut().replace(Block {
+        // A block as it was is not written again: a chunk rewritten costs
+        // its whole, whatever changed (DESIGN 8), and many a folder heard
+        // reads back as it was.
+        let block = Block {
+            folder: old.folder,
+            parent: old.parent,
+            name: old.name,
+            depth: old.depth,
             facts,
             state,
             items,
-            ..old
-        });
+        };
+        if block != old {
+            self.tree_mut().replace(block);
+        }
         for child in m.gone {
             self.tree_mut().remove(child);
         }
@@ -662,6 +677,10 @@ fn apply(
                 if watch != Watch::Unasked {
                     done.watches.push((folder, watch));
                 }
+                if let Outcome::Listed(listing) = &outcome {
+                    done.entries += listing.len();
+                    done.largest = done.largest.max(listing.len());
+                }
                 (found, Seen::of(&outcome))
             }
         };
@@ -679,6 +698,7 @@ fn apply(
             changes: reread.changes,
         }));
         done.reread += 1;
+        done.folders.push(folder);
     }
     while let Some(folder) = fresh.pop() {
         if index.tree().loc(folder).is_none() {

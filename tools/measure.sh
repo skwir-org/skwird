@@ -3,23 +3,27 @@
 # 6) on one folder, your home by default, kept in one file you can share:
 # it holds counts, sizes and times, never a name or a path.
 #
-#   tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine|live] [FOLDER]
+#   tools/measure.sh [--no-root] [--only STEP[,STEP]...] [FOLDER]
+#
+# STEP: walk, check, fanotify, index, engine, live. Every step by default.
 #
 # It asks for your password once (sudo), to drop the caches before each
 # cold pass (the machine is slower for a while after) and to try
 # fanotify, which only root may use on a whole filesystem. On a btrfs
 # subvolume, fanotify also mounts the filesystem's top-level subvolume,
 # read-only and attached nowhere, for the seconds it listens. --no-root
-# skips both: warm passes only, no fanotify. --only runs one step. The
-# index and the engine steps build skwird's index of the folder in a
-# folder of their own in your cache, and remove it once measured. The
+# skips both: warm passes only, no fanotify. --only runs the steps it
+# names.
+#
+# The index and the engine steps build skwird's index of the folder in
+# a folder of their own in your cache, and remove it once measured. The
 # live step runs an engine keeping folders live (phase 2): the time from
 # a change to its answer, in a folder of its own in your cache, then the
 # folder itself watched as far as the engine's share of watches goes. It
 # takes a few minutes; an idle machine gives the fairest numbers.
 set -euo pipefail
 
-usage='tools/measure.sh [--no-root] [--only walk|check|fanotify|index|engine|live] [FOLDER]'
+usage='tools/measure.sh [--no-root] [--only STEP[,STEP]...] [FOLDER]'
 use_root=1
 only=
 folder=$HOME
@@ -27,17 +31,21 @@ while [ $# -gt 0 ]; do
     case $1 in
     --no-root) use_root=0 ;;
     --only)
-        case ${2:-} in
-        walk | check | fanotify | index | engine | live) only=$2 ;;
-        *)
-            echo "--only takes walk, check, fanotify, index, engine or live ($usage)" >&2
-            exit 2
-            ;;
-        esac
+        # One step, or several with commas between: engine,live.
+        for step in ${2//,/ }; do
+            case $step in
+            walk | check | fanotify | index | engine | live) ;;
+            *)
+                echo "--only takes walk, check, fanotify, index, engine or live, or several with commas ($usage)" >&2
+                exit 2
+                ;;
+            esac
+        done
+        only=${2:-}
         shift
         ;;
     -h | --help)
-        sed -n '2,17s/^# \{0,1\}//p' "$0"
+        sed -n '2,/^set -euo/{/^#/s/^# \{0,1\}//p}' "$0"
         exit 0
         ;;
     -*)
@@ -48,8 +56,8 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-# Whether a step runs: every step, or the one --only names.
-want() { [ -z "$only" ] || [ "$only" = "$1" ]; }
+# Whether a step runs: every step, or those --only names.
+want() { [ -z "$only" ] || [[ ",$only," == *",$1,"* ]]; }
 if [ "$(id -u)" = 0 ]; then
     # As root, the home folder and the cache would be root's.
     echo "Run it as yourself: it asks for sudo when it needs it." >&2
