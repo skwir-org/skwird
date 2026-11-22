@@ -10,12 +10,13 @@
 //! time or kind passes over most of a chunk. A chunk whose bytes do not
 //! read as this layout is refused whole: the index is a cache, rebuilt.
 
+use std::borrow::Cow;
 use std::ops::{Deref, Range};
 
 use skwird_crawl::{Attrs, FileId, Kind, Time, Why};
 
 use crate::block::{Block, Facts, FolderId, Item, State};
-use crate::packed::{Layout, Malformed, Packed, from_signed, pack, to_signed};
+use crate::packed::{Layout, Malformed, Packed, from_signed, pack, patch, to_signed};
 
 const MAGIC: &[u8; 4] = b"SKWC";
 /// The layout's version: a change to the columns changes it.
@@ -148,61 +149,96 @@ pub(crate) fn state_of(code: u64, errno: u64) -> Option<State> {
 }
 
 /// The bytes of a chunk of `blocks`.
+/// The values of block `b`'s row, its entries ending at `end` over the
+/// chunk: what [`encode`] packs, and [`Chunk::patched`] compares.
+fn block_values(b: &Block, end: u64) -> [(usize, u64); I_NAME] {
+    let (state, errno) = state_code(b.state);
+    let facts = b.facts.unwrap_or(Facts {
+        id: FileId::default(),
+        ctime: Time::default(),
+        mtime: Time::default(),
+        owner: 0,
+        group: 0,
+        mode: 0,
+    });
+    [
+        (B_FOLDER, u64::from(b.folder)),
+        (B_PARENT, b.parent.map_or(0, |p| u64::from(p) + 1)),
+        (B_NAME, u64::from(b.name)),
+        (B_DEPTH, u64::from(b.depth)),
+        (B_END, end),
+        (B_STATE, state),
+        (B_ERRNO, errno),
+        (B_FACTS, u64::from(b.facts.is_some())),
+        (B_DEV, facts.id.dev),
+        (B_INO, facts.id.ino),
+        (B_CTIME, from_signed(facts.ctime.sec)),
+        (B_CTIME_NS, u64::from(facts.ctime.nsec)),
+        (B_MTIME, from_signed(facts.mtime.sec)),
+        (B_MTIME_NS, u64::from(facts.mtime.nsec)),
+        (B_OWNER, u64::from(facts.owner)),
+        (B_GROUP, u64::from(facts.group)),
+        (B_MODE, u64::from(facts.mode)),
+    ]
+}
+
+/// The values of an entry's row: what [`encode`] packs.
+fn item_values(item: &Item) -> [(usize, u64); Z_SIZE - I_NAME] {
+    let attrs = item.attrs.unwrap_or(Attrs {
+        size: 0,
+        alloc: 0,
+        mtime: Time::default(),
+        ctime: Time::default(),
+    });
+    let kind = kind_code(item.kind) | if item.attrs.is_some() { 4 } else { 0 };
+    [
+        (I_NAME, u64::from(item.name)),
+        (I_KIND, kind),
+        (I_INO, item.ino),
+        (I_SIZE, attrs.size),
+        (I_ALLOC, attrs.alloc),
+        (I_MTIME, from_signed(attrs.mtime.sec)),
+        (I_MTIME_NS, u64::from(attrs.mtime.nsec)),
+        (I_CTIME, from_signed(attrs.ctime.sec)),
+        (I_CTIME_NS, u64::from(attrs.ctime.nsec)),
+        (I_CHILD, item.child.map_or(0, |c| u64::from(c) + 1)),
+    ]
+}
+
+/// What a zone of entries sums up ([`Z_SIZE`] to [`Z_KINDS`]), from each
+/// entry's kind code, size and modification time.
+fn zone_values(entries: impl Iterator<Item = (u64, u64, u64)>) -> [(usize, u64); COLUMNS - Z_SIZE] {
+    let mut size = 0;
+    let (mut tmin, mut tmax) = (u64::MAX, 0);
+    let mut kinds = 0;
+    for (kind, s, mtime) in entries {
+        kinds |= 1 << (kind & 3);
+        // An entry without attributes is no size and no time, so a query
+        // on either passes over it; its zone says nothing of it.
+        if kind & 4 != 0 {
+            size = size.max(s);
+            tmin = tmin.min(mtime);
+            tmax = tmax.max(mtime);
+        }
+    }
+    [
+        (Z_SIZE, size),
+        (Z_MTIME_MIN, tmin),
+        (Z_MTIME_MAX, tmax),
+        (Z_KINDS, kinds),
+    ]
+}
+
 pub fn encode(blocks: &[Block]) -> Vec<u8> {
     let mut cols: Vec<Vec<u64>> = vec![Vec::new(); COLUMNS];
     let mut end = 0u64;
     for b in blocks {
-        let (state, errno) = state_code(b.state);
-        let facts = b.facts.unwrap_or(Facts {
-            id: FileId::default(),
-            ctime: Time::default(),
-            mtime: Time::default(),
-            owner: 0,
-            group: 0,
-            mode: 0,
-        });
         end += b.items.len() as u64;
-        for (c, v) in [
-            (B_FOLDER, u64::from(b.folder)),
-            (B_PARENT, b.parent.map_or(0, |p| u64::from(p) + 1)),
-            (B_NAME, u64::from(b.name)),
-            (B_DEPTH, u64::from(b.depth)),
-            (B_END, end),
-            (B_STATE, state),
-            (B_ERRNO, errno),
-            (B_FACTS, u64::from(b.facts.is_some())),
-            (B_DEV, facts.id.dev),
-            (B_INO, facts.id.ino),
-            (B_CTIME, from_signed(facts.ctime.sec)),
-            (B_CTIME_NS, u64::from(facts.ctime.nsec)),
-            (B_MTIME, from_signed(facts.mtime.sec)),
-            (B_MTIME_NS, u64::from(facts.mtime.nsec)),
-            (B_OWNER, u64::from(facts.owner)),
-            (B_GROUP, u64::from(facts.group)),
-            (B_MODE, u64::from(facts.mode)),
-        ] {
+        for (c, v) in block_values(b, end) {
             cols[c].push(v);
         }
         for item in &b.items {
-            let attrs = item.attrs.unwrap_or(Attrs {
-                size: 0,
-                alloc: 0,
-                mtime: Time::default(),
-                ctime: Time::default(),
-            });
-            let kind = kind_code(item.kind) | if item.attrs.is_some() { 4 } else { 0 };
-            for (c, v) in [
-                (I_NAME, u64::from(item.name)),
-                (I_KIND, kind),
-                (I_INO, item.ino),
-                (I_SIZE, attrs.size),
-                (I_ALLOC, attrs.alloc),
-                (I_MTIME, from_signed(attrs.mtime.sec)),
-                (I_MTIME_NS, u64::from(attrs.mtime.nsec)),
-                (I_CTIME, from_signed(attrs.ctime.sec)),
-                (I_CTIME_NS, u64::from(attrs.ctime.nsec)),
-                (I_CHILD, item.child.map_or(0, |c| u64::from(c) + 1)),
-            ] {
+            for (c, v) in item_values(item) {
                 cols[c].push(v);
             }
         }
@@ -210,38 +246,31 @@ pub fn encode(blocks: &[Block]) -> Vec<u8> {
     let items = cols[I_NAME].len();
     for zone in 0..items.div_ceil(ZONE) {
         let range = zone * ZONE..((zone + 1) * ZONE).min(items);
-        let mut size = 0;
-        let (mut tmin, mut tmax) = (u64::MAX, 0);
-        let mut kinds = 0;
-        for i in range {
-            kinds |= 1 << (cols[I_KIND][i] & 3);
-            // An entry without attributes is no size and no time, so a
-            // query on either passes over it; its zone says nothing of it.
-            if cols[I_KIND][i] & 4 != 0 {
-                size = size.max(cols[I_SIZE][i]);
-                tmin = tmin.min(cols[I_MTIME][i]);
-                tmax = tmax.max(cols[I_MTIME][i]);
-            }
+        let entries = range.map(|i| (cols[I_KIND][i], cols[I_SIZE][i], cols[I_MTIME][i]));
+        for (c, v) in zone_values(entries) {
+            cols[c].push(v);
         }
-        cols[Z_SIZE].push(size);
-        cols[Z_MTIME_MIN].push(tmin);
-        cols[Z_MTIME_MAX].push(tmax);
-        cols[Z_KINDS].push(kinds);
     }
     let packed: Vec<Vec<u8>> = cols.iter().map(|c| pack(c)).collect();
+    assemble(&packed)
+}
+
+/// A chunk's bytes, of its columns' bytes.
+fn assemble(columns: &[impl AsRef<[u8]>]) -> Vec<u8> {
     let head = 4 + 4 + 4 + 8 * (COLUMNS + 1);
-    let mut out = Vec::with_capacity(head + packed.iter().map(Vec::len).sum::<usize>());
+    let size: usize = columns.iter().map(|c| c.as_ref().len()).sum();
+    let mut out = Vec::with_capacity(head + size);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(COLUMNS as u32).to_le_bytes());
     let mut at = head as u64;
-    for col in &packed {
+    for col in columns {
         out.extend_from_slice(&at.to_le_bytes());
-        at += col.len() as u64;
+        at += col.as_ref().len() as u64;
     }
     out.extend_from_slice(&at.to_le_bytes());
-    for col in packed {
-        out.extend_from_slice(&col);
+    for col in columns {
+        out.extend_from_slice(col.as_ref());
     }
     out
 }
@@ -363,6 +392,104 @@ impl Chunk {
     pub fn decode(&self) -> Vec<Block> {
         let view = self.view();
         (0..self.blocks).map(|b| view.block(b)).collect()
+    }
+
+    /// The chunk with block `at` replaced by `block` of the same shape: the
+    /// same folder and place, its entries the same by name, kind, inode and
+    /// folder, only its facts, its state and their attributes changed.
+    /// Each value changed is patched into its column
+    /// ([`crate::packed::patch`]), and the zones of the entries changed
+    /// summed up again, so that a file written to costs what changed, not
+    /// what the chunk holds (DESIGN 8). It reads back as [`Chunk::new`]
+    /// would make it. None where the shape is not the same. `old` is block
+    /// `at` as decoded, by a caller that decoded it already.
+    pub fn patched(&self, at: usize, old: &Block, block: &Block) -> Option<Chunk> {
+        let view = self.view();
+        debug_assert_eq!(*old, view.block(at), "old is the chunk's block");
+        let same_shape = view.folder(at) == old.folder
+            && view.entries(at).len() == old.items.len()
+            && old.folder == block.folder
+            && old.parent == block.parent
+            && old.name == block.name
+            && old.depth == block.depth
+            && old.items.len() == block.items.len()
+            && old.items.iter().zip(&block.items).all(|(o, n)| {
+                o.name == n.name
+                    && o.kind == n.kind
+                    && o.ino == n.ino
+                    && o.child == n.child
+                    && o.attrs.is_some() == n.attrs.is_some()
+            });
+        if !same_shape {
+            return None;
+        }
+        // What changed, by what `old` holds: the rows alike are not read.
+        let mut changes: Vec<Vec<(usize, u64)>> = vec![Vec::new(); COLUMNS];
+        let end = view.col(B_END).get(at);
+        for ((c, v), (_, was)) in block_values(block, end)
+            .into_iter()
+            .zip(block_values(old, end))
+        {
+            if v != was {
+                changes[c].push((at, v));
+            }
+        }
+        let entries = view.entries(at);
+        let mut zones = std::collections::BTreeSet::new();
+        for (k, (item, was)) in block.items.iter().zip(&old.items).enumerate() {
+            if item == was {
+                continue;
+            }
+            let row = entries.start + k;
+            for ((c, v), (_, before)) in item_values(item).into_iter().zip(item_values(was)) {
+                if v != before {
+                    changes[c].push((row, v));
+                    zones.insert(row / ZONE);
+                }
+            }
+        }
+        let mut columns: Vec<Cow<'_, [u8]>> = (0..COLUMNS)
+            .map(|c| {
+                let bytes = self.column_bytes(c);
+                if changes[c].is_empty() {
+                    Ok(Cow::Borrowed(bytes))
+                } else {
+                    patch(bytes, &changes[c]).map(Cow::Owned)
+                }
+            })
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let mut zone_changes: Vec<Vec<(usize, u64)>> = vec![Vec::new(); COLUMNS];
+        if !zones.is_empty() {
+            let kinds = Packed::read(&columns[I_KIND]).ok()?;
+            let sizes = Packed::read(&columns[I_SIZE]).ok()?;
+            let mtimes = Packed::read(&columns[I_MTIME]).ok()?;
+            for z in zones {
+                let range = z * ZONE..((z + 1) * ZONE).min(self.items);
+                let entries = range.map(|i| (kinds.get(i), sizes.get(i), mtimes.get(i)));
+                for (c, v) in zone_values(entries) {
+                    if view.col(c).get(z) != v {
+                        zone_changes[c].push((z, v));
+                    }
+                }
+            }
+        }
+        for (c, changed) in zone_changes.iter().enumerate() {
+            if !changed.is_empty() {
+                columns[c] = Cow::Owned(patch(&columns[c], changed).ok()?);
+            }
+        }
+        Chunk::from_bytes(Bytes::Owned(assemble(&columns).into_boxed_slice())).ok()
+    }
+
+    /// Column `c`'s bytes, as the header places them.
+    fn column_bytes(&self, c: usize) -> &[u8] {
+        let offset = |i: usize| {
+            let at = 12 + i * 8;
+            let raw: [u8; 8] = self.bytes[at..at + 8].try_into().unwrap_or_default();
+            usize::try_from(u64::from_le_bytes(raw)).unwrap_or(0)
+        };
+        &self.bytes[offset(c)..offset(c + 1)]
     }
 }
 
@@ -523,8 +650,59 @@ impl View<'_> {
             depth: self.depth(b),
             facts: self.facts(b),
             state: self.state(b),
-            items: self.entries(b).map(|i| self.item(i)).collect(),
+            items: self.items(self.entries(b)),
         }
+    }
+
+    /// The entries of `range`, as [`View::item`] reads each, every column
+    /// decoded a run at a time: a large folder read again decodes its
+    /// block, and a value at a time cost most of it.
+    #[allow(clippy::cast_possible_truncation)] // as `item`: the values were packed from these types
+    fn items(&self, range: Range<usize>) -> Vec<Item> {
+        // Shorter than a run, a value at a time is the cheaper.
+        if range.len() < crate::packed::RUN {
+            return range.map(|i| self.item(i)).collect();
+        }
+        let col = |c: usize| self.values(c, range.clone());
+        let (names, kinds, inos, children) = (col(I_NAME), col(I_KIND), col(I_INO), col(I_CHILD));
+        let attrs = [I_SIZE, I_ALLOC, I_MTIME, I_MTIME_NS, I_CTIME, I_CTIME_NS].map(col);
+        (0..range.len())
+            .map(|k| Item {
+                name: names[k] as u32,
+                kind: kind_of(kinds[k]),
+                ino: inos[k],
+                attrs: (kinds[k] & 4 != 0).then(|| Attrs {
+                    size: attrs[0][k],
+                    alloc: attrs[1][k],
+                    mtime: Time {
+                        sec: to_signed(attrs[2][k]),
+                        nsec: attrs[3][k] as u32,
+                    },
+                    ctime: Time {
+                        sec: to_signed(attrs[4][k]),
+                        nsec: attrs[5][k] as u32,
+                    },
+                }),
+                child: children[k].checked_sub(1).map(|c| c as FolderId),
+            })
+            .collect()
+    }
+
+    /// Column `c`'s values over `range`, decoded a run at a time.
+    fn values(&self, c: usize, range: Range<usize>) -> Vec<u64> {
+        let column = self.cols[c];
+        let mut out = Vec::with_capacity(range.len());
+        let mut run = [0u64; crate::packed::RUN];
+        let mut i = range.start;
+        while i < range.end {
+            let r = i / crate::packed::RUN;
+            let first = r * crate::packed::RUN;
+            let n = column.decode_run(r, &mut run);
+            let to = (range.end - first).min(n);
+            out.extend_from_slice(&run[i - first..to]);
+            i = first + to;
+        }
+        out
     }
 }
 
@@ -621,6 +799,75 @@ mod tests {
         let (largest, _, _, kinds) = view.zone(0);
         assert_eq!(largest, u64::MAX);
         assert_eq!(kinds, 0b11, "files and a folder");
+    }
+
+    /// A chunk patched block by block reads back as one made anew of the
+    /// same blocks, zones and all, whether the new values fit their runs
+    /// or not; a change of shape is refused.
+    #[test]
+    fn a_patched_chunk_reads_as_one_made_anew() {
+        type Edit = (usize, Box<dyn Fn(&mut Block)>);
+        let mut want = sample();
+        let mut chunk = Chunk::new(&want);
+        let zones = |c: &Chunk| {
+            let view = c.view();
+            (0..c.entries().div_ceil(ZONE))
+                .map(|z| view.zone(z))
+                .collect::<Vec<_>>()
+        };
+        let edits: Vec<Edit> = vec![
+            // A file written to: a little larger, a little later.
+            (
+                2,
+                Box::new(|b| {
+                    let a = b.items[5].attrs.as_mut().unwrap();
+                    a.size += 3;
+                    a.mtime.nsec = 7;
+                }),
+            ),
+            // Far out of its run: emptied, and written now.
+            (
+                2,
+                Box::new(|b| {
+                    let a = b.items[2000].attrs.as_mut().unwrap();
+                    a.size = 0;
+                    a.alloc = 0;
+                    a.mtime.sec = 1_795_000_000;
+                    a.ctime.sec = -5;
+                }),
+            ),
+            // The folder's own facts and state.
+            (
+                2,
+                Box::new(|b| {
+                    b.facts.as_mut().unwrap().mtime.sec += 60;
+                    b.state = State::Listed { again: true };
+                }),
+            ),
+            // The largest size of the first zone, lowered.
+            (
+                0,
+                Box::new(|b| {
+                    b.items[2].attrs.as_mut().unwrap().size = 5;
+                }),
+            ),
+        ];
+        for (n, (at, edit)) in edits.iter().enumerate() {
+            edit(&mut want[*at]);
+            let old = chunk.block(*at);
+            chunk = chunk.patched(*at, &old, &want[*at]).expect("same shape");
+            assert_eq!(chunk.decode(), want, "edit {n}");
+            assert_eq!(zones(&chunk), zones(&Chunk::new(&want)), "edit {n}'s zones");
+        }
+        let mut renamed = want[2].clone();
+        renamed.items[0].name += 1;
+        assert!(
+            chunk.patched(2, &want[2], &renamed).is_none(),
+            "a name changed"
+        );
+        let mut more = want[0].clone();
+        more.items.push(more.items[0]);
+        assert!(chunk.patched(0, &want[0], &more).is_none(), "an entry made");
     }
 
     #[test]

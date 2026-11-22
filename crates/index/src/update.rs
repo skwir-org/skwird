@@ -232,15 +232,22 @@ impl Index {
     /// by identity, keeps its block and what is below it; one gone, or
     /// another in its place, takes its subtree with it.
     pub fn reread(&mut self, folder: FolderId, facts: Option<Facts>, seen: Seen) -> Reread {
-        let Some(old) = self.tree().block(folder) else {
-            return Reread::default();
-        };
+        match self.tree().block(folder) {
+            Some(old) => self.reread_block(&old, facts, seen),
+            None => Reread::default(),
+        }
+    }
+
+    /// [`Index::reread`], of `old`, its folder's block as the tree holds it
+    /// now, decoded once by the caller.
+    pub fn reread_block(&mut self, old: &Block, facts: Option<Facts>, seen: Seen) -> Reread {
+        let folder = old.folder;
         let mut m = Merged::default();
         let facts = facts.or(old.facts);
         let (state, items) = match seen {
             Seen::Listed { again, entries } => (
                 State::Listed { again },
-                self.merge(folder, &old, entries, &mut m),
+                self.merge(folder, old, entries, &mut m),
             ),
             // Never kept: a private folder's names, a mount's. Their
             // removal is not logged entry by entry: a purge starts another
@@ -267,8 +274,12 @@ impl Index {
             state,
             items,
         };
-        if block != old {
-            self.tree_mut().replace(block);
+        if block != *old {
+            // A file written to, its folder the same shape: its chunk
+            // patched, not cut again.
+            if !self.tree_mut().patch(old, &block) {
+                self.tree_mut().replace(block);
+            }
         }
         for child in m.gone {
             self.tree_mut().remove(child);
@@ -387,12 +398,9 @@ impl Index {
         items
     }
 
-    /// The entries of `folder` as it was read, by name, but those of
+    /// The entries of `block` as it was read, by name, but those of
     /// `touched`: what a read that stats the entries heard alone keeps.
-    pub fn known_entries(&self, folder: FolderId, touched: &HashSet<Box<[u8]>>) -> Known<'_> {
-        let Some(block) = self.tree().block(folder) else {
-            return Known::default();
-        };
+    pub fn known_entries(&self, block: &Block, touched: &HashSet<Box<[u8]>>) -> Known<'_> {
         let dev = block.facts.map_or(0, |f| f.id.dev);
         let mut known = Known::with_capacity(block.items.len());
         for item in &block.items {
@@ -718,6 +726,10 @@ fn apply(
                 "the root was replaced since it was opened",
             )));
         }
+        // Its block, decoded once for what it knew and the merge.
+        let Some(old) = index.tree().block(folder) else {
+            continue;
+        };
         let (found, seen) = match stale {
             Stale::Mount => (None, Seen::NotCovered(Why::Mount)),
             Stale::NetworkMount => (None, Seen::NotCovered(Why::NetworkMount)),
@@ -727,7 +739,7 @@ fn apply(
                 let kept = Cell::new(0);
                 let (found, outcome, watch) = match named.get(i).copied().flatten() {
                     Some(touched) => {
-                        let known = index.known_entries(folder, touched);
+                        let known = index.known_entries(&old, touched);
                         read_folder_reusing(root, stored.rel(i), opts, &|name, ino, kind| {
                             let entry = known.get(name).filter(|e| {
                                 e.id.ino == ino && (kind == Kind::Other || e.kind == kind)
@@ -757,7 +769,7 @@ fn apply(
             Seen::Listed { entries, .. } => entries.len(),
             Seen::NotCovered(_) => 0,
         };
-        let reread = index.reread(folder, folder_facts, seen);
+        let reread = index.reread_block(&old, folder_facts, seen);
         fresh.extend(reread.fresh);
         done.records.push(Record::Folder(FolderRecord {
             path: stored.rel(i).to_path_buf(),

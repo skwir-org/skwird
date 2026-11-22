@@ -6,7 +6,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -511,4 +511,52 @@ fn a_folder_with_an_acl_is_kept_like_any() {
         .unwrap();
         assert_eq!(ours(k.index()), of_walk(s.path()));
     }
+}
+
+/// A file written to, heard by its name (its chunk patched, DESIGN 8): its
+/// new size is answered, a query on size finding it by its zone, and it
+/// is saved and read back so, under its chunk's new number. That the
+/// patch reads as a chunk made anew is `chunk`'s test; this one holds its
+/// place in the keeper: the places it moves, the zones, the save.
+#[test]
+fn a_file_written_to_is_patched_saved_and_read_back() {
+    let s = Scratch::new("keeper-patch");
+    for i in 0..30 {
+        s.file(format!("a/entry-{i:02}"));
+        s.file(format!("b/entry-{i:02}"));
+    }
+    let (mut k, _) = keeper(&s);
+    let sized = |index: &Index| -> Vec<PathBuf> {
+        let query = Query {
+            size: Some(4321..=4321),
+            ..Query::default()
+        };
+        index
+            .query(index.root().unwrap(), &query)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.path)
+            .collect()
+    };
+    assert_eq!(sized(k.index()), Vec::<PathBuf>::new());
+    let before = k.index().tree().chunk_ids().to_vec();
+    std::fs::write(s.join("a/entry-07"), vec![b'x'; 4321]).unwrap();
+    let folder = k.index().folder_at(Path::new("a")).unwrap();
+    let names: HashSet<Box<[u8]>> = [Box::from(&b"entry-07"[..])].into();
+    k.heard_named(&[(folder, Some(names))], &Cancel::default())
+        .unwrap();
+    assert_eq!(sized(k.index()), vec![PathBuf::from("a/entry-07")]);
+    let after = k.index().tree().chunk_ids().to_vec();
+    assert_eq!(after.len(), before.len(), "no chunk cut again");
+    assert_eq!(
+        after.iter().filter(|id| !before.contains(id)).count(),
+        1,
+        "the folder's chunk under a number of its own"
+    );
+    k.save().unwrap();
+    drop(k);
+    let (k, opened) = keeper(&s);
+    assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
+    assert_eq!(sized(k.index()), vec![PathBuf::from("a/entry-07")]);
+    assert_eq!(ours(k.index()), of_walk(s.path()));
 }

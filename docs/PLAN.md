@@ -1339,6 +1339,16 @@ committed once the gate holds.
    engine's warm sync takes 1.16 s where phase 1 measured 0.43 s, its
    cause not found yet.
 
+   **A cheaper read** (the user's go-ahead, 2026-11-22). A trial of the
+   index crate (`tests/reread_cost.rs`, ignored, an index of 900,000
+   entries) showed a folder of 8 entries read again for one file at
+   2.4 ms, its chunk decoded and encoded whole. A block of the same shape
+   (a file written to) is now patched into its chunk, and a block decoded
+   once a read, a run at a time (DESIGN 8): 60 µs for 8 entries, 1.2 ms
+   for 3,000, 30 ms for 60,000, against 2.4, 3.4 and 42. Measured on a
+   machine at a load of 7 to 19, whose own work made the root tests'
+   machine's trials say nothing this time; to be measured again, quiet.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

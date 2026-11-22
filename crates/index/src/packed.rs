@@ -268,6 +268,69 @@ impl<'a> Packed<'a> {
     }
 }
 
+/// The column `bytes` with each value `(i, value)` of `changes` set: in
+/// place where every value fits its run (at least its least value, within
+/// its width), so that a file's new size or time costs its own bits; the
+/// column packed again otherwise. Either reads back alike.
+pub fn patch(bytes: &[u8], changes: &[(usize, u64)]) -> Result<Vec<u8>, Malformed> {
+    let layout = Layout::read(bytes)?;
+    if changes.iter().any(|&(i, _)| i >= layout.len) {
+        return Err(Malformed);
+    }
+    let run_of = |bytes: &[u8], i: usize| {
+        let run = i / RUN;
+        (
+            run,
+            u64_at(&bytes[layout.bases.clone()], run),
+            u32::from(bytes[layout.widths.start + run]),
+        )
+    };
+    let fits = changes.iter().all(|&(i, v)| {
+        let (_, base, width) = run_of(bytes, i);
+        v >= base && (width == 64 || (v - base) >> width == 0)
+    });
+    if !fits {
+        let column = Packed::new(bytes, &layout);
+        let mut values: Vec<u64> = (0..layout.len).map(|i| column.get(i)).collect();
+        for &(i, v) in changes {
+            values[i] = v;
+        }
+        return Ok(pack(&values));
+    }
+    let mut out = bytes.to_vec();
+    for &(i, v) in changes {
+        let (run, base, width) = run_of(&out, i);
+        if width == 0 {
+            continue; // the run's one value, which it fits
+        }
+        let bit = u64_at(&out[layout.starts.clone()], run) + (i % RUN) as u64 * u64::from(width);
+        set_bits(&mut out[layout.words.clone()], bit, width, v - base);
+    }
+    Ok(out)
+}
+
+/// Write `value`'s `width` bits at `bit` of the little-endian `words`,
+/// clearing what was there.
+fn set_bits(words: &mut [u8], bit: u64, width: u32, value: u64) {
+    let word = (bit / 64) as usize;
+    let shift = (bit % 64) as u32;
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    let put = |words: &mut [u8], i: usize, w: u64| {
+        words[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+    };
+    let low = (u64_at(words, word) & !(mask << shift)) | (value << shift);
+    put(words, word, low);
+    if shift + width > 64 {
+        let written = 64 - shift;
+        let high = (u64_at(words, word + 1) & !(mask >> written)) | (value >> written);
+        put(words, word + 1, high);
+    }
+}
+
 /// A signed value in the order of unsigned ones: times before 1970 pack
 /// as well as times after.
 pub fn from_signed(v: i64) -> u64 {
@@ -311,6 +374,58 @@ mod tests {
         round_trip(&signed);
         assert_eq!(to_signed(from_signed(-42)), -42);
         assert!(from_signed(-1) < from_signed(0));
+    }
+
+    /// A column patched reads back as one packed with the values changed,
+    /// in place where they fit their runs and packed again where not; its
+    /// runs' bounds still hold every value.
+    #[test]
+    fn a_patched_column_reads_as_one_packed_so() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for trial in 0..400 {
+            let len = 1 + (next() % 700) as usize;
+            let spread = [0, 1, 1 << 10, 1 << 31, u64::MAX][trial % 5];
+            let base = next() % (1 << 40);
+            let mut values: Vec<u64> = (0..len)
+                .map(|_| {
+                    base.wrapping_add(if spread == 0 {
+                        0
+                    } else {
+                        next() % spread.max(1)
+                    })
+                })
+                .collect();
+            let bytes = pack(&values);
+            let changes: Vec<(usize, u64)> = (0..=(next() % 4))
+                .map(|_| {
+                    let i = (next() % len as u64) as usize;
+                    // Mostly within the run's reach, sometimes far out.
+                    let v = if next() % 3 == 0 {
+                        next()
+                    } else {
+                        values[i].wrapping_add(next() % 16).wrapping_sub(8)
+                    };
+                    (i, v)
+                })
+                .collect();
+            for &(i, v) in &changes {
+                values[i] = v;
+            }
+            let patched = patch(&bytes, &changes).unwrap();
+            let column = Packed::read(&patched).unwrap();
+            for (i, &v) in values.iter().enumerate() {
+                assert_eq!(column.get(i), v, "trial {trial}, value {i}");
+                let (low, high) = column.run_bounds(i);
+                assert!(low <= v && v <= high, "trial {trial}, value {i}'s run");
+            }
+        }
+        assert_eq!(patch(&pack(&[1, 2]), &[(2, 0)]), Err(Malformed));
     }
 
     #[test]

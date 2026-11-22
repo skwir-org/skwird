@@ -282,6 +282,42 @@ impl Tree {
         self.place(at, 1, blocks);
     }
 
+    /// Put `block`, of the same shape as its folder's block
+    /// ([`Chunk::patched`]), in place of it: its chunk patched, not decoded
+    /// and cut again, so that a file written to costs what changed. The
+    /// chunk takes a number of its own, as any chunk changed does, so that
+    /// no file a saved manifest names is written over; its blocks keep
+    /// their places in it, and the shape is the same. Whether it was:
+    /// false, and nothing done, where its shape is not the same.
+    /// `old` is the folder's block as the tree holds it now.
+    pub fn patch(&mut self, old: &Block, block: &Block) -> bool {
+        let Some(loc) = self.loc(block.folder) else {
+            return false;
+        };
+        let Some(chunk) = self.chunks[&loc.chunk].patched(loc.block as usize, old, block) else {
+            return false;
+        };
+        let id = self.next_chunk;
+        self.next_chunk += 1;
+        let at = self.position(loc.chunk);
+        self.order[at] = id;
+        self.chunks.remove(&loc.chunk);
+        {
+            let view = chunk.view();
+            for b in 0..chunk.len() {
+                self.locs.set(
+                    view.folder(b) as usize,
+                    Some(Loc {
+                        chunk: id,
+                        block: b as u32,
+                    }),
+                );
+            }
+        }
+        self.chunks.insert(id, Arc::new(chunk));
+        true
+    }
+
     /// Insert `blocks`, folders' subtrees in pre-order, right after the
     /// own block of `parent`: their depths and the top ones' parents must
     /// already say so, and their numbers come from [`Tree::alloc`].

@@ -16,6 +16,7 @@ skwird-crawl.workspace = true
 rustix = { workspace = true, features = ["mm"] }
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["mm", "time"] }
 globset = "0.4.21"
 skwird-testkit.workspace = true
 

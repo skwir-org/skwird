@@ -852,6 +852,32 @@ folders read again over and over. Two changes:
 An index saved with larger chunks is cut down to the new size a chunk
 at a time, as changes rewrite them.
 
+**A file written to costs what changed** (2026-11-22, the user agreeing
+to make a read cheaper, after the writer's account). What a busy machine
+lags is a read's cost (above), and most reads are of a file written to:
+its name, kind, inode and place the same, its size and times new. A
+folder of 8 entries read again cost 2.4 ms, a folder of 3,000 3.4 ms:
+the chunk around them decoded whole and cut and encoded again. Now:
+- **such a block is patched into its chunk** (`Chunk::patched`). Each
+  value changed is written in place where it fits its run (at least
+  its least value, within its width, so the runs' bounds a scan passes
+  over by stay true), its column alone packed again where not. The
+  zones of the entries changed are summed up again. The patched chunk
+  reads back as one made anew, a test proves, and takes a number of its
+  own, as any chunk changed does, so that no file a saved manifest names
+  is written over. A folder made, removed or renamed, or an entry made
+  or removed, cuts its chunk again as before;
+- **a block is decoded once a read,** not three times (for what it
+  knew, the merge, the patch), and a block of a run or more a run at a
+  time: 2.5 times faster than a value at a time for 3,000 entries.
+
+On the host, built optimised, in an index of 900,000 entries
+(`crates/index/tests/reread_cost.rs`), a folder of 8 entries read again
+for one file took 60 µs, not 2.4 ms; one of 3,000, 1.2 ms, not 3.4; one
+of 60,000, 30 ms, not 42. What is left of a large folder's read is its
+own entries: the listing, the map of what it knew (hashed with SipHash,
+which names chosen by another user cannot flood), the merge.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three
