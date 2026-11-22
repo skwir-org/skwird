@@ -88,6 +88,21 @@ configured:
 
 A configuration file names other exclusions, as a user's does (5).
 
+**As built** (phase 3, step 4): `skwird serve --system` finds its roots
+in the mount table, unless named (`--root`). Each is the point of a
+mount of a filesystem that stores files (ext2 to 4, btrfs, xfs, f2fs,
+bcachefs, zfs, jfs, reiserfs, nilfs2, vfat, exfat, ntfs, hfsplus), not
+removable (a disk the kernel says is, or one on a USB bus), not
+reaching a network, not the Nix store, and shown once: a bind mount of
+what another mount shows already is left out. Its folders are its
+service manager's (`RUNTIME_DIRECTORY`, `CACHE_DIRECTORY`,
+`STATE_DIRECTORY`, `CONFIGURATION_DIRECTORY`) or `/run/skwird`,
+`/var/cache/skwird`, `/var/lib/skwird` and `/etc/skwird`; its socket
+is open to every user (the folder 0755, the socket 0666), its index and
+state its own (0700). Not yet: a filesystem mounted after it started is
+a hole until it starts again, and a query at a folder above several
+roots (`/`) is answered from the root holding it, the others holes.
+
 An engine a client starts runs in a process group of its own, so that a
 terminal's interrupt does not reach it, but in the client's control
 group. Where a service manager runs the client, the engine ends with the
@@ -315,10 +330,21 @@ proved as root in the test machine on Linux 6.18.58):
   found in the mount table when they are read, and known to be that
   mount by its mount id: a mount put over its point since is not taken
   for it, and the handle fails to open rather than open to another
-  folder.
-- **An event names its folder by handle;** opened and stat-ed, the
-  handle gives the folder's device and inode, as the index keeps them.
-  Each handle heard opened to its folder, in its own subvolume.
+  folder. A root's own folder is held open only while it is read, and
+  opened again after, known by its identity and mount id (step 4): its
+  mount gone, the root is not covered, never read as the folder under it.
+  A test unmounts a root between two reads.
+- **An event names its folder by handle;** opened through a mount of
+  its filesystem, the handle gives the folder's device and inode, as the
+  index keeps them, and its path through that mount. The path is taken
+  only if, stat-ed again following no link, it is that folder; each
+  mount is tried in turn, and a folder none reaches (in a btrfs
+  subvolume mounted nowhere) is unreachable, in no root. The engine
+  finds the folder in the root holding the path, by its path and known
+  by its identity, so that a folder put in its place is not taken for
+  it; one the index does not hold there yet is brought in by its
+  parent's event. Each handle heard opened to its folder, in its own
+  subvolume, at its path.
 - **A handle that no longer opens (`ESTALE`) is a folder gone,** and
   proves nothing lost. A folder is emptied before it is removed, and
   the removal of the topmost folder removed is heard in its parent,
@@ -882,3 +908,9 @@ it at once.
    answered (2): never crawled.
 9. **The name:** whether `skwird` is free in the distributions. No
    crate is published on crates.io (the user's choice, 2026-11-11).
+10. **Snapshots** (found on 2026-11-22, phase 3, step 4): a btrfs
+    snapshot is a subvolume, not a mount, so a root holding snapshots
+    (snapper's `/.snapshots`, timeshift's, btrbk's) would index each
+    whole, a copy of the system each. Proposed: snapshots, read-only
+    subvolumes, are not covered (snapshot), as a network mount is not;
+    a client that wants one names it as a root. For the user.

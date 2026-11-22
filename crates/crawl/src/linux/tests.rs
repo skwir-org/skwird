@@ -465,7 +465,7 @@ fn the_check_reaches_folders_deeper_than_a_path_can_name() {
     assert_eq!(stored.len(), 302, "the root, deep, and 300 levels");
     assert!(verdicts(&root, &stored).is_empty());
     // Add a file at the bottom through its handle, as no path reaches it.
-    let fd = open_beneath(&root.fd, &bottom).unwrap();
+    let fd = open_beneath(&root.dir().unwrap(), &bottom).unwrap();
     rustix::fs::openat(
         &fd,
         "added",

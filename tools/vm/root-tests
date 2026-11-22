@@ -16,11 +16,11 @@ out=$here/target/vm-tests
 rm -rf "$out"
 mkdir -p "$out"
 
-# Each test binary cargo makes for a root* target, copied where the
-# machine sees it.
+# Each test binary cargo makes for a root* target, and the program they
+# run (skwird), copied where the machine sees it.
 cargo test --manifest-path "$here/Cargo.toml" --no-run --workspace --test 'root*' \
   --message-format=json-render-diagnostics "$@" |
-  jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' |
+  jq -r 'select(.reason == "compiler-artifact" and .executable != null and (.profile.test or .target.name == "skwird")) | .executable' |
   while read -r exe; do cp "$exe" "$out/"; done
 [ -n "$(ls -A "$out")" ] || { echo "no root tests built" >&2; exit 1; }
 

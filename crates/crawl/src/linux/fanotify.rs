@@ -210,17 +210,25 @@ impl Group {
     }
 }
 
-/// Opens folders' handles, through a mount of their filesystem it opens
-/// once and keeps while it lives: one for each batch of events.
+/// Opens folders' handles, and says where each folder is: through each
+/// mount of its filesystem in turn, opened once and kept while it lives,
+/// one for each batch of events.
 pub struct Resolver<'a> {
     group: &'a Group,
     table: &'a Table,
-    /// A mount's folder opened, by events' id, or why none could be.
-    opened: HashMap<u64, Result<OwnedFd, i32>>,
+    /// The mounts of a filesystem opened, by events' id, or why none
+    /// could be.
+    opened: HashMap<u64, Result<Vec<OwnedFd>, i32>>,
 }
 
 impl Resolver<'_> {
-    /// The folder `folder`'s handle opens to.
+    /// What `folder`'s handle opens to, and where that folder is.
+    ///
+    /// A handle opened through a mount gives the folder's path as that
+    /// mount reaches it. The path is taken only if it, stat-ed again
+    /// following no link, is the folder opened: a folder that mount does
+    /// not reach (in a btrfs subvolume mounted elsewhere, or nowhere) is
+    /// tried through the next, and is unreachable if none reaches it.
     pub fn resolve(&mut self, folder: &Folder) -> Resolved {
         let dev = {
             let state = self.group.lock();
@@ -230,45 +238,75 @@ impl Resolver<'_> {
             }
         };
         let table = self.table;
-        let on = self
+        let mounts = self
             .opened
             .entry(folder.fsid)
-            .or_insert_with(|| open_mount_of(table, dev));
-        let on = match on.as_ref() {
-            Ok(fd) => fd.as_fd(),
+            .or_insert_with(|| open_mounts_of(table, dev));
+        let mounts = match mounts {
+            Ok(m) => m,
             Err(e) => return Resolved::Failed(*e),
         };
-        match open_handle(on, &folder.handle) {
-            Ok(fd) => match rustix::fs::fstat(&fd) {
-                Ok(st) => Resolved::Is(FileId {
+        let mut opened = None;
+        let mut last = libc::ENOENT;
+        for on in mounts.iter() {
+            let fd = match open_handle(on.as_fd(), &folder.handle) {
+                Ok(fd) => fd,
+                Err(e) if e == libc::ESTALE => return Resolved::Gone,
+                Err(e) => {
+                    last = e;
+                    continue;
+                }
+            };
+            let id = match rustix::fs::fstat(&fd) {
+                Ok(st) => FileId {
                     dev: st.st_dev,
                     ino: st.st_ino,
-                }),
-                Err(e) => Resolved::Failed(e.raw_os_error()),
-            },
-            Err(e) if e == libc::ESTALE => Resolved::Gone,
-            Err(e) => Resolved::Failed(e),
+                },
+                Err(e) => return Resolved::Failed(e.raw_os_error()),
+            };
+            opened = Some(id);
+            if let Some(path) = reached(&fd, id) {
+                return Resolved::At(path, id);
+            }
+        }
+        match opened {
+            Some(id) => Resolved::Unreachable(id),
+            None => Resolved::Failed(last),
         }
     }
 }
 
-/// A folder of a mount of the filesystem of device `dev`, as the mount
-/// table names it, opened and known to be that mount by its id: a mount
-/// put over its point since the table was read is not taken for it.
-fn open_mount_of(table: &Table, dev: (u32, u32)) -> Result<OwnedFd, i32> {
+/// The path the open folder `fd`, of identity `id`, has through the mount
+/// it was opened through, if that path is the folder.
+fn reached(fd: &OwnedFd, id: FileId) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()?;
+    let there = std::fs::symlink_metadata(&path).ok()?;
+    (path.is_absolute() && there.dev() == id.dev && there.ino() == id.ino).then_some(path)
+}
+
+/// The mounts of the filesystem of device `dev` the mount table names,
+/// each opened and known to be that mount by its id: a mount put over its
+/// point since the table was read is not taken for it.
+fn open_mounts_of(table: &Table, dev: (u32, u32)) -> Result<Vec<OwnedFd>, i32> {
     let mut last = libc::ENOENT;
+    let mut opened = Vec::new();
     // The topmost mount at a point is the later in the table.
     for mount in table.mounts().iter().rev().filter(|m| m.dev == dev) {
         let Ok(fd) = rustix::fs::open(&mount.point, FOLDER, Mode::empty()) else {
             continue;
         };
         match rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
-            Ok(st) if st.stx_mnt_id == mount.id => return Ok(fd),
+            Ok(st) if st.stx_mnt_id == mount.id => opened.push(fd),
             Ok(_) => last = libc::EXDEV,
             Err(e) => last = e.raw_os_error(),
         }
     }
-    Err(last)
+    if opened.is_empty() {
+        Err(last)
+    } else {
+        Ok(opened)
+    }
 }
 
 /// Mark the whole filesystem of the open folder `on`.

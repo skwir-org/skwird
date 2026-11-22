@@ -33,47 +33,62 @@ fn the_machine_has_its_filesystems() {
     assert_eq!(std::fs::metadata(m.btrfs.join("a")).unwrap().ino(), 256);
 }
 
+/// A root read lets go of its folder, so that its filesystem can be
+/// unmounted between reads; read again, it is opened again; its mount gone,
+/// it is not covered, never read as the folder under it.
+#[test]
+fn a_root_holds_its_filesystem_only_while_read() {
+    use skwird_crawl::{Cancel, Exclusions, Options, Root, crawl_all};
+    let Some(m) = machine() else { return };
+    let point = m.ext4.join(format!("unmountable-{}", std::process::id()));
+    std::fs::create_dir_all(&point).unwrap();
+    let mount = || {
+        rustix::mount::mount(
+            "none",
+            &point,
+            "tmpfs",
+            rustix::mount::MountFlags::empty(),
+            None,
+        )
+    };
+    let unmount = || rustix::mount::unmount(&point, rustix::mount::UnmountFlags::empty());
+    mount().unwrap();
+    std::fs::create_dir_all(point.join("inside")).unwrap();
+    let root = Root::open(&point, Exclusions::default()).unwrap();
+    let read = || crawl_all(&root, &Options::default(), &Cancel::default());
+    assert_eq!(read().unwrap().folders.len(), 2);
+    assert_eq!(unmount(), Err(rustix::io::Errno::BUSY), "held while read");
+    root.let_go();
+    assert_eq!(read().unwrap().folders.len(), 2, "opened again");
+    root.let_go();
+    unmount().unwrap();
+    // Its mount gone, the folder there is another: the root is not read.
+    let after = read().unwrap();
+    assert_eq!(after.folders.len(), 1);
+    assert!(
+        matches!(
+            after.folders[0].outcome,
+            skwird_crawl::Outcome::NotCovered(_)
+        ),
+        "{:?}",
+        after.folders[0].outcome
+    );
+    std::fs::remove_dir(&point).unwrap();
+}
+
 mod fanotify {
     // The machine, a group, the table and a resolver, in every test: short
     // names read best beside the closures' own.
     #![allow(clippy::many_single_char_names)]
 
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use skwird_crawl::FileId;
     use skwird_crawl::fanotify::{Folder, Group, Heard, Refused, Resolved, Through};
     use skwird_crawl::mounts::Table;
-    use skwird_testkit::machine;
-
-    /// A folder of the test's own on one of the machine's filesystems,
-    /// removed when dropped.
-    struct Place(PathBuf);
-
-    impl Place {
-        fn new(on: &Path, label: &str) -> Place {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = on.join(format!(
-                "{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Place(std::fs::canonicalize(path).unwrap())
-        }
-
-        fn join(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-    }
-
-    impl Drop for Place {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use skwird_testkit::{Place, machine};
 
     fn table() -> Table {
         Table::read().unwrap()
@@ -85,6 +100,11 @@ mod fanotify {
             dev: m.dev(),
             ino: m.ino(),
         }
+    }
+
+    /// What a folder's handle should resolve to: its path and identity.
+    fn at(path: &Path) -> Resolved {
+        Resolved::At(path.to_path_buf(), id(path))
     }
 
     /// What `g` hears until `done` holds of it, failing after 5 s.
@@ -151,7 +171,7 @@ mod fanotify {
             assert!(!folders.is_empty(), "{name} not heard");
             for f in folders {
                 assert_eq!(f.fsid, marked.fsid);
-                assert_eq!(r.resolve(f), Resolved::Is(id(&folder)), "{name}");
+                assert_eq!(r.resolve(f), at(&folder), "{name}");
             }
         }
         // Marked once: a second ask says so.
@@ -183,7 +203,7 @@ mod fanotify {
         for (p, name) in places.iter().zip(&names) {
             for f in heard_in(&heard, name) {
                 assert_eq!(f.fsid, marked.fsid, "the mark's id, whatever the subvolume");
-                assert_eq!(r.resolve(f), Resolved::Is(id(&p.0)), "{name}");
+                assert_eq!(r.resolve(f), at(&p.0), "{name}");
             }
         }
     }
@@ -222,7 +242,7 @@ mod fanotify {
             assert_eq!(r.resolve(f), Resolved::Gone);
         }
         for f in heard_in(&heard, "x-removed") {
-            assert_eq!(r.resolve(f), Resolved::Is(id(&place.0)));
+            assert_eq!(r.resolve(f), at(&place.0));
         }
     }
 
@@ -243,8 +263,8 @@ mod fanotify {
             .into_iter()
             .map(|f| r.resolve(f))
             .collect();
-        assert!(parents.contains(&Resolved::Is(id(&place.join("from")))));
-        assert!(parents.contains(&Resolved::Is(id(&place.join("to")))));
+        assert!(parents.contains(&at(&place.join("from"))));
+        assert!(parents.contains(&at(&place.join("to"))));
     }
 
     /// A folder's own attributes changed (its mode) are heard as the folder
@@ -281,10 +301,7 @@ mod fanotify {
             .collect();
         assert_eq!(
             said,
-            [format!(
-                "changed {:?}",
-                Resolved::Is(id(&place.join("private-ish")))
-            )],
+            [format!("changed {:?}", at(&place.join("private-ish")))],
             "the folder {:?}",
             id(&place.join("private-ish"))
         );
@@ -339,6 +356,52 @@ mod fanotify {
         for r in resolved {
             assert!(matches!(r, Resolved::Failed(_)), "{r:?}");
         }
+    }
+
+    /// A folder in a btrfs subvolume that no mount reaches opens, but has no
+    /// path here: it is said unreachable, never given another's path.
+    #[test]
+    fn a_folder_no_mount_reaches_is_unreachable() {
+        let Some(m) = machine() else { return };
+        let device = table().holding(&m.btrfs).unwrap().source.clone();
+        let top = Place::new(&m.ext4, "top-level");
+        let mounted = || {
+            rustix::mount::mount(
+                device.as_os_str(),
+                &top.0,
+                "btrfs",
+                rustix::mount::MountFlags::empty(),
+                Some(c"subvolid=5"),
+            )
+            .unwrap();
+        };
+        mounted();
+        let hidden = top.join("hidden");
+        let made = std::process::Command::new("btrfs")
+            .args(["-q", "subvolume", "create"])
+            .arg(&hidden)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let g = Group::new(1).unwrap();
+        g.mark(&m.btrfs, &table()).unwrap();
+        std::fs::write(hidden.join("seen-from-nowhere"), b"x").unwrap();
+        let heard = hear(&g, |h| !heard_in(h, "seen-from-nowhere").is_empty());
+        let hidden_id = id(&hidden);
+        rustix::mount::unmount(&top.0, rustix::mount::UnmountFlags::empty()).unwrap();
+        let t = table();
+        let mut r = g.resolver(&t);
+        for f in heard_in(&heard, "seen-from-nowhere") {
+            assert_eq!(r.resolve(f), Resolved::Unreachable(hidden_id));
+        }
+        mounted();
+        let removed = std::process::Command::new("btrfs")
+            .args(["-q", "subvolume", "delete"])
+            .arg(&hidden)
+            .status()
+            .unwrap();
+        rustix::mount::unmount(&top.0, rustix::mount::UnmountFlags::empty()).unwrap();
+        assert!(removed.success());
     }
 
     /// A filesystem that cannot give file handles refuses the mark, and

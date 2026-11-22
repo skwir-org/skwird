@@ -159,6 +159,7 @@ impl Keeper {
                     }
                     // The exclusions may have changed while no engine ran.
                     let reconciled = keeper.reconcile();
+                    keeper.root.let_go();
                     return Ok((
                         keeper,
                         Opened::Loaded {
@@ -199,6 +200,7 @@ impl Keeper {
         // Saved at once, so that the next start loads it; a save that
         // fails is tried again at the next.
         let _ = keeper.save();
+        keeper.root.let_go();
         Ok((keeper, Opened::Built { because }))
     }
 
@@ -323,6 +325,12 @@ impl Keeper {
     /// Prove the index current ([`update::refresh`]), logging each change
     /// and, once done, when its names were proven.
     pub fn refresh(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
+        let done = self.refresh_held(cancel);
+        self.root.let_go();
+        done
+    }
+
+    fn refresh_held(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
         let done = update::refresh(&mut self.index, &mut self.root, &self.opts, cancel)?;
         // The time the index now says it was proven at, exactly.
         let proven = proven_at(self.index.proof());
@@ -361,6 +369,12 @@ impl Keeper {
     /// that began if every folder was watched. A subtree no longer named
     /// lets go of the watches only it held.
     pub fn set_scopes(&mut self, scopes: &[PathBuf], cancel: &Cancel) -> Result<Refreshed, Error> {
+        let done = self.set_scopes_held(scopes, cancel);
+        self.root.let_go();
+        done
+    }
+
+    fn set_scopes_held(&mut self, scopes: &[PathBuf], cancel: &Cancel) -> Result<Refreshed, Error> {
         self.live.retain(|l| scopes.contains(&l.scope));
         let held: Vec<PathBuf> = self.live.iter().map(|l| l.scope.clone()).collect();
         self.unwatch_where(|path| !held.iter().any(|s| path.starts_with(s)));
@@ -403,6 +417,36 @@ impl Keeper {
         Ok(installed)
     }
 
+    /// The whole root heard from `since` on (fanotify, phase 3): every
+    /// filesystem below it marked before `since`, and the index proven
+    /// current after. Live from then until an overflow or a failure to
+    /// open what was heard ([`Keeper::overflowed`]), then from the check
+    /// after.
+    pub fn heard_whole(&mut self, since: Time) {
+        self.live = vec![Live {
+            scope: PathBuf::new(),
+            since: Some(since),
+            short: None,
+            installed: true,
+        }];
+        self.publish_live();
+    }
+
+    /// The whole root no longer heard: its filesystem's mark is gone with
+    /// its superblock, and no check brings it back.
+    pub fn unheard(&mut self) {
+        self.live.clear();
+        self.publish_live();
+    }
+
+    /// The folder at `rel` below the root, if the index holds one there of
+    /// identity `id`: a folder heard of, found by its path and known by its
+    /// identity, so that a folder put in its place is not taken for it.
+    pub fn folder_of(&self, rel: &Path, id: skwird_crawl::FileId) -> Option<FolderId> {
+        let folder = self.index.folder_at(rel)?;
+        (self.index.facts_of(folder)?.id == id).then_some(folder)
+    }
+
     /// The subtrees watched, live or not.
     pub fn live(&self) -> &[Live] {
         &self.live
@@ -427,7 +471,9 @@ impl Keeper {
         folders: &[HeardFolder],
         cancel: &Cancel,
     ) -> Result<Refreshed, Error> {
-        let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders)?;
+        let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders);
+        self.root.let_go();
+        let done = done?;
         self.append(done.records.iter().cloned());
         self.note(&done.watches);
         self.prune();
@@ -442,7 +488,9 @@ impl Keeper {
     /// and crawled.
     pub fn mounts_changed(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
         let before = self.root.mounts_below();
-        self.root.reread_mounts().map_err(Error::Root)?;
+        let reread = self.root.reread_mounts();
+        self.root.let_go();
+        reread.map_err(Error::Root)?;
         let after = self.root.mounts_below();
         let mut folders: Vec<FolderId> = before
             .iter()
@@ -482,6 +530,11 @@ impl Keeper {
     /// What came of watching folders: each descriptor's folder kept, and
     /// each subtree holding a folder not watched made short of live.
     fn note(&mut self, watches: &[(FolderId, Watch)]) {
+        // With no watcher, what changes is heard of whole filesystems
+        // (fanotify, phase 3): a folder's watch says nothing of it.
+        if self.opts.watcher.is_none() {
+            return;
+        }
         for &(folder, watch) in watches {
             if let Watch::Watched(wd) = watch {
                 // The folder's number held another descriptor: a number

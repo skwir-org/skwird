@@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use skwird_crawl::Watcher;
+use skwird_crawl::fanotify::{self, Group};
 use skwird_index::block::FolderId;
 
 use crate::engine::{Command, log};
@@ -33,12 +34,62 @@ const CALM: Duration = Duration::from_secs(300);
 /// the core.
 const DUTY: u32 = 50;
 
-/// Listen to `watcher` for the writer: block until it can be read, send
+/// What the writer listens to: a user's engine's watcher (inotify), or
+/// the system service's group (fanotify).
+pub trait Source {
+    type Heard;
+    fn fd(&self) -> rustix::fd::BorrowedFd<'_>;
+    fn generation(&self) -> u64;
+    fn read(&self, heard: &mut Vec<Self::Heard>) -> std::io::Result<()>;
+    /// What a failed read is said as: nothing heard since proves anything.
+    fn overflow() -> Self::Heard;
+    fn command(generation: u64, heard: Vec<Self::Heard>) -> Command;
+}
+
+impl Source for Watcher {
+    type Heard = skwird_crawl::Heard;
+    fn fd(&self) -> rustix::fd::BorrowedFd<'_> {
+        Watcher::fd(self)
+    }
+    fn generation(&self) -> u64 {
+        Watcher::generation(self)
+    }
+    fn read(&self, heard: &mut Vec<Self::Heard>) -> std::io::Result<()> {
+        Watcher::read(self, heard)
+    }
+    fn overflow() -> Self::Heard {
+        skwird_crawl::Heard::Overflow
+    }
+    fn command(generation: u64, heard: Vec<Self::Heard>) -> Command {
+        Command::Heard { generation, heard }
+    }
+}
+
+impl Source for Group {
+    type Heard = fanotify::Heard;
+    fn fd(&self) -> rustix::fd::BorrowedFd<'_> {
+        Group::fd(self)
+    }
+    fn generation(&self) -> u64 {
+        Group::generation(self)
+    }
+    fn read(&self, heard: &mut Vec<Self::Heard>) -> std::io::Result<()> {
+        Group::read(self, heard)
+    }
+    fn overflow() -> Self::Heard {
+        fanotify::Heard::Overflow
+    }
+    fn command(generation: u64, heard: Vec<Self::Heard>) -> Command {
+        Command::Marks { generation, heard }
+    }
+}
+
+/// Listen to `source` for the writer: block until it can be read, send
 /// what it heard, and again. A read that fails is said as an overflow:
 /// nothing heard since proves anything. The mount table is followed too,
 /// as skwir follows it: `/proc/self/mountinfo` signals a change with
 /// `POLLPRI`, and is read through so that it signals the next.
-pub fn listen(watcher: &Watcher, commands: &Sender<Command>) {
+pub fn listen<S: Source>(source: &S, commands: &Sender<Command>) {
     use std::io::{Read, Seek};
     let mut heard = Vec::new();
     let mut table = std::fs::File::open("/proc/self/mountinfo").ok();
@@ -47,7 +98,7 @@ pub fn listen(watcher: &Watcher, commands: &Sender<Command>) {
         let _ = t.read_to_end(&mut skip);
     }
     loop {
-        let fd = watcher.fd();
+        let fd = source.fd();
         let mut fds = vec![rustix::event::PollFd::new(
             &fd,
             rustix::event::PollFlags::IN,
@@ -77,17 +128,14 @@ pub fn listen(watcher: &Watcher, commands: &Sender<Command>) {
                 return;
             }
         }
-        if let Err(e) = watcher.read(&mut heard) {
-            log(&format!("cannot read what the watcher heard: {e}"));
-            heard.push(skwird_crawl::Heard::Overflow);
+        if let Err(e) = source.read(&mut heard) {
+            log(&format!("cannot read what was heard: {e}"));
+            heard.push(S::overflow());
         }
         if heard.is_empty() {
             continue;
         }
-        let command = Command::Heard {
-            generation: watcher.generation(),
-            heard: std::mem::take(&mut heard),
-        };
+        let command = S::command(source.generation(), std::mem::take(&mut heard));
         if commands.send(command).is_err() {
             return;
         }
@@ -299,6 +347,21 @@ pub fn watcher(budget: Option<usize>) -> Option<Arc<Watcher>> {
         Err(e) => {
             log(&format!(
                 "cannot watch, answers are checked, never live: {e}"
+            ));
+            None
+        }
+    }
+}
+
+/// The system service's group, if fanotify gives one: marks whole
+/// filesystems, which needs `CAP_SYS_ADMIN`. None, the service answers
+/// checked, never live.
+pub fn group() -> Option<Arc<Group>> {
+    match Group::new(1) {
+        Ok(g) => Some(Arc::new(g)),
+        Err(e) => {
+            log(&format!(
+                "cannot mark filesystems, answers are checked, never live: {e}"
             ));
             None
         }

@@ -53,6 +53,27 @@ impl Dirs {
         })
     }
 
+    /// The system service's folders (`docs/DESIGN.md`, Protocol): as its
+    /// service manager names them (systemd's `RUNTIME_DIRECTORY`,
+    /// `CACHE_DIRECTORY`, `STATE_DIRECTORY` and `CONFIGURATION_DIRECTORY`,
+    /// the first of each list), or the usual places.
+    pub fn system() -> Dirs {
+        let dir = |name: &str, default: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.split(':').next().map(PathBuf::from))
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| PathBuf::from(default))
+        };
+        Dirs {
+            home: PathBuf::from("/root"),
+            runtime: dir("RUNTIME_DIRECTORY", "/run/skwird"),
+            cache: dir("CACHE_DIRECTORY", "/var/cache/skwird"),
+            state: dir("STATE_DIRECTORY", "/var/lib/skwird"),
+            config: dir("CONFIGURATION_DIRECTORY", "/etc/skwird"),
+        }
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.runtime.join("socket")
     }
@@ -100,4 +121,23 @@ pub fn make_private(_: &Path) -> Result<(), String> {
         "skwird's engine runs on Linux so far: Windows comes with phase 4, macOS with phase 5"
             .into(),
     )
+}
+
+/// `dir`, made if it is not there, owned by the user running this and
+/// writable by it alone, but open to every user (mode 0755): the system
+/// service's runtime folder, where every user finds its socket.
+#[cfg(unix)]
+pub fn make_shared(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot make a folder of skwird's: {e}"))?;
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("cannot stat a folder of skwird's: {e}"))?;
+    if !meta.is_dir() || meta.uid() != rustix::process::geteuid().as_raw() {
+        return Err("a folder of skwird's is not its user's own: refused".into());
+    }
+    if meta.mode() & 0o7777 != 0o755 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("cannot open a folder of skwird's to every user: {e}"))?;
+    }
+    Ok(())
 }

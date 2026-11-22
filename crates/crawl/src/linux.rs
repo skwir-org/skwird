@@ -44,9 +44,14 @@ fn mask() -> StatxFlags {
 }
 
 /// A root, opened: the folder a crawl reads below and a check proves.
+///
+/// Its folder is held open only while it is read ([`Root::let_go`] after):
+/// a descriptor kept on a mount would make its user's `umount` fail. It is
+/// opened again by its path when next read, and taken only if it is the
+/// same folder, on the same mount.
 pub struct Root {
     path: PathBuf,
-    fd: OwnedFd,
+    fd: std::sync::RwLock<Option<std::sync::Arc<OwnedFd>>>,
     stat: FolderStat,
     fs: String,
     table: Table,
@@ -95,13 +100,51 @@ impl Root {
         let below = table.below(&path);
         Ok(Root {
             path,
-            fd,
+            fd: std::sync::RwLock::new(Some(std::sync::Arc::new(fd))),
             stat,
             fs,
             table,
             below,
             exclusions,
         })
+    }
+
+    /// Its folder, open: as it was opened, or opened again by its path if
+    /// let go of, refused (`EXDEV`) if that is no longer the folder it was
+    /// (another folder, or its mount gone).
+    fn dir(&self) -> rustix::io::Result<std::sync::Arc<OwnedFd>> {
+        if let Some(fd) = self
+            .fd
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return Ok(std::sync::Arc::clone(fd));
+        }
+        let mut held = self
+            .fd
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(fd) = held.as_ref() {
+            return Ok(std::sync::Arc::clone(fd));
+        }
+        let fd = rustix::fs::open(&self.path, dir_flags(), Mode::empty())?;
+        let st = statx_fd(&fd)?;
+        if id_of(&st) != self.stat.id || st.stx_mnt_id != self.stat.mount {
+            return Err(Errno::XDEV);
+        }
+        let fd = std::sync::Arc::new(fd);
+        *held = Some(std::sync::Arc::clone(&fd));
+        Ok(fd)
+    }
+
+    /// Let go of its folder until it is next read: between reads, nothing of
+    /// its filesystem is held open.
+    pub fn let_go(&self) {
+        *self
+            .fd
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Its path, as the system resolves it.
@@ -322,7 +365,7 @@ fn read(
         return not_covered(None, mount_why(network));
     }
     let read_at = Time::now();
-    let fd = match open_beneath(&root.fd, rel) {
+    let fd = match root.dir().and_then(|d| open_beneath(&d, rel)) {
         Ok(fd) => fd,
         Err(e) => {
             // Its stat where its parent may still be searched, so the next
@@ -826,7 +869,7 @@ fn verdict_watched(
         };
         return (Some(why), Watch::Unasked);
     }
-    let fd = match open_beneath(&root.fd, rel) {
+    let fd = match root.dir().and_then(|d| open_beneath(&d, rel)) {
         Ok(fd) => fd,
         Err(e) => {
             let why = match e {
@@ -862,7 +905,8 @@ fn stat_path(root: &Root, rel: &Path) -> rustix::io::Result<Statx> {
     }
     let parent = rel.parent().unwrap_or(Path::new(""));
     let name = rel.file_name().unwrap_or_default();
-    open_beneath(&root.fd, parent)
+    root.dir()
+        .and_then(|d| open_beneath(&d, parent))
         .and_then(|fd| rustix::fs::statx(&fd, name, AtFlags::SYMLINK_NOFOLLOW, mask()))
 }
 

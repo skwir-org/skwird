@@ -1121,6 +1121,40 @@ committed once the gate holds.
    alone, every folder's owner, group, mode and ACL, live from fanotify
    with phase 2's machinery (generations, gathering, the duty cycle,
    the barrier).
+
+   **Done on 2026-11-22.** `skwird serve --system` (DESIGN 1, "As
+   built"): its roots from the mount table, its folders its service
+   manager's, its socket open to every user, and every root's
+   filesystem marked before it is read. A root is then heard whole
+   (`Keeper::heard_whole`): live from the mark, once its crawl, or the
+   check after loading, has proven it current; checked, never live,
+   where its filesystem refused the mark. What the group hears is found
+   by handle, at its path, in the root holding it, known by its
+   identity, and gathered as phase 2 gathers (the duty cycle, the
+   barrier: the cookies in its state folder, on a marked filesystem).
+   An overflow, or a handle that fails to open, lowers every root it
+   concerns until the check after; a filesystem no longer mounted is
+   not live again until the service starts again.
+
+   Found on the way, and fixed for both engines: a root kept its folder
+   open as long as its index lived, so the system service would have
+   made every root's `umount` fail. A root's folder is now held only
+   while it is read (AGENTS.md, "Hold nothing of a filesystem between
+   reads").
+
+   Root tests in the machine: the service marks ext4 and a btrfs
+   subvolume (through its top level) and answers both live, with what
+   was there, a change made with no sync, one made just before a sync,
+   and a folder removed; it refuses a user other than root. A root is
+   unmounted between two reads; once its mount is gone, it is not
+   covered. A folder in a subvolume no mount reaches is unreachable.
+
+   Until step 5 the service answers root alone (rule 2). Not done
+   here: the folders' ACLs (step 5); each user's own files (step 6),
+   so a user's own exclusions hold only once step 6 is done; a
+   filesystem mounted after the service started, a hole until it starts
+   again; a query above several roots, answered from one. Open for the
+   user: snapshots (DESIGN, open question 10).
 5. **Answers filtered per asker** (DESIGN 4): `SO_PEERCRED` and
    `SO_PEERGROUPS`, modes and ACLs evaluated, each folder's answer kept
    per asker until it changes, limits per asker.

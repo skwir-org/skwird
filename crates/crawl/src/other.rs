@@ -34,6 +34,10 @@ impl Root {
         match self.never {}
     }
 
+    pub fn let_go(&self) {
+        match self.never {}
+    }
+
     pub fn stat(&self) -> &FolderStat {
         match self.never {}
     }

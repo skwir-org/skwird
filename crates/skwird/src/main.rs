@@ -8,7 +8,7 @@ use skwird_client::{Client, Find};
 use skwird_protocol::{Coverage, Match, NameTerm, Proof, Query, WirePath};
 
 const USAGE: &str = "\
-usage: skwird serve [--root PATH]... [--idle SECONDS | --forever] [--threads N]
+usage: skwird serve [--system] [--root PATH]... [--idle SECONDS | --forever] [--threads N]
        skwird find TERM [--in PATH] [--limit N] [--case]
        skwird coverage [PATH]
        skwird sync [PATH]
@@ -40,6 +40,8 @@ struct Args {
     /// The folders `watch` names, and whether it takes them back.
     folders: Vec<PathBuf>,
     remove: bool,
+    /// `serve --system`: the system service.
+    system: bool,
     limit: Option<u64>,
     case: bool,
 }
@@ -66,6 +68,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         case: false,
         folders: Vec::new(),
         remove: false,
+        system: false,
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -83,6 +86,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--limit" => parsed.limit = Some(number(it.next(), "--limit")?),
             "--case" => parsed.case = true,
             "--remove" => parsed.remove = true,
+            "--system" => parsed.system = true,
             "-h" | "--help" => return Err(USAGE.into()),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
@@ -215,11 +219,21 @@ fn run(args: &Args) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn serve(args: &Args) -> Result<(), String> {
-    let dirs = skwird::dirs::Dirs::from_env()?;
-    let roots = if args.roots.is_empty() {
-        vec![dirs.home.clone()]
+    // The system service's folders are its service manager's; its roots,
+    // unless named, every local filesystem that stores files (DESIGN 1).
+    let dirs = if args.system {
+        skwird::dirs::Dirs::system()
     } else {
-        args.roots.clone()
+        skwird::dirs::Dirs::from_env()?
+    };
+    let roots = match (args.roots.is_empty(), args.system) {
+        (false, _) => args.roots.clone(),
+        (true, false) => vec![dirs.home.clone()],
+        (true, true) => {
+            let table = skwird_crawl::mounts::Table::read()
+                .map_err(|e| format!("cannot read the mount table: {e}"))?;
+            skwird::system::roots(&table, skwird::system::removable)
+        }
     };
     let roots = roots
         .iter()
@@ -235,6 +249,7 @@ fn serve(args: &Args) -> Result<(), String> {
         watches: std::env::var("SKWIRD_WATCHES")
             .ok()
             .and_then(|v| v.parse().ok()),
+        system: args.system,
     })
 }
 

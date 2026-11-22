@@ -66,7 +66,14 @@ pub fn serve(config: &Config) -> Result<(), String> {
     crate::memory::settle();
     let socket = config.dirs.socket();
     check_socket_path(&socket)?;
-    make_private(&config.dirs.runtime)?;
+    // The system service's socket is every user's to reach; a user's, its
+    // user's alone.
+    if config.system {
+        crate::dirs::make_shared(&config.dirs.runtime)?;
+        make_private(&config.dirs.state)?;
+    } else {
+        make_private(&config.dirs.runtime)?;
+    }
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -85,21 +92,22 @@ pub fn serve(config: &Config) -> Result<(), String> {
         listener
     } else {
         let _ = std::fs::remove_file(&socket);
-        UnixListener::bind(&socket).map_err(|e| format!("cannot bind the socket: {e}"))?
+        let listener =
+            UnixListener::bind(&socket).map_err(|e| format!("cannot bind the socket: {e}"))?;
+        if config.system {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
+                .map_err(|e| format!("cannot open the socket to every user: {e}"))?;
+        }
+        listener
     };
     log(&format!("serving {} roots", config.roots.len()));
-    let shared = Arc::new(Shared::new(config.roots.clone()));
+    let shared = Arc::new(Shared::new(config.roots.clone(), config.system));
     let (commands, received) = channel();
-    // One watcher for every root, listened to on a thread of its own that
-    // waits on it alone.
-    let watcher = crate::live::watcher(config.watches);
-    if let Some(w) = &watcher {
-        let (w, commands) = (Arc::clone(w), commands.clone());
-        std::thread::spawn(move || crate::live::listen(&w, &commands));
-    }
+    let (watcher, group) = sources(config, &commands);
     let writing = {
         let (config, shared) = (config.clone(), Arc::clone(&shared));
-        std::thread::spawn(move || writer(&config, &shared, &received, watcher))
+        std::thread::spawn(move || writer(&config, &shared, &received, watcher, group))
     };
     let live = Arc::new(Live {
         state: Mutex::new((0, Instant::now())),
@@ -127,9 +135,16 @@ pub fn serve(config: &Config) -> Result<(), String> {
         let Ok((stream, _)) = listener.accept() else {
             continue;
         };
-        // A user's engine answers its user alone.
+        // A user's engine answers its user alone. The system service answers
+        // root alone until its answers are filtered for each asker (phase 3,
+        // step 5): rule 2.
+        let allowed = if config.system {
+            rustix::process::Uid::ROOT
+        } else {
+            me
+        };
         match rustix::net::sockopt::socket_peercred(&stream) {
-            Ok(peer) if peer.uid == me => {}
+            Ok(peer) if peer.uid == allowed => {}
             _ => continue,
         }
         live.join();
@@ -149,6 +164,32 @@ pub fn serve(config: &Config) -> Result<(), String> {
     log("idle: gone");
     drop(lock);
     Ok(())
+}
+
+/// What the engine hears changes by: one watcher for every root, or for
+/// the system service one group marking whole filesystems, each listened
+/// to on a thread of its own that waits on it alone.
+fn sources(
+    config: &Config,
+    commands: &Sender<Command>,
+) -> (
+    Option<Arc<skwird_crawl::Watcher>>,
+    Option<Arc<skwird_crawl::fanotify::Group>>,
+) {
+    let (watcher, group) = if config.system {
+        (None, crate::live::group())
+    } else {
+        (crate::live::watcher(config.watches), None)
+    };
+    if let Some(w) = &watcher {
+        let (w, commands) = (Arc::clone(w), commands.clone());
+        std::thread::spawn(move || crate::live::listen(&*w, &commands));
+    }
+    if let Some(g) = &group {
+        let (g, commands) = (Arc::clone(g), commands.clone());
+        std::thread::spawn(move || crate::live::listen(&*g, &commands));
+    }
+    (watcher, group)
 }
 
 type Writer = Arc<Mutex<UnixStream>>;
@@ -209,7 +250,11 @@ fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -
             }
             let welcome = wire::Welcome {
                 version: wire::VERSION,
-                scope: wire::Scope::User,
+                scope: if shared.system {
+                    wire::Scope::System
+                } else {
+                    wire::Scope::User
+                },
                 engine: concat!("skwird ", env!("CARGO_PKG_VERSION")).to_owned(),
                 roots: shared.roots.iter().map(|r| WirePath::of(r)).collect(),
             };

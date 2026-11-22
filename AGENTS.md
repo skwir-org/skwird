@@ -49,6 +49,14 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - **Blocking.** A stat can block on a sleeping disk or a dead network
   share: crawls and checks run on threads of their own and can be
   cancelled; nothing that answers a client waits on one.
+- **Hold nothing of a filesystem between reads.** A descriptor kept on
+  a mount makes its user's `umount` fail, and a `cryptsetup close` after
+  it. A root's folder is open while it is read and let go of after
+  (`Root::let_go`, the keeper after each operation); a fanotify mark is
+  set through a mount made for it and let go of at once; handles are
+  opened through the mount table's mounts when they are read. What is
+  opened again is known by its identity and mount id, never by its path
+  alone.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

@@ -8,14 +8,16 @@
 //! the same refresh), the journal, a client's registrations. Nothing wakes
 //! it otherwise: idle is idle.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use skwird_crawl::{Cancel, Exclusions, Heard, Options, Root, Watcher};
+use skwird_crawl::fanotify::{self, Group, Resolved};
+use skwird_crawl::mounts::Table;
+use skwird_crawl::{Cancel, Exclusions, Heard, Options, Root, Time, Watcher};
 use skwird_index::Index;
 use skwird_index::block::FolderId;
 use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
@@ -37,6 +39,9 @@ pub struct Config {
     pub threads: usize,
     /// The most folders it watches: none for the user's share.
     pub watches: Option<usize>,
+    /// The system service (phase 3): every user's files, whole
+    /// filesystems marked (fanotify), its own folders the system's.
+    pub system: bool,
 }
 
 /// What a root publishes for queries to read.
@@ -52,14 +57,17 @@ pub enum Published {
 /// What the writer and the connections share.
 pub struct Shared {
     pub roots: Vec<PathBuf>,
+    /// Whether this is the system service.
+    pub system: bool,
     pub published: RwLock<Vec<Published>>,
 }
 
 impl Shared {
-    pub fn new(roots: Vec<PathBuf>) -> Shared {
+    pub fn new(roots: Vec<PathBuf>, system: bool) -> Shared {
         let n = roots.len();
         Shared {
             roots,
+            system,
             published: RwLock::new(vec![Published::Opening; n]),
         }
     }
@@ -129,6 +137,11 @@ pub enum Command {
         generation: u64,
         heard: Vec<Heard>,
     },
+    /// What the group of this generation heard ([`crate::live::listen`]).
+    Marks {
+        generation: u64,
+        heard: Vec<fanotify::Heard>,
+    },
     Stop,
 }
 
@@ -180,17 +193,30 @@ fn configured(dirs: &Dirs) -> Vec<PathBuf> {
 }
 
 /// Every exclusion: the defaults, the engine's own folders, the user's,
-/// what clients registered; and how many were refused.
-fn exclusions(dirs: &Dirs, registrations: &[Registration]) -> (Exclusions, usize) {
+/// what clients registered; and how many were refused. The system
+/// service's defaults hold in every home, and it leaves the Nix store out
+/// (DESIGN 1, 5).
+fn exclusions(config: &Config, registrations: &[Registration]) -> (Exclusions, usize) {
+    let dirs = &config.dirs;
+    let (homes, store) = if config.system {
+        (
+            crate::system::homes(),
+            vec![PathBuf::from(crate::system::NIX_STORE)],
+        )
+    } else {
+        (vec![dirs.home.clone()], Vec::new())
+    };
     // The engine's own folders too: its index, its log, its state and its
     // cookies. Indexed, and watched, the engine would hear its own saves,
     // and read itself again without end.
     let own = [dirs.cache.clone(), dirs.state.clone(), dirs.runtime.clone()];
-    let paths = skwird_crawl::exclude::defaults(&dirs.home)
-        .into_iter()
+    let paths = homes
+        .iter()
+        .flat_map(|home| skwird_crawl::exclude::defaults(home))
         .chain(configured(dirs))
         .chain(registrations.iter().map(|r| r.path.to_path()))
-        .chain(own);
+        .chain(own)
+        .chain(store);
     let (exclusions, refused) = Exclusions::resolve(paths);
     (exclusions, refused.len())
 }
@@ -241,6 +267,7 @@ pub fn writer(
     shared: &Shared,
     commands: &Receiver<Command>,
     watcher: Option<Arc<Watcher>>,
+    group: Option<Arc<Group>>,
 ) {
     let opts = Options {
         watcher: watcher.clone(),
@@ -255,11 +282,26 @@ pub fn writer(
         w.set_scopes(resolved(&kept_live));
     }
     let cancel = Cancel::default();
-    let cookies = watcher
-        .as_ref()
-        .and_then(|w| cookie_folder(&config.dirs, w));
+    let table = Table::read().unwrap_or_default();
+    // Each root's filesystem marked before it is read (DESIGN 2, "watch,
+    // then read"): what changes from now on is heard.
+    let marked: Vec<Option<(u32, u32)>> = match &group {
+        Some(g) => config
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(i, root)| mark(g, i, root, &table))
+            .collect(),
+        None => vec![None; config.roots.len()],
+    };
+    let since = Time::now();
+    let cookies = match (&watcher, &group) {
+        (Some(w), _) => cookie_folder(&config.dirs, w),
+        (None, Some(g)) => marked_cookie_folder(&config.dirs, g, &table),
+        (None, None) => None,
+    };
     let (keepers, built) = open_all(config, shared, &registrations, &opts, &cancel);
-    if built {
+    if built.contains(&true) {
         // What a first build freed, given back now that it is saved.
         crate::memory::give_back();
     }
@@ -271,6 +313,9 @@ pub fn writer(
         registrations,
         kept_live,
         watcher,
+        group,
+        table,
+        marked,
         gather: Gather::default(),
         cookies,
         next_cookie: 0,
@@ -278,6 +323,7 @@ pub fn writer(
         done: Done::default(),
         pending: Vec::new(),
     };
+    w.hear_whole(since, &built);
     w.apply_scopes();
     loop {
         let command = match w.pending.pop() {
@@ -326,17 +372,17 @@ fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
 }
 
 /// Open every root: its index read back, or crawled; each published as it
-/// is ready. Says whether any was built.
+/// is ready. Says which were built.
 fn open_all(
     config: &Config,
     shared: &Shared,
     registrations: &[Registration],
     opts: &Options,
     cancel: &Cancel,
-) -> (Vec<Option<Keeper>>, bool) {
+) -> (Vec<Option<Keeper>>, Vec<bool>) {
     let mut keepers = Vec::new();
-    let mut built = false;
-    let (ex, refused) = exclusions(&config.dirs, registrations);
+    let mut built = vec![false; config.roots.len()];
+    let (ex, refused) = exclusions(config, registrations);
     log_refused(refused);
     for (i, path) in config.roots.iter().enumerate() {
         let start = Instant::now();
@@ -366,7 +412,7 @@ fn open_all(
                 ));
                 match how {
                     Opened::Loaded { reconciled, .. } => log_reconciled(i, reconciled),
-                    Opened::Built { .. } => built = true,
+                    Opened::Built { .. } => built[i] = true,
                 }
                 shared.publish(i, Published::Ready(Arc::new(keeper.snapshot())));
                 keepers.push(Some(keeper));
@@ -392,6 +438,13 @@ struct Writing<'a> {
     /// Folders clients keep live.
     kept_live: Vec<Registration>,
     watcher: Option<Arc<Watcher>>,
+    /// The system service's group (fanotify), and the mount table its
+    /// handles are opened through, read again when it changes.
+    group: Option<Arc<Group>>,
+    table: Table,
+    /// Each root's filesystem marked, by its device: none if it is not,
+    /// and the root is checked, never live.
+    marked: Vec<Option<(u32, u32)>>,
     /// What was heard and not applied yet, and what is due.
     gather: Gather,
     /// The folder cookies are made in, once watched.
@@ -476,6 +529,7 @@ impl Writing<'_> {
                 let _ = reply.send(theirs(&self.kept_live, &client));
             }
             Command::Heard { generation, heard } => self.heard(generation, heard),
+            Command::Marks { generation, heard } => self.noticed(generation, heard),
             Command::Mounts => self.mounts_changed(),
         }
         true
@@ -680,7 +734,7 @@ impl Writing<'_> {
     /// folder they name is purged at once. Gives back the roots whose
     /// folders are to be read again, and how many exclusions were refused.
     fn hold_to_exclusions(&mut self) -> (Vec<usize>, usize) {
-        let (ex, refused) = exclusions(&self.config.dirs, &self.registrations);
+        let (ex, refused) = exclusions(self.config, &self.registrations);
         let mut readmitting = Vec::new();
         for (i, keeper) in self.keepers.iter_mut().enumerate() {
             let Some(keeper) = keeper else { continue };
@@ -877,6 +931,7 @@ impl Writing<'_> {
     /// The mount table changed: each root reads it again, and the folders
     /// at mount points made or taken below it are read again at once.
     fn mounts_changed(&mut self) {
+        self.marks_followed();
         for root in 0..self.keepers.len() {
             let Some(keeper) = self.keepers[root].as_mut() else {
                 continue;
@@ -893,6 +948,212 @@ impl Writing<'_> {
                 Err(e) => log(&format!("root {root}: its mounts cannot be read: {e}")),
             }
             self.publish(root);
+        }
+    }
+}
+
+/// Mark root `i`'s filesystem, at `root`: its device, or none if it was
+/// refused, said why, and the root is checked, never live.
+fn mark(group: &Group, i: usize, root: &Path, table: &Table) -> Option<(u32, u32)> {
+    match group.mark(root, table) {
+        Ok(m) => {
+            if m.new {
+                log(&format!(
+                    "root {i}: its filesystem marked{}",
+                    match m.through {
+                        fanotify::Through::Itself => "",
+                        fanotify::Through::TopLevel => ", through its top-level subvolume",
+                    }
+                ));
+            }
+            Some(m.dev)
+        }
+        Err(why) => {
+            log(&format!(
+                "root {i}: its filesystem cannot be marked, so it is checked, never live: {why:?}"
+            ));
+            None
+        }
+    }
+}
+
+/// The system service's cookies' folder, in its state folder, which must
+/// be on a filesystem marked: the same queue as every event (open question
+/// 1). Cookies left by an engine before are let go of.
+fn marked_cookie_folder(dirs: &Dirs, group: &Group, table: &Table) -> Option<PathBuf> {
+    let dir = dirs.state.join("cookies");
+    let made = crate::dirs::make_private(&dir).and_then(|()| {
+        for left in std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            let _ = std::fs::remove_file(left.path());
+        }
+        group.watch_cookies(&dir, table).map_err(|e| e.to_string())
+    });
+    match made {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            log(&format!("no cookies, so a sync checks: {e}"));
+            None
+        }
+    }
+}
+
+impl Writing<'_> {
+    /// Every root whose filesystem was marked before `since` heard whole
+    /// from then on: once its index is proven current after the mark, by
+    /// its crawl (`built`) or by the check now.
+    fn hear_whole(&mut self, since: Time, built: &[bool]) {
+        for (root, &crawled) in built.iter().enumerate() {
+            if self.marked[root].is_none() {
+                continue;
+            }
+            let Some(keeper) = self.keepers[root].as_mut() else {
+                continue;
+            };
+            if !crawled {
+                let start = Instant::now();
+                match keeper.refresh(&self.cancel) {
+                    Ok(done) => log(&format!(
+                        "root {root} checked in {:.2?}: {} read again, {} crawled",
+                        start.elapsed(),
+                        done.reread,
+                        done.crawled
+                    )),
+                    Err(e) => {
+                        log(&format!("root {root} cannot be checked, so not live: {e}"));
+                        continue;
+                    }
+                }
+            }
+            keeper.heard_whole(since);
+            self.publish(root);
+        }
+    }
+
+    /// What the group heard: each folder named found by its handle, at its
+    /// path, in the root holding it, known by its identity, and gathered;
+    /// an overflow, or a handle that fails to open, lowering coverage at
+    /// once for what it concerns, the check due once the queue is quiet.
+    fn noticed(&mut self, generation: u64, heard: Vec<fanotify::Heard>) {
+        let Some(group) = self.group.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        self.done.events += heard.len() as u64;
+        // Each folder found once, before anything is applied.
+        let mut found: HashMap<fanotify::Folder, Option<(usize, FolderId)>> = HashMap::new();
+        let mut failed: BTreeSet<u64> = BTreeSet::new();
+        {
+            let mut resolver = group.resolver(&self.table);
+            for h in &heard {
+                let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h
+                else {
+                    continue;
+                };
+                if found.contains_key(folder) {
+                    continue;
+                }
+                let at = match resolver.resolve(folder) {
+                    Resolved::At(path, id) => self.shared.locate(&path).and_then(|(root, rel)| {
+                        let keeper = self.keepers[root].as_ref()?;
+                        keeper.folder_of(&rel, id).map(|f| (root, f))
+                    }),
+                    // Gone, its removal is heard in a parent; no mount
+                    // reaches it, or no mark kept has it: no root holds it.
+                    Resolved::Gone | Resolved::Unreachable(_) | Resolved::Unmarked => None,
+                    Resolved::Failed(_) => {
+                        failed.insert(folder.fsid);
+                        None
+                    }
+                };
+                found.insert(folder.clone(), at);
+            }
+        }
+        let mut lowered = BTreeSet::new();
+        for h in heard {
+            match h {
+                fanotify::Heard::Entry(folder, name) => {
+                    if let Some(&Some((root, f))) = found.get(&folder) {
+                        self.gather.note_entry(root, f, name, now);
+                    }
+                }
+                fanotify::Heard::Changed(folder) => {
+                    if let Some(&Some((root, f))) = found.get(&folder) {
+                        self.gather.note(root, f, now);
+                    }
+                }
+                // Only the current group's cookie proves its queue read.
+                fanotify::Heard::Cookie(n) => {
+                    if group.generation() == generation {
+                        self.cookie_heard(n);
+                    }
+                }
+                fanotify::Heard::Overflow => {
+                    self.done.overflows += 1;
+                    for (i, keeper) in self.keepers.iter_mut().enumerate() {
+                        if let Some(keeper) = keeper {
+                            keeper.overflowed();
+                            lowered.insert(i);
+                        }
+                    }
+                }
+            }
+        }
+        // A handle that did not open proves nothing heard on its filesystem.
+        let marks = group.marks();
+        for fsid in failed {
+            let Some(dev) = marks.iter().find(|(_, id)| *id == fsid).map(|(d, _)| *d) else {
+                continue;
+            };
+            for (i, keeper) in self.keepers.iter_mut().enumerate() {
+                if self.marked[i] == Some(dev)
+                    && let Some(keeper) = keeper
+                {
+                    keeper.overflowed();
+                    lowered.insert(i);
+                }
+            }
+        }
+        if !lowered.is_empty() {
+            log("events dropped, or what was heard could not be opened: not live until checked");
+            self.gather.overflowed(now);
+            for i in lowered {
+                self.publish(i);
+            }
+        }
+    }
+
+    /// The mount table changed, for the group: read again, so that handles
+    /// are opened through the mounts there are now; a filesystem no longer
+    /// mounted has lost its mark with its superblock, and its roots are not
+    /// live again until the engine starts again.
+    fn marks_followed(&mut self) {
+        let Some(group) = self.group.clone() else {
+            return;
+        };
+        match Table::read() {
+            Ok(table) => self.table = table,
+            Err(e) => log(&format!("cannot read the mount table again: {e}")),
+        }
+        for (dev, _) in group.marks() {
+            if self.table.mounts().iter().any(|m| m.dev == dev) {
+                continue;
+            }
+            group.forget(dev);
+            for root in 0..self.keepers.len() {
+                if self.marked[root] == Some(dev) {
+                    self.marked[root] = None;
+                    if let Some(keeper) = self.keepers[root].as_mut() {
+                        keeper.unheard();
+                    }
+                    log(&format!(
+                        "root {root}: its filesystem is no longer mounted: not live"
+                    ));
+                    self.publish(root);
+                }
+            }
         }
     }
 }

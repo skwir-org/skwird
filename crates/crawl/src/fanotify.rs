@@ -101,10 +101,15 @@ pub enum Refused {
 }
 
 /// What a folder's handle opened to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolved {
-    /// The folder of this identity.
-    Is(crate::FileId),
+    /// The folder at this path, as the system resolves it, of this
+    /// identity: the path stat-ed again, following no link, is that
+    /// folder.
+    At(std::path::PathBuf, crate::FileId),
+    /// The folder of this identity, which no mount of its filesystem in
+    /// this namespace reaches: no root holds it.
+    Unreachable(crate::FileId),
     /// The folder is gone (`ESTALE`): its removal is heard in a parent.
     Gone,
     /// No mark of this group has the handle's filesystem id.

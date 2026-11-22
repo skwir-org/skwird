@@ -61,10 +61,10 @@ in
           "btrfs -q subvolume create /mnt/btrfs/b",
       )
       print(machine.succeed("uname -r"))
-      tests = machine.succeed("ls ${dir}").split()
+      tests = [t for t in machine.succeed("ls ${dir}").split() if t.startswith("root-")]
       assert tests, "no test binaries in ${dir}"
       for test in tests:
           with subtest(test):
-              print(machine.succeed(f"cd /root && SKWIRD_TEST_MACHINE=1 ${dir}/{test} --test-threads=1 2>&1"))
+              print(machine.succeed(f"cd /root && SKWIRD_TEST_MACHINE=1 SKWIRD_BIN=${dir}/skwird ${dir}/{test} --test-threads=1 2>&1"))
     '';
   }

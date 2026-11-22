@@ -474,3 +474,31 @@ pub fn machine() -> Option<Machine> {
         btrfs: path("btrfs"),
     })
 }
+
+/// A folder of a root test's own on one of the machine's filesystems
+/// ([`Machine`]), named after `label`, the process and a count, and
+/// removed when dropped.
+pub struct Place(pub PathBuf);
+
+impl Place {
+    pub fn new(on: &Path, label: &str) -> Place {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = on.join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("cannot make a place");
+        Place(std::fs::canonicalize(path).expect("cannot resolve a place"))
+    }
+
+    pub fn join(&self, rel: &str) -> PathBuf {
+        self.0.join(rel)
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

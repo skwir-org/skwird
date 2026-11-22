@@ -86,7 +86,7 @@
         installPhase = ''
           runHook preInstall
           mkdir -p $out/bin
-          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+          jq -r 'select(.reason == "compiler-artifact" and .executable != null and (.profile.test or .target.name == "skwird")) | .executable' \
             artifacts.json | while read -r exe; do cp "$exe" $out/bin/; done
           runHook postInstall
         '';
