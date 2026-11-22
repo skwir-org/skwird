@@ -92,34 +92,6 @@ pub fn removable(_: &Mount) -> bool {
     false
 }
 
-/// The homes the default exclusions hold in: each user database entry's
-/// home that is a folder (`/etc/passwd`), every folder in `/home`, and
-/// root's. A home only another source of the user database names (LDAP,
-/// systemd-homed) under none of these gets what its client registers.
-pub fn homes() -> Vec<PathBuf> {
-    let mut homes: Vec<PathBuf> = std::fs::read_to_string("/etc/passwd")
-        .map(|text| passwd_homes(&text))
-        .unwrap_or_default();
-    if let Ok(entries) = std::fs::read_dir("/home") {
-        homes.extend(entries.flatten().map(|e| e.path()));
-    }
-    homes.push(PathBuf::from("/root"));
-    homes.retain(|h| h.as_os_str() != "/" && h.is_absolute());
-    homes.sort();
-    homes.dedup();
-    homes
-}
-
-/// The homes a user database's text names, one entry a line
-/// (`name:password:uid:gid:gecos:home:shell`).
-fn passwd_homes(text: &str) -> Vec<PathBuf> {
-    text.lines()
-        .filter_map(|line| line.split(':').nth(5))
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
-
 /// The users the system service keeps exclusions for (DESIGN 5): each
 /// user database entry's id and home, and each folder in `/home` by its
 /// owner, for a home only another source of the user database names.
@@ -157,40 +129,97 @@ fn passwd_users(text: &str) -> Vec<(u32, PathBuf)> {
         .collect()
 }
 
+/// What came of reading a user's file.
+#[cfg(target_os = "linux")]
+pub enum Own {
+    /// Not there.
+    Absent,
+    /// There, but not taken: not a file, not theirs or root's, others may
+    /// write it, or a link was in its way.
+    Refused,
+    Read(Vec<u8>),
+}
+
 /// A file of a user's own, at `rel` in their home, read for the system
 /// service: opened through the home's handle, following no link and
 /// staying beneath it, and taken only if it is a file the user or root
-/// owns and no one else may write, as sshd reads a user's keys. At most a
-/// mebibyte.
+/// owns that no one else may write, as sshd reads a user's keys: its
+/// group may write it only if that group is the user's own private one
+/// (umask 002, with a group of each user's own). At most a mebibyte.
 #[cfg(target_os = "linux")]
-pub fn read_own(home: &Path, uid: u32, rel: &str) -> Option<Vec<u8>> {
+pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
     use rustix::fs::{Mode, OFlags, ResolveFlags};
     use std::io::Read;
-    let home_fd = rustix::fs::open(
+    let Ok(home_fd) = rustix::fs::open(
         home,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .ok()?;
-    let fd = rustix::fs::openat2(
+    ) else {
+        return Own::Absent;
+    };
+    let fd = match rustix::fs::openat2(
         &home_fd,
         rel,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .ok()?;
-    let st = rustix::fs::fstat(&fd).ok()?;
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Own::Absent,
+        Err(_) => return Own::Refused,
+    };
+    let Ok(st) = rustix::fs::fstat(&fd) else {
+        return Own::Refused;
+    };
     let file = rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::RegularFile;
-    if !file || (st.st_uid != uid && st.st_uid != 0) || st.st_mode & 0o022 != 0 {
-        return None;
+    let others_write = st.st_mode & 0o002 != 0;
+    let group_writes = st.st_mode & 0o020 != 0 && !private_group(uid, st.st_gid);
+    if !file || (st.st_uid != uid && st.st_uid != 0) || others_write || group_writes {
+        return Own::Refused;
     }
     let mut bytes = Vec::new();
-    std::fs::File::from(fd)
+    match std::fs::File::from(fd)
         .take(1 << 20)
         .read_to_end(&mut bytes)
-        .ok()?;
-    Some(bytes)
+    {
+        Ok(_) => Own::Read(bytes),
+        Err(_) => Own::Refused,
+    }
+}
+
+/// Whether group `gid` is user `uid`'s own private group: their primary
+/// group, no one else's primary group, and naming no other member.
+#[cfg(target_os = "linux")]
+fn private_group(uid: u32, gid: u32) -> bool {
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    is_private_group(&passwd, &group, uid, gid)
+}
+
+#[cfg(target_os = "linux")]
+fn is_private_group(passwd: &str, group: &str, uid: u32, gid: u32) -> bool {
+    let entries: Vec<(&str, u32, u32)> = passwd
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            Some((
+                *f.first()?,
+                f.get(2)?.parse().ok()?,
+                f.get(3)?.parse().ok()?,
+            ))
+        })
+        .collect();
+    let Some(&(name, _, primary)) = entries.iter().find(|(_, u, _)| *u == uid) else {
+        return false;
+    };
+    let alone = entries.iter().all(|&(_, u, g)| g != gid || u == uid);
+    let members_alone = group.lines().all(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        f.get(2).and_then(|g| g.parse::<u32>().ok()) != Some(gid)
+            || f.get(3)
+                .is_none_or(|m| m.split(',').all(|m| m.is_empty() || m == name))
+    });
+    primary == gid && alone && members_alone
 }
 
 /// A folder a user's engine's clients registered, as the file keeps it.
@@ -204,11 +233,23 @@ struct Registered {
 /// exclusions (`~/.config/skwird/exclude`, one path a line, `~/` their
 /// home, `#` a comment) and what their engine's clients registered
 /// (`~/.local/state/skwird/registered`), at the default places, since the
-/// service knows no user's environment.
+/// service knows no user's environment; and how many of the two files
+/// were there but not taken ([`read_own`]).
 #[cfg(target_os = "linux")]
-pub fn own_exclusions(home: &Path, uid: u32) -> Vec<PathBuf> {
+pub fn own_exclusions(home: &Path, uid: u32) -> (Vec<PathBuf>, usize) {
     let mut paths = Vec::new();
-    if let Some(text) = read_own(home, uid, ".config/skwird/exclude") {
+    let mut refused = 0;
+    let mut read = |rel: &str| match read_own(home, uid, rel) {
+        Own::Read(bytes) => Some(bytes),
+        Own::Refused => {
+            refused += 1;
+            None
+        }
+        Own::Absent => None,
+    };
+    let exclude = read(".config/skwird/exclude");
+    let registered = read(".local/state/skwird/registered");
+    if let Some(text) = exclude {
         let text = String::from_utf8_lossy(&text);
         paths.extend(
             text.lines()
@@ -220,12 +261,12 @@ pub fn own_exclusions(home: &Path, uid: u32) -> Vec<PathBuf> {
                 }),
         );
     }
-    if let Some(bytes) = read_own(home, uid, ".local/state/skwird/registered")
+    if let Some(bytes) = registered
         && let Ok(all) = serde_json::from_slice::<Vec<Registered>>(&bytes)
     {
         paths.extend(all.into_iter().map(|r| r.path.to_path()));
     }
-    paths
+    (paths, refused)
 }
 
 /// Whether user `uid`, of home `home`, owns the folder an exclusion of
@@ -317,12 +358,41 @@ mod tests {
         );
     }
 
+    /// A group is a user's own private group if it is their primary
+    /// group, no one else's, and names no other member.
     #[test]
-    fn homes_are_read_from_the_user_database() {
+    #[cfg(target_os = "linux")]
+    fn a_users_private_group_is_theirs_alone() {
+        let passwd = "someone:x:1000:1000::/home/someone:/bin/sh\nother:x:1001:100::/home/other:/bin/sh\nthird:x:1002:100::/home/third:/bin/sh\n";
+        let group = "someone:x:1000:\nusers:x:100:\nwheel:x:10:someone,other\n";
+        assert!(is_private_group(passwd, group, 1000, 1000));
+        assert!(
+            !is_private_group(passwd, group, 1001, 100),
+            "shared as primary"
+        );
+        assert!(
+            !is_private_group(passwd, group, 1000, 10),
+            "not their primary"
+        );
+        let joined = "someone:x:1000:other\n";
+        assert!(
+            !is_private_group(passwd, joined, 1000, 1000),
+            "another member"
+        );
+        assert!(!is_private_group(passwd, group, 4242, 1000), "no such user");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn users_are_read_from_the_user_database() {
         let text = "root:x:0:0::/root:/bin/sh\nsomeone:x:1000:100:Some One:/home/someone:/bin/sh\nbroken\nnobody:x:65534:65534::/var/empty:/bin/false\n";
         assert_eq!(
-            passwd_homes(text),
-            paths(&["/root", "/home/someone", "/var/empty"])
+            passwd_users(text),
+            vec![
+                (0, PathBuf::from("/root")),
+                (1000, PathBuf::from("/home/someone")),
+                (65534, PathBuf::from("/var/empty"))
+            ]
         );
     }
 }

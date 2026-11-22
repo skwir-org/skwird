@@ -3,7 +3,7 @@
 //! of its own, so that a `cancel` can reach it; the engine gone once its
 //! last client has been gone a while.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -261,10 +261,11 @@ fn coverage_one(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire:
         }),
         Published::Failed(why) => Err(failure("internal", why)),
         Published::Ready(index) => {
+            let seeing = seeing(shared, i, &index, asker);
+            let mut memo = HashMap::new();
             let mut holes = Vec::new();
-            if let Some(seeing) = seeing(shared, i, &index, asker) {
-                let mut memo = HashMap::new();
-                match reached(&seeing, &rel, &mut memo) {
+            if let Some(seeing) = &seeing {
+                match reached(seeing, &rel, &mut memo) {
                     Reached::Denied => return Ok(denied()),
                     Reached::Absent => {}
                     Reached::Listed(folder) => {
@@ -274,6 +275,11 @@ fn coverage_one(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire:
             }
             let mut c = coverage_at(&index, &shared.roots[i], &rel)
                 .ok_or_else(|| failure("not_a_folder", "no folder of the index is at that path"))?;
+            // A hole is a folder's name: said only to who may list its
+            // parent, never another user's private folder's.
+            if let Some(seeing) = &seeing {
+                seeing.seen_holes(&shared.roots[i], &mut c.holes, &mut memo);
+            }
             c.holes
                 .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
             Ok(c)
@@ -507,6 +513,9 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                     );
                     continue;
                 };
+                // A thread that ended is let go of now: kept to the end of a
+                // long connection, each would hold its stack until then.
+                queries.retain(|q: &std::thread::JoinHandle<()>| !q.is_finished());
                 queries.push(spawn_query(
                     shared, &writer, &cancels, id, query, who, running,
                 ));
@@ -805,15 +814,15 @@ fn answer_in(
             index.query_seen(folder, asked, Some(&sight))
         }
     };
-    let (hits, unknown) = found.map_err(|e| failure("bad_pattern", e))?;
-    // What was withheld for an ACL not read: not covered, so that the
-    // client walks it.
+    let (hits, _) = found.map_err(|e| failure("bad_pattern", e))?;
+    // A hole is a folder's name: said only to who may list its parent. A
+    // folder whose ACL was not read is not covered, so that the client
+    // walks it, whether anything in it answered or not: whether a name is
+    // there is not said either.
     if let Some(s) = &seeing {
         let mut memo = HashMap::new();
-        let holes: BTreeSet<FolderId> = unknown
-            .iter()
-            .filter_map(|&f| s.hole_for(f, &mut memo))
-            .collect();
+        s.seen_holes(&shared.roots[i], &mut coverage.holes, &mut memo);
+        let holes = s.acl_holes(folder, &mut memo);
         coverage
             .holes
             .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));

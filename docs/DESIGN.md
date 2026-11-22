@@ -441,6 +441,11 @@ proved as root in the test machine on Linux 6.18.58):
   folders they hold have their ACLs read; a folder with an ACL deeper in
   a subtree just made is not known until the next check. A folder above
   a root with an ACL is not known either.
+- **A hole is a folder's name,** said only to who may list the folder
+  holding it, as its listing would (a review of 2026-11-22 found every
+  hole given to every asker: another user's private and excluded folders
+  by name). A folder whose ACL was not read is a hole whether or not
+  anything in it answered, so that whether a name is there is not said.
 - **Whether a folder exists is said only to who could list its
   parent:** a coverage or a query at a folder the asker may not list,
   or at a path below one, is answered not covered (denied) alike.
@@ -517,6 +522,17 @@ there yet, if it is in a home the user owns; root owns every folder.
 They are derived again with every other exclusion: at the service's
 start, at each sync and at each registration. A user whose files are
 not at the default places has what their clients register.
+
+The default exclusions, at the system service, hold at their own place
+in each home, no link in their way, whoever owns them; reached through
+a link, only if the user owns what it leads to (the review found a user
+could link `~/.gnupg` to another's folder and take it out of everyone's
+answers). A user's file may be writable by their group if that group is
+their own private one (their primary group, no one else's, naming no
+other member), as umask 002 leaves it with a group of each user's own;
+a file not taken is counted in the log. A registration refused for a
+folder not the user's is not kept, nor said kept, and a user keeps at
+most 256 at the service.
 
 An exclusion, like a root, is resolved once to the folder it names, and
 compared as that folder (its identity, or its range in the index),

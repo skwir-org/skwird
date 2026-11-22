@@ -1246,6 +1246,28 @@ committed once the gate holds.
    the first live answer read back. It could not be tried here: it needs
    sudo, which a session has not.
 
+   **Reviewed on 2026-11-22**, by a reader not anchored on the work, for
+   what a user other than root could learn or do. Fixed, each with a
+   test:
+   - holes were given to every asker, naming other users' private and
+     excluded folders: a hole is now said only to who may list its
+     parent (DESIGN 4);
+   - the default exclusions followed a user's links as the service: a
+     link at `~/.gnupg` took another user's folder out for everyone;
+   - a user's files were ignored, without a word, where umask 002 left
+     them group-writable for a group of their own;
+   - a refused registration was kept and said kept; one connection's
+     finished queries held their threads' stacks until it closed;
+     connections at once had no limit (64 now);
+   - a folder whose ACL was read was still a hole, and a hole for one
+     not read came only when a name matched.
+
+   Left, as the review found them: the writer's load each user can ask
+   for (a sync derives every exclusion again and may check a whole
+   root, registering and withdrawing a folder refreshes its root,
+   reading the journal reads the log), no time limit on a query, and the
+   folders above a root taken as they were when the service started.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

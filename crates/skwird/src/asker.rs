@@ -228,29 +228,6 @@ impl Seeing<'_> {
         sight(self.index, self.asker, self.above, folder, memo)
     }
 
-    /// The folder to say is not covered, for an entry withheld in
-    /// `folder`, whose sight is not known: the topmost folder not known
-    /// above it whose parent's entries they see, so that no name is said
-    /// that they could not list. None if they reach none of it.
-    pub(crate) fn hole_for(
-        &self,
-        folder: FolderId,
-        memo: &mut HashMap<FolderId, Sight>,
-    ) -> Option<FolderId> {
-        let mut at = folder;
-        loop {
-            let parent = match self.index.parent_of(at) {
-                Some(p) => self.sight(p, memo),
-                None => self.above,
-            };
-            match (parent, self.index.parent_of(at)) {
-                (Sight::Seen, _) => return Some(at),
-                (Sight::Hidden, _) | (Sight::Unknown, None) => return None,
-                (Sight::Unknown, Some(p)) => at = p,
-            }
-        }
-    }
-
     /// The folders with an ACL below `folder` whose names they see: not
     /// covered for them, until ACLs are evaluated.
     pub(crate) fn acl_holes(
@@ -258,16 +235,43 @@ impl Seeing<'_> {
         folder: FolderId,
         memo: &mut HashMap<FolderId, Sight>,
     ) -> Vec<FolderId> {
+        // Those whose ACL was not read alone: one read is judged by it.
         self.index
             .acl_folders_below(folder)
             .into_iter()
             .filter(|&f| f != folder)
             .filter(|&f| {
                 self.index
+                    .facts_of(f)
+                    .is_some_and(|facts| self.index.acl_of(facts.id).is_none())
+            })
+            .filter(|&f| {
+                self.index
                     .parent_of(f)
                     .is_some_and(|p| self.sight(p, memo) == Sight::Seen)
             })
             .collect()
+    }
+
+    /// Of `holes`, holes of this index's root `root`, those the asker may
+    /// know of: a hole is a folder's name, said only to who may list the
+    /// folder holding it, as its own listing would.
+    pub(crate) fn seen_holes(
+        &self,
+        root: &Path,
+        holes: &mut Vec<skwird_protocol::Hole>,
+        memo: &mut HashMap<FolderId, Sight>,
+    ) {
+        holes.retain(|h| {
+            let path = h.path.to_path();
+            let Ok(rel) = path.strip_prefix(root) else {
+                return false;
+            };
+            let parent = rel.parent().unwrap_or(Path::new(""));
+            self.index
+                .folder_at(parent)
+                .is_some_and(|p| self.sight(p, memo) == Sight::Seen)
+        });
     }
 }
 

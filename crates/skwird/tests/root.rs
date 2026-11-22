@@ -274,6 +274,8 @@ fn each_user_is_answered_what_they_could_list() {
     folder(&place, "", 0, 0, 0o755);
     let own = folder(&place, "someone", 1000, 1000, 0o700);
     std::fs::write(own.join("someone's secret.txt"), b"x").unwrap();
+    folder(&place, "someone/kept private", 1000, 1000, 0o700);
+    owned_file(&place, "someone/kept private/.private", 1000, 0o600, "");
     let open = folder(&place, "shared", 1001, 1001, 0o755);
     std::fs::write(open.join("open to all.txt"), b"x").unwrap();
     let team = folder(&place, "team", 0, 2000, 0o750);
@@ -309,6 +311,10 @@ fn each_user_is_answered_what_they_could_list() {
         "found someone/someone's secret.txt",
         "found team/for the team.txt",
         "covers someone: covered",
+        // Their own private folder is a hole they are told of; the other
+        // user, who may not list their folder, is not.
+        "hole someone/kept private",
+        "found someone/kept private",
         "covers someone/not there: no folder",
     ]));
     assert_eq!(
@@ -326,7 +332,9 @@ fn each_user_is_answered_what_they_could_list() {
     let all = as_user(&service.socket, &place.0, 0, 0, &[]);
     assert!(all.contains("found acl/granted by an acl.txt"), "{all:?}");
     assert!(all.contains("found passage/inner"), "{all:?}");
-    assert!(!all.iter().any(|s| s.starts_with("hole")), "{all:?}");
+    // Root is told of every hole: the private folder alone.
+    let holes: Vec<&String> = all.iter().filter(|s| s.starts_with("hole")).collect();
+    assert_eq!(holes, ["hole someone/kept private"], "{all:?}");
     // The ACL changed while it runs: heard, read again, answered at once.
     let granted = Command::new("setfacl")
         .args(["-m", "u:1000:rx"])
@@ -392,6 +400,7 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
         ("one/hidden by their engine", 1000),
         ("one/not theirs", 1001),
         ("two/kept", 1001),
+        ("one/a folder of theirs", 1000),
     ] {
         folder(&place, rel, owner, owner, 0o755);
         owned_file(&place, &format!("{rel}/inside.txt"), owner, 0o644, "x");
@@ -412,7 +421,8 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
         &place,
         "one/.config/skwird/exclude",
         1000,
-        0o644,
+        // Group-writable, as umask 002 leaves it: their group is theirs alone.
+        0o664,
         "# theirs\n~/hidden by their file\n~/not theirs\n",
     );
     owned_file(
@@ -425,6 +435,9 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
             one.join("hidden by their engine").display()
         ),
     );
+    // Their default, a link to the other's folder: resolved as the
+    // service, it would take that folder out of everyone's answers.
+    std::os::unix::fs::symlink(one.join("a folder of theirs"), two.join(".gnupg")).unwrap();
     // Others may write it: not theirs to say.
     owned_file(
         &place,
@@ -451,7 +464,12 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
     };
     assert_eq!(
         found(&mut c),
-        paths(&["one/projects", "one/not theirs", "two/kept"])
+        paths(&[
+            "one/projects",
+            "one/not theirs",
+            "two/kept",
+            "one/a folder of theirs"
+        ])
     );
     // Registered with the service: theirs at once; another's, never.
     as_user_with(
@@ -470,7 +488,10 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
         &[],
         Some(&two.join("kept")),
     );
-    assert_eq!(found(&mut c), paths(&["one/not theirs", "two/kept"]));
+    assert_eq!(
+        found(&mut c),
+        paths(&["one/not theirs", "two/kept", "one/a folder of theirs"])
+    );
 }
 
 /// A query of the system service gives at most 100,000 results, and says

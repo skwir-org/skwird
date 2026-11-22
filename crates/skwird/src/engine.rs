@@ -199,6 +199,10 @@ struct Registration {
 const EXCLUDED: &str = "registered";
 const WATCHED: &str = "watched";
 
+/// The most folders a user keeps out at the system service, each derived
+/// again at every sync.
+const MOST_REGISTERED: usize = 256;
+
 /// What clients registered, kept across restarts.
 fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
     std::fs::read(dirs.state.join(file))
@@ -208,10 +212,24 @@ fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
 }
 
 fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let path = dirs.state.join(file);
     let tmp = dirs.state.join(format!("{file}.tmp"));
+    // Its user's alone (0600), whatever the umask: the system service takes
+    // a user's file only if no one else may write it.
+    let write = |bytes: &[u8]| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(bytes))
+            .is_ok()
+    };
     let ok = crate::dirs::make_private(&dirs.state).is_ok()
-        && serde_json::to_vec(all).is_ok_and(|b| std::fs::write(&tmp, b).is_ok())
+        && serde_json::to_vec(all).is_ok_and(|b| write(&b))
         && std::fs::rename(&tmp, &path).is_ok();
     if !ok {
         log("cannot keep what clients registered");
@@ -240,11 +258,11 @@ fn configured(dirs: &Dirs) -> Vec<PathBuf> {
 /// (DESIGN 1, 5).
 fn exclusions(config: &Config, registrations: &[Registration]) -> (Exclusions, usize) {
     let dirs = &config.dirs;
+    // The system service's defaults are each user's, kept as theirs are
+    // (`users_own`): resolved as the service, a link a user put there would
+    // take another's folder out.
     let (homes, store) = if config.system {
-        (
-            crate::system::homes(),
-            vec![PathBuf::from(crate::system::NIX_STORE)],
-        )
+        (Vec::new(), vec![PathBuf::from(crate::system::NIX_STORE)])
     } else {
         (vec![dirs.home.clone()], Vec::new())
     };
@@ -279,18 +297,25 @@ fn exclusions(config: &Config, registrations: &[Registration]) -> (Exclusions, u
 fn users_own(exclusions: &mut Exclusions, registrations: &[Registration]) -> usize {
     let users = crate::system::users();
     let mut refused = 0;
-    let mut keep = |uid: u32, home: &Path, path: &Path| {
-        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-        let kept = exclusions.insert_if(path, |resolved, id| {
-            crate::system::owned(uid, &home, resolved, id)
-        });
-        if !matches!(kept, Ok(true)) {
-            refused += 1;
-        }
-    };
+    let mut files = 0;
     for (uid, home) in &users {
-        for path in crate::system::own_exclusions(home, *uid) {
-            keep(*uid, home, &path);
+        // A default at its own place in the home, no link in its way, holds
+        // whoever owns it; reached through a link, only if the user owns
+        // what it leads to: resolved as the service, a link a user put
+        // there would take another's folder out. Not counted: a system
+        // user's home, owned by root, would refuse them all.
+        let at_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
+        for rel in skwird_crawl::exclude::DEFAULTS {
+            let place = at_home.join(rel);
+            let held = exclusions.insert_if(&place, |resolved, _| resolved == place);
+            if !matches!(held, Ok(true)) {
+                theirs_kept(exclusions, *uid, home, &home.join(rel));
+            }
+        }
+        let (theirs, untaken) = crate::system::own_exclusions(home, *uid);
+        files += untaken;
+        for path in theirs {
+            refused += usize::from(!theirs_kept(exclusions, *uid, home, &path));
         }
     }
     for r in registrations {
@@ -301,9 +326,27 @@ fn users_own(exclusions: &mut Exclusions, registrations: &[Registration]) -> usi
             .iter()
             .find(|(u, _)| *u == uid)
             .map_or_else(PathBuf::new, |(_, h)| h.clone());
-        keep(uid, &home, &r.path.to_path());
+        refused += usize::from(!theirs_kept(exclusions, uid, &home, &r.path.to_path()));
+    }
+    if files > 0 {
+        log(&format!(
+            "{files} users' files of exclusions not taken: not a file of theirs, or \
+             another user may write it"
+        ));
     }
     refused
+}
+
+/// `path` excluded for user `uid`, of home `home`, if they own the folder
+/// it resolves to ([`crate::system::owned`]): whether it was.
+fn theirs_kept(exclusions: &mut Exclusions, uid: u32, home: &Path, path: &Path) -> bool {
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    matches!(
+        exclusions.insert_if(path, |resolved, id| crate::system::owned(
+            uid, &home, resolved, id
+        )),
+        Ok(true)
+    )
 }
 
 fn log_refused(refused: usize) {
@@ -850,7 +893,29 @@ impl Writing<'_> {
     /// Take a client's registrations: what it adds is purged at once, what
     /// it takes back is read again. A client takes back only what it added.
     fn register(&mut self, client: &str, uid: Option<u32>, add: &[PathBuf], remove: &[PathBuf]) {
-        if !changed(&mut self.registrations, client, uid, add, remove) {
+        // At the system service, a user registers only folders they own,
+        // and at most so many: one refused is not kept, nor said kept.
+        let add: Vec<PathBuf> = match uid {
+            Some(uid) if self.config.system => {
+                let users = crate::system::users();
+                let home = users
+                    .iter()
+                    .find(|(u, _)| *u == uid)
+                    .map_or_else(PathBuf::new, |(_, h)| h.clone());
+                let held = self
+                    .registrations
+                    .iter()
+                    .filter(|r| r.uid == Some(uid))
+                    .count();
+                add.iter()
+                    .filter(|p| theirs_kept(&mut Exclusions::none(), uid, &home, p))
+                    .take(MOST_REGISTERED.saturating_sub(held))
+                    .cloned()
+                    .collect()
+            }
+            _ => add.to_vec(),
+        };
+        if !changed(&mut self.registrations, client, uid, &add, remove) {
             return;
         }
         // Kept first: a kill before the purge's save leaves it to the next
