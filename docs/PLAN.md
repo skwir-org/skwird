@@ -1408,6 +1408,17 @@ committed once the gate holds.
    A folder of 60,000 entries read again in 18.5 ms against 26 to 31.
    To be measured again, quiet.
 
+   **Measured at `0376f33`**, at a load of 3.5 to 7.6, the caches cold: a
+   change answered in 219 ms at the median, met; the sync 0.18 s, not.
+   Reads of small folders still cost 1.5 to 2.3 ms at the median. Read
+   through a keeper, as the service reads, a folder of 1,000 folders took
+   1.3 ms: views opening every column for one value, and the ACLs looked
+   at for every subfolder and their map made again at each application.
+   Now 646 µs (DESIGN 8, "An application costs what it changed"). To be
+   measured again, quiet. Seen once in the gate: inotify's test of a
+   folder removed found its watch gone in a second read, under load, a
+   test sensitive to timing.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

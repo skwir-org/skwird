@@ -472,9 +472,32 @@ impl Keeper {
         self.shape() == shape && self.index.facts_of(folder).is_some_and(|f| f.id == id)
     }
 
+    /// The folders whose ACL a read again may have changed, by what its
+    /// records say: each folder read or crawled, and each folder an entry
+    /// of them made or changed. Not every folder those hold: their ACLs
+    /// change only with their entries, which the records name (DESIGN 8).
+    fn acl_targets(&self, done: &Refreshed) -> Vec<FolderId> {
+        let mut looked = Vec::new();
+        for record in &done.records {
+            let Record::Folder(folder) = record else {
+                continue;
+            };
+            looked.extend(self.index.folder_at(&folder.path));
+            for change in &folder.changes {
+                if change.op != Op::Removed && change.entry.kind == skwird_crawl::Kind::Folder {
+                    let name = crate::index::component(&change.name);
+                    looked.extend(self.index.folder_at(&folder.path.join(name)));
+                }
+            }
+        }
+        looked.sort_unstable();
+        looked.dedup();
+        looked
+    }
+
     /// The access ACLs of the folders whose mode says they have one, read
     /// for the system service (`Options::acls`, DESIGN 4): of every folder,
-    /// or of those `only` names and the folders they hold. Each is read
+    /// or of those `only` names ([`Keeper::acl_targets`]). Each is read
     /// again only once its folder's change time moved, which a change of
     /// its ACL moves. One that cannot be read is left out: its folder is
     /// not known then, never answered as its mode alone says.
@@ -488,19 +511,20 @@ impl Keeper {
                 .root()
                 .map(|top| self.index.acl_folders_below(top))
                 .unwrap_or_default(),
-            Some(touched) => touched
-                .iter()
-                .flat_map(|&f| std::iter::once(f).chain(self.index.subfolders(f)))
-                .collect(),
+            Some(looked) => looked.to_vec(),
         };
+        // Kept for a pass over every folder alone, to let go of the rest.
         let mut seen = std::collections::HashSet::new();
+        let mut changed = false;
         for folder in folders {
             let Some(facts) = self.index.facts_of(folder) else {
                 continue;
             };
-            seen.insert(facts.id);
+            if only.is_none() {
+                seen.insert(facts.id);
+            }
             if facts.mode & skwird_crawl::ACL == 0 {
-                self.acls.remove(&facts.id);
+                changed |= self.acls.remove(&facts.id).is_some();
                 continue;
             }
             if self
@@ -510,6 +534,7 @@ impl Keeper {
             {
                 continue;
             }
+            changed = true;
             match self.root.access_acl(&self.index.path_of(folder), facts.id) {
                 Some(acl) => {
                     self.acls.insert(facts.id, (facts.ctime, acl));
@@ -521,7 +546,14 @@ impl Keeper {
         }
         // Every folder looked at: those no longer there have no ACL here.
         if only.is_none() {
+            let before = self.acls.len();
             self.acls.retain(|id, _| seen.contains(id));
+            changed |= self.acls.len() != before;
+        }
+        // Made again for the snapshots only when it changed: it holds every
+        // ACL of the root.
+        if !changed && only.is_some() {
+            return;
         }
         let acls = self
             .acls
@@ -557,8 +589,8 @@ impl Keeper {
     ) -> Result<Refreshed, Error> {
         let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders);
         if let Ok(d) = &done {
-            let touched: Vec<FolderId> = d.folders.iter().map(|&(f, _)| f).collect();
-            self.read_acls(Some(&touched));
+            let looked = self.acl_targets(d);
+            self.read_acls(Some(&looked));
         }
         self.root.let_go();
         let done = done?;

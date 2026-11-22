@@ -341,6 +341,42 @@ impl Chunk {
         Ok(chunk)
     }
 
+    /// Column `c`, opened alone.
+    fn col(&self, c: usize) -> Packed<'_> {
+        Packed::new(&self.bytes, &self.columns[c])
+    }
+
+    /// Block `b`'s entries, by their place in the chunk ([`View::entries`],
+    /// its column alone opened).
+    pub fn entries_of(&self, b: usize) -> Range<usize> {
+        let ends = self.col(B_END);
+        let start = if b == 0 { 0 } else { ends.get(b - 1) as usize };
+        start..ends.get(b) as usize
+    }
+
+    /// Entry `i`'s name ([`View::item_name`], its column alone opened).
+    #[allow(clippy::cast_possible_truncation)] // packed from a name's number
+    pub fn item_name(&self, i: usize) -> u32 {
+        self.col(I_NAME).get(i) as u32
+    }
+
+    /// Entry `i`'s folder, if it is one ([`View::item_child`], its column
+    /// alone opened).
+    #[allow(clippy::cast_possible_truncation)] // packed from a folder's number
+    pub fn item_child(&self, i: usize) -> Option<FolderId> {
+        self.col(I_CHILD)
+            .get(i)
+            .checked_sub(1)
+            .map(|c| c as FolderId)
+    }
+
+    /// Block `b`'s facts, its own columns alone opened: a view opens every
+    /// column, which a read of a folder of folders, looking up each one's
+    /// facts, paid for each (DESIGN 8).
+    pub fn facts(&self, b: usize) -> Option<Facts> {
+        facts_at(|c| self.col(c).get(b))
+    }
+
     /// Every column, read in place.
     pub fn view(&self) -> View<'_> {
         View {
@@ -564,6 +600,27 @@ impl Chunk {
     }
 }
 
+/// A block's facts, from `value`, which gives a block column's value at it:
+/// read alike from a view and from a chunk's columns alone.
+#[allow(clippy::cast_possible_truncation)] // the values were packed from these types
+fn facts_at(value: impl Fn(usize) -> u64) -> Option<Facts> {
+    let time = |sec, nsec| Time {
+        sec: to_signed(value(sec)),
+        nsec: value(nsec) as u32,
+    };
+    (value(B_FACTS) == 1).then(|| Facts {
+        id: FileId {
+            dev: value(B_DEV),
+            ino: value(B_INO),
+        },
+        ctime: time(B_CTIME, B_CTIME_NS),
+        mtime: time(B_MTIME, B_MTIME_NS),
+        owner: value(B_OWNER) as u32,
+        group: value(B_GROUP) as u32,
+        mode: value(B_MODE) as u16,
+    })
+}
+
 /// A chunk's columns, read in place.
 pub struct View<'a> {
     cols: [Packed<'a>; COLUMNS],
@@ -632,17 +689,7 @@ impl View<'_> {
     }
 
     pub fn facts(&self, b: usize) -> Option<Facts> {
-        (self.cols[B_FACTS].get(b) == 1).then(|| Facts {
-            id: FileId {
-                dev: self.cols[B_DEV].get(b),
-                ino: self.cols[B_INO].get(b),
-            },
-            ctime: self.time(B_CTIME, B_CTIME_NS, b),
-            mtime: self.time(B_MTIME, B_MTIME_NS, b),
-            owner: self.cols[B_OWNER].get(b) as u32,
-            group: self.cols[B_GROUP].get(b) as u32,
-            mode: self.cols[B_MODE].get(b) as u16,
-        })
+        facts_at(|c| self.cols[c].get(b))
     }
 
     /// The column of the entries' names, for a scan to decode by runs.

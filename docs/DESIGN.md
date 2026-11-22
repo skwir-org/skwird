@@ -953,6 +953,28 @@ On the host, built optimised: a folder of 60,000 entries read again for
 a file written in 18.5 ms, against 26 to 31; of 3,000, 0.73 ms against
 1.2 to 1.4; of 8, 53 µs.
 
+**An application costs what it changed** (the same day, the user's run
+at `0376f33`: reads of folders of at most 40 entries still at 1.5 to
+2.3 ms at the median, where the index crate's trial read one in 53 µs).
+The trial read through `reread_named` alone; read through a keeper, as
+the service does (its log made durable, its ACLs read, a snapshot held
+as the published one is), a folder of 1,000 folders cost 1.3 ms. Its
+profile:
+- **a view opened every column** of a chunk to read one value, and a
+  folder's facts were looked up so, three times for each subfolder (its
+  device, whether it is the same folder, its ACL flag): `facts_of` and
+  `folder_at` (each event found) now open the columns they read alone;
+- **the ACLs were looked at for every subfolder** of a folder read, and
+  every ACL of the root copied into a new map at each application. Now
+  the folders a read's records name are looked at (those read or
+  crawled, and each folder an entry of them made or changed), and the
+  map is made again only where one changed.
+
+Through the keeper, with ACLs, a folder of 1,000 folders is read again
+in 646 µs against 1.3 ms, its ACLs costing 45 µs against 310; one of 8
+entries in 160 µs, mostly the log's `fdatasync` (118 µs of processor
+time on the user's btrfs).
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

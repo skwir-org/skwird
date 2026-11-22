@@ -191,22 +191,23 @@ impl Index {
         for part in rel.components() {
             let name = part.as_os_str().as_encoded_bytes();
             let loc = self.tree.loc(folder)?;
-            let view = self.tree.chunk(loc.chunk).view();
-            let entries = view.entries(loc.block as usize);
+            // The columns it reads alone opened: it runs for each event.
+            let chunk = self.tree.chunk(loc.chunk);
+            let entries = chunk.entries_of(loc.block as usize);
             // Entries are in the order of their names' bytes.
             let (mut lo, mut hi) = (entries.start, entries.end);
             while lo < hi {
                 let mid = usize::midpoint(lo, hi);
-                if self.names.get(view.item_name(mid)) < name {
+                if self.names.get(chunk.item_name(mid)) < name {
                     lo = mid + 1;
                 } else {
                     hi = mid;
                 }
             }
-            if lo == entries.end || self.names.get(view.item_name(lo)) != name {
+            if lo == entries.end || self.names.get(chunk.item_name(lo)) != name {
                 return None;
             }
-            folder = view.item_child(lo)?;
+            folder = chunk.item_child(lo)?;
         }
         Some(folder)
     }
@@ -491,7 +492,7 @@ impl Index {
     /// A folder's facts, read from its block alone.
     pub fn facts_of(&self, folder: FolderId) -> Option<crate::block::Facts> {
         let loc = self.tree.loc(folder)?;
-        self.tree.chunk(loc.chunk).view().facts(loc.block as usize)
+        self.tree.chunk(loc.chunk).facts(loc.block as usize)
     }
 
     /// Let go of every name that no entry and no folder holds any more:

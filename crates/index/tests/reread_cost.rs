@@ -186,3 +186,87 @@ fn reading_a_folder_again_for_one_file() {
         );
     }
 }
+
+/// What making a log's append durable costs, as the keeper does at each
+/// application (`Log::sync`): a small append and `fdatasync`, on the
+/// filesystem of the user's cache, in the thread's processor time and in
+/// the clock's.
+#[test]
+#[ignore = "a trial; run by hand"]
+fn making_an_append_durable() {
+    use std::io::Write;
+    let s = skwird_testkit::Scratch::new("sync-cost");
+    let mut file = std::fs::File::create(s.join("log")).unwrap();
+    let mut cpu = Vec::new();
+    let mut wall = Vec::new();
+    for i in 0..200u32 {
+        file.write_all(&[u8::try_from(i % 251).unwrap(); 120])
+            .unwrap();
+        let (c, w) = (thread_time(), std::time::Instant::now());
+        file.sync_data().unwrap();
+        cpu.push(thread_time().saturating_sub(c));
+        wall.push(w.elapsed());
+    }
+    cpu.sort_unstable();
+    wall.sort_unstable();
+    println!(
+        "an append made durable: {:?} of processor time at the median ({:?} at most), {:?} of the clock's ({:?} at most)",
+        cpu[100], cpu[199], wall[100], wall[199]
+    );
+}
+
+/// A read again as the engine makes it: through a keeper (its log
+/// appended and made durable, its ACLs, its live scopes), a snapshot of
+/// the index held meanwhile, as the engine holds the one it published.
+#[test]
+#[ignore = "builds a tree of 900,000 entries and an index of it; run by hand"]
+fn reading_again_through_the_keeper() {
+    use skwird_index::keeper::Keeper;
+    let base = tree();
+    let dir = base.with_file_name("reread-cost-index");
+    let root = Root::open(&base, Exclusions::none()).unwrap();
+    // As the system service reads: each folder's ACL flag, and the ACLs.
+    let opts = Options {
+        acls: std::env::var_os("NO_ACLS").is_none(),
+        ..Options::default()
+    };
+    let cancel = Cancel::default();
+    let (mut keeper, _) = Keeper::open(&dir, root, opts, Limits::default(), &cancel).unwrap();
+    let rounds: usize = std::env::var("ROUNDS")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(30);
+    let only = std::env::var("ONLY").ok();
+    for (label, rel) in [
+        ("tiny", "t050/0500"),
+        ("medium", "medium-07"),
+        ("big", "big"),
+        // A folder of 1,000 folders.
+        ("parent", "t050"),
+    ] {
+        if only.as_deref().is_some_and(|o| o != label) {
+            continue;
+        }
+        let folder = keeper.index().folder_at(Path::new(rel)).unwrap();
+        let name = "entry-000003";
+        let mut published = std::sync::Arc::new(keeper.snapshot());
+        let mut reads = Vec::with_capacity(rounds);
+        for i in 0..rounds {
+            std::fs::write(base.join(rel).join(name), format!("k{i}")).unwrap();
+            let names: HashSet<Box<[u8]>> = [Box::from(name.as_bytes())].into();
+            let start = thread_time();
+            keeper
+                .heard_named(&[(folder, Some(names))], &cancel)
+                .unwrap();
+            published = std::sync::Arc::new(keeper.snapshot());
+            reads.push(thread_time().saturating_sub(start));
+        }
+        drop(published);
+        reads.sort_unstable();
+        println!(
+            "{label:6}: through the keeper {:?} at the median, {:?} at least",
+            reads[rounds / 2],
+            reads[0]
+        );
+    }
+}
