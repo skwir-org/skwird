@@ -1530,6 +1530,16 @@ committed once the gate holds.
    more, 150 ms at the median (DESIGN 8, "A wake for many events"). To
    be measured on the user's machine.
 
+   **Measured at `9196a7f`**, at a load of 4 to 6.6: a change answered in
+   167 ms at the median and 455 ms at most, all ten; idle 0.47 s in 30 s
+   (1.6%), met: the writer 0.42 s, the reader 0.03 s against 0.19 to
+   0.24 s before the longer wait; the query as the user 1.09 times
+   root's; read back 1.13 s; builds 7.4 to 7.7 s. Every budget met but
+   the sync: 0.13 s against 0.1, 0.09 s of it on a processor, the
+   applications it takes at once among it (27 ms in its interval, a
+   folder of 59,469 entries read in 26 to 45 ms). No storm came in this
+   run: what one costs on the user's machine is still to be measured.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
