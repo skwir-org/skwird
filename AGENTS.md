@@ -81,8 +81,11 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - Tests that need root (fanotify, a system service) run in a virtual
   machine, never on a developer's own system. The flake's `checks` are
   those machines (`tools/vm/`, NixOS's test framework, QEMU):
-  `nix build .#checks.x86_64-linux.user-service -L`, or its
-  `.driverInteractive` to work in the machine by hand. They use KVM
+  `nix build .#checks.x86_64-linux.user-service -L` (and `system-service`,
+  `root`), or its `.driverInteractive` to work in the machine by hand.
+  The service's own lines go to the machine's journal, not its console:
+  a test that waits on the service prints `journalctl -u ...` to see
+  why it does not answer. They use KVM
   where the processor's virtualization is on; otherwise QEMU emulates
   the processor, many times slower.
 - A test that needs root lives in a `tests/root*.rs` of its crate, and

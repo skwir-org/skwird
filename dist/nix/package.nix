@@ -34,6 +34,12 @@ rustPlatform.buildRustPackage {
     install -Dm644 dist/systemd/skwird.service dist/systemd/skwird.socket -t $out/lib/systemd/user
     substituteInPlace $out/lib/systemd/user/skwird.service \
       --replace-fail /usr/bin/skwird $out/bin/skwird
+    # The system service (phase 3): every user answered what they could
+    # list.
+    install -Dm644 dist/systemd/skwird-system.service -t $out/lib/systemd/system
+    substituteInPlace $out/lib/systemd/system/skwird-system.service \
+      --replace-fail /usr/bin/skwird $out/bin/skwird
+    install -Dm644 dist/sysusers/skwird.conf -t $out/lib/sysusers.d
     install -Dm644 LICENSE-MIT LICENSE-APACHE -t $out/share/licenses/skwird
   '';
 

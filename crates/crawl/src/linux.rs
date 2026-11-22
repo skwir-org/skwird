@@ -88,7 +88,9 @@ impl Root {
             return Err(Error::Kernel("statx's mount id (Linux 5.8)"));
         }
         if let Err(Errno::NOSYS) = openat2(&fd, Path::new(".")) {
-            return Err(Error::Kernel("openat2 (Linux 5.6)"));
+            return Err(Error::Kernel(
+                "openat2 (Linux 5.6), or lets a system call filter refuse it",
+            ));
         }
         let stat = folder_stat(&st);
         // By its mount's id too: a bind mount of a share is spelled as any

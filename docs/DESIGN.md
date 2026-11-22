@@ -400,6 +400,19 @@ proved as root in the test machine on Linux 6.18.58):
   It reads every name on the machine and answers any local user, so it
   is treated as attack surface from the first line.
 
+  **As built** (step 7, `dist/systemd/skwird-system.service`): a static
+  user, `skwird` (systemd-sysusers, `dist/sysusers/skwird.conf`), with
+  `CAP_SYS_ADMIN` and `CAP_DAC_READ_SEARCH` alone, ambient and bounding;
+  `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`,
+  `PrivateNetwork`, `PrivateDevices`, AF_UNIX alone, the kernel's
+  tunables, modules, logs, clock and control groups protected, no new
+  namespaces, and `@system-service`'s calls with the few it needs beyond
+  (`openat2`, fanotify, handles, the mount calls). Not `DynamicUser`,
+  which implies `RestrictSUIDSGID`, which refuses `openat2` whole
+  (systemd cannot read its flags, behind a pointer): the crawl needs it
+  to follow no link. Its index and state are its own (0700), its socket
+  every user's (0666, its folder 0755).
+
 **As built** (phase 3, step 5, 2026-11-22: `skwird::asker`):
 - Root, and a user asking their own engine, see the index whole. Any
   other user asking the system service is answered a result only if

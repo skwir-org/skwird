@@ -404,6 +404,33 @@ fn the_users_exclusions_hold_from_the_next_sync_and_the_next_start() {
     assert_eq!(holes_of(&mut c, &home), [(excluded, Why::Excluded)]);
 }
 
+/// A line added to the user's exclusions holds from a sync of a live
+/// folder too, which the barrier serves, not the check: phase 3 found it
+/// held from a checked sync alone.
+#[test]
+fn the_users_exclusions_hold_from_a_sync_of_a_live_folder() {
+    let mut env = Env::new("engine-configured-live");
+    tree(&env);
+    std::thread::sleep(Duration::from_millis(2200));
+    let home = env.home();
+    let docs = home.join("docs");
+    let file = env.s.join("config/skwird/exclude");
+    let report = named(&home, "report 3.txt");
+    env.engine(30);
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    wait_for(5, "live", || is_live(&mut c, &docs));
+    assert_eq!(answered(&mut c, &report).len(), 1);
+    env.s.write(&file, b"~/docs/d03\n");
+    let synced = c.sync(&docs).unwrap();
+    assert!(
+        matches!(synced.names, Proof::Live(_)),
+        "served by the barrier: {:?}",
+        synced.names
+    );
+    assert!(answered(&mut c, &report).is_empty(), "its names gone");
+}
+
 /// An engine goes once its last client has been gone its idle time.
 #[test]
 fn an_engine_goes_once_idle() {

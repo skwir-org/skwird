@@ -69,7 +69,26 @@ every user:
 imports = [ skwird.nixosModules.default ];
 services.skwird.enable = true;
 # services.skwird.session = false;   # installed only: clients start it
+# services.skwird.system = true;     # the system service (experimental)
 ```
+
+### As the system service (experimental, phase 3)
+
+`skwird serve --system`, run from boot by `dist/systemd/skwird-system.service`
+(or the module's `services.skwird.system`), covers every local filesystem
+that stores files, the Nix store left out, each marked whole with
+fanotify, so every change is heard without a watch per folder. It answers
+every user what they could list, from their user and groups as the
+socket gives them. It keeps every user's private folders out of its
+index: the default ones in every home, and each user's own
+`~/.config/skwird/exclude` and registrations. It runs as a user of its
+own with two capabilities alone (`CAP_SYS_ADMIN` for fanotify,
+`CAP_DAC_READ_SEARCH` to read every folder), sandboxed, its index its
+own. Clients find it first, so a user's engine is no longer needed.
+
+Not yet: folders with an ACL are answered to root alone (others walk
+them), the journal is root's alone, and a filesystem mounted after it
+started waits for its next start.
 
 ## Measuring
 

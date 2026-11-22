@@ -1191,6 +1191,31 @@ committed once the gate holds.
    the folders asked, every folder being heard already.
 7. **The sandboxed unit,** the module's `services.skwird.system`, and a
    machine proving the service whole with two users.
+
+   **Done on 2026-11-22.** The unit (DESIGN 4, "As built"), its user
+   for systemd-sysusers, both in the package; the module's
+   `services.skwird.system`, which turns the user's engine (`session`)
+   off by default, since every client finds the system service first and
+   nothing that watches runs twice for one user (rule 4). The machine
+   `system-service` (`tools/vm/system-service.nix`) proves it whole, with
+   two users, one in a group: the service runs as its own user with two
+   capabilities alone, its index closed to users; every client finds it;
+   a change is heard live and answered to who may list it (one user's
+   home 0700, the other answered nothing there and told it is denied);
+   a folder its group reads is answered to the group alone; `~/.ssh` is
+   never indexed, and a line the user adds to their file holds from their
+   next sync.
+
+   Found on the way: `DynamicUser` implies `RestrictSUIDSGID`, which
+   makes systemd refuse `openat2` whole, so the service started, found no
+   root it could read, and said the kernel lacked `openat2` (now: "or
+   lets a system call filter refuse it"). A run of the machine tried each
+   option alone to find it. The folders' check now follows a link to the
+   folder it names, where systemd makes them links. And a line added to a
+   user's file held from a checked sync alone, not from a sync of a live
+   folder, which the barrier serves: in both engines, since phase 2. It
+   holds from every sync now, and a test of the user's engine proves it
+   (it fails without the fix).
 8. **Budgets,** measured by the user on their machine, as root.
 
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),

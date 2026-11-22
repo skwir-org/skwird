@@ -60,6 +60,7 @@
           ./Cargo.lock
           ./crates
           ./dist/systemd
+          ./dist/sysusers
           ./LICENSE-MIT
           ./LICENSE-APACHE
         ];
@@ -123,6 +124,7 @@
       # where it is not.
       checks = lib.optionalAttrs stdenv.hostPlatform.isLinux {
         user-service = import ./tools/vm/user-service.nix {inherit self pkgs;};
+        system-service = import ./tools/vm/system-service.nix {inherit self pkgs;};
         root = import ./tools/vm/root.nix {
           inherit pkgs;
           tests = rootTests;

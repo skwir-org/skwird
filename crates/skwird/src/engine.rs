@@ -551,6 +551,9 @@ impl Writing<'_> {
                         other => self.pending.insert(0, other),
                     }
                 }
+                // A line added to a user's file holds from the next sync,
+                // served by the barrier or by the check (DESIGN 5).
+                self.hold_to_exclusions();
                 // Live, a barrier serves: a cookie heard in its turn says
                 // every change before it was heard (DESIGN 2). Otherwise,
                 // the check.
@@ -990,13 +993,11 @@ impl Writing<'_> {
         }
     }
 
-    /// A sync served by the check: what was heard applied first, the
-    /// user's exclusions read again, every folder of the root compared.
+    /// A sync served by the check: what was heard applied first, then
+    /// every folder of the root compared.
     fn check_now(&mut self, root: usize, replies: Vec<Sender<()>>) {
         let heard = self.gather.take(root);
         self.apply_heard(root, &heard);
-        // A line added to the user's file holds from the next sync.
-        self.hold_to_exclusions();
         if let Some(keeper) = self.keepers[root].as_mut() {
             refresh(keeper, root, self.shared, &self.cancel);
         }

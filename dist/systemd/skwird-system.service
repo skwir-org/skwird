@@ -1,0 +1,71 @@
+# skwird, the system service (docs/DESIGN.md, decisions 1 and 4; PLAN,
+# phase 3): every local filesystem that stores files marked whole
+# (fanotify), every user answered what they could list.
+#
+# Copy it to /etc/systemd/system/ (a package puts it in
+# /usr/lib/systemd/system/), point ExecStart at skwird where it is
+# installed, then: systemctl enable --now skwird-system.service
+[Unit]
+Description=skwird, the system's index of file names kept current
+Documentation=https://skwir.org
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/skwird serve --system --forever
+Restart=on-failure
+
+# A user of its own, with only what it needs: CAP_SYS_ADMIN to mark whole
+# filesystems (broad, the price of fanotify), CAP_DAC_READ_SEARCH to read
+# every folder and open what fanotify names.
+# Not DynamicUser, which implies RestrictSUIDSGID (below): a static user,
+# made by systemd-sysusers (dist/sysusers/skwird.conf).
+User=skwird
+Group=skwird
+AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# Its socket, every user's to reach (it answers each what they could
+# list); its index and state its own.
+RuntimeDirectory=skwird
+RuntimeDirectoryMode=0755
+CacheDirectory=skwird
+CacheDirectoryMode=0700
+StateDirectory=skwird
+StateDirectoryMode=0700
+ConfigurationDirectory=skwird
+
+# It reads every name on the machine and answers any local user: treated
+# as attack surface. It writes nothing but its own folders, and nothing
+# leaves the machine (rule 6).
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# Not RestrictSUIDSGID: systemd then refuses openat2 whole (its flags are
+# behind a pointer seccomp cannot read), which the crawl needs to follow
+# no link. ProtectSystem=strict leaves it no folder but its own to write.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# The services' calls, and the few it needs beyond: a path opened
+# following no link (openat2), the ACLs asked, fanotify, file handles, and
+# a btrfs mounted again at its top level for its mark.
+SystemCallFilter=@system-service openat2 statx fgetxattr lgetxattr fanotify_init fanotify_mark name_to_handle_at open_by_handle_at fsopen fsconfig fsmount
+
+# A crawl yields to what the users are doing.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -103,8 +103,11 @@ pub fn check_socket_path(path: &Path) -> Result<(), String> {
 pub fn make_private(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot make a folder of skwird's: {e}"))?;
-    let meta = std::fs::symlink_metadata(dir)
-        .map_err(|e| format!("cannot stat a folder of skwird's: {e}"))?;
+    // The folder a link there leads to: with DynamicUser, systemd makes
+    // the service's state and cache folders links into `private/`. It
+    // must still be the user's own, as checked here.
+    let meta =
+        std::fs::metadata(dir).map_err(|e| format!("cannot stat a folder of skwird's: {e}"))?;
     if !meta.is_dir() || meta.uid() != rustix::process::geteuid().as_raw() {
         return Err("a folder of skwird's is not its user's own: refused".into());
     }
@@ -130,8 +133,11 @@ pub fn make_private(_: &Path) -> Result<(), String> {
 pub fn make_shared(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot make a folder of skwird's: {e}"))?;
-    let meta = std::fs::symlink_metadata(dir)
-        .map_err(|e| format!("cannot stat a folder of skwird's: {e}"))?;
+    // The folder a link there leads to: with DynamicUser, systemd makes
+    // the service's state and cache folders links into `private/`. It
+    // must still be the user's own, as checked here.
+    let meta =
+        std::fs::metadata(dir).map_err(|e| format!("cannot stat a folder of skwird's: {e}"))?;
     if !meta.is_dir() || meta.uid() != rustix::process::geteuid().as_raw() {
         return Err("a folder of skwird's is not its user's own: refused".into());
     }
