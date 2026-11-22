@@ -222,6 +222,9 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
     let generation = previous.as_ref().map_or(0, |m| m.generation + 1);
     let mut next_segment = previous.as_ref().map_or(0, |m| m.next_segment);
     let mut segments = Vec::new();
+    // Whether a file of names is written: only then are they read from
+    // their files again.
+    let mut wrote_names = false;
     for segment in index.names().segments() {
         match segment.file() {
             Some(id) if segment.is_mapped() && dir.join(names_file(id)).is_file() => {
@@ -231,6 +234,7 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
                 write_file(dir, &names_file(next_segment), segment.bytes())?;
                 segments.push(next_segment);
                 next_segment += 1;
+                wrote_names = true;
             }
         }
     }
@@ -238,6 +242,7 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
         write_file(dir, &names_file(next_segment), &bytes)?;
         segments.push(next_segment);
         next_segment += 1;
+        wrote_names = true;
     }
     // A chunk changed in memory under a number a file already has (patched
     // or spliced since it was saved) takes another first: no file a saved
@@ -283,7 +288,10 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
     for id in &ids {
         m.extend_from_slice(&id.to_le_bytes());
     }
-    sync_dir(dir)?;
+    // What was written is named in the folder before the manifest names it.
+    if wrote_names || !written.is_empty() {
+        sync_dir(dir)?;
+    }
     write_file(dir, MANIFEST, &m)?;
     sync_dir(dir)?;
     // Saved: what is written is read from its file from now on.
@@ -296,15 +304,19 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
             index.tree_mut().set_chunk(id, Arc::new(chunk));
         }
     }
-    if let Some(mapped) = segments
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| {
-            let bytes = open(dir, &names_file(id)).ok()?;
-            Segment::from_bytes(bytes, i == 0, Some(id)).ok()
-        })
-        .collect::<Option<Vec<_>>>()
-    {
+    // Read from their files again only where one was written: those
+    // already read from theirs are as they were.
+    let mapped = || {
+        segments
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let bytes = open(dir, &names_file(id)).ok()?;
+                Segment::from_bytes(bytes, i == 0, Some(id)).ok()
+            })
+            .collect::<Option<Vec<_>>>()
+    };
+    if wrote_names && let Some(mapped) = mapped() {
         index.names_mut().sealed(mapped);
     }
     remove_unnamed(dir, &segments, &ids);

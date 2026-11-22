@@ -110,6 +110,9 @@ pub struct Keeper {
     /// The access ACLs read, by folder identity, each with the change
     /// time its folder had: read again once it moves.
     acls: HashMap<skwird_crawl::FileId, (Time, skwird_crawl::acl::Acl)>,
+    /// The log's epoch and last record when the index was last saved, or
+    /// found saved: none until it is ([`Keeper::save`]).
+    saved: Option<(u64, u64)>,
 }
 
 /// An epoch not `other`: the time, and the process.
@@ -156,6 +159,7 @@ impl Keeper {
                         by_folder: HashMap::new(),
                         live: Vec::new(),
                         acls: HashMap::new(),
+                        saved: Some((mark.epoch, mark.log_seq)),
                     };
                     if keeper.log.is_none() {
                         // The journal cannot go on from a log not found.
@@ -201,6 +205,7 @@ impl Keeper {
             by_folder: HashMap::new(),
             live: Vec::new(),
             acls: HashMap::new(),
+            saved: None,
         };
         keeper.note(&built.watches);
         // Saved at once, so that the next start loads it; a save that
@@ -754,6 +759,12 @@ impl Keeper {
     /// they go, the files no manifest names removed, and logs of other
     /// epochs let go of. A log grown past its limit starts another epoch.
     pub fn save(&mut self) -> std::io::Result<()> {
+        // Nothing new since the last save: nothing written, not even the
+        // manifest (DESIGN 8, "A save writes what is new"). The proof saved
+        // then stays older, which claims less.
+        if !self.unsaved() {
+            return Ok(());
+        }
         if self.log.is_none() {
             self.new_epoch()?;
         }
@@ -781,7 +792,22 @@ impl Keeper {
             )?;
         }
         self.remove_other_logs();
+        self.saved = self.log.as_ref().map(|log| (log.epoch(), log.next() - 1));
         Ok(())
+    }
+
+    /// Whether anything is new since the last save: a record logged, a
+    /// chunk not read from its file, a name not in one, or no save yet.
+    fn unsaved(&self) -> bool {
+        let at = self.log.as_ref().map(|log| (log.epoch(), log.next() - 1));
+        at.is_none()
+            || at != self.saved
+            || self
+                .index
+                .tree()
+                .chunks()
+                .any(|(_, chunk)| !chunk.is_mapped())
+            || self.index.names().unsaved()
     }
 
     fn remove_other_logs(&self) {

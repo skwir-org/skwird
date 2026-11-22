@@ -1064,6 +1064,32 @@ held alone tell it. With the second batch's folders taken as kept but
 not held, it fails there. What it saves on the user's machine is to be
 measured.
 
+**A save writes what is new** (the same day, the user's run at
+`c4c55ca`, at a load of 10 to 22: saves of 18 to 86 ms of processor
+time, charged to the account, every 10 s or so). The service saves all
+its roots at once, eight on the user's machine. Each save of a root
+wrote its manifest and made it durable, with its folder twice, whether
+anything had changed or not. It read its names from their files again,
+and looked on disk for every chunk, twice. On the user's btrfs, in a
+trial of an index of 900,000 entries in 68 chunks, timing each step:
+the manifest made durable took 1.5 to 2.1 ms of processor time, the
+names read again 0.2 to 0.4 ms, each chunk written and made durable
+about 1.1 ms. Now:
+- **a root with nothing new is not saved:** no record logged since its
+  last save (a check logs its proof, so a root only kept live logs
+  nothing), every chunk read from its file, every name in one. Its
+  proof saved then stays older, which claims less;
+- **the names are read from their files again only where one was
+  written,** and the folder is made durable before the manifest only
+  where a file was written in it.
+
+In the trial, a save with nothing new takes 1.2 µs against 0.7 to
+2.5 ms, and one with a folder changed 1.7 ms against 2.1. What a save
+of many folders costs is still each chunk made durable, about 1.1 ms
+each. On the user's machine, the hold of the kept finding showed too:
+while the home was built, finding took 1 to 8 ms a save interval, 82
+folders in a root being opened found and 511 taken as known.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

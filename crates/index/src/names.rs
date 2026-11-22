@@ -296,6 +296,12 @@ impl Names {
         &self.segments
     }
 
+    /// Whether a name is not in a file yet: given since the last save, or in
+    /// a segment not read from its file.
+    pub fn unsaved(&self) -> bool {
+        !self.pending.builder.is_empty() || self.segments.iter().any(|s| !s.is_mapped())
+    }
+
     /// The names given since the last save, as a segment's bytes, or none.
     pub fn pending_bytes(&self) -> Option<Vec<u8>> {
         (!self.pending.builder.is_empty()).then(|| self.pending.builder.clone().finish())

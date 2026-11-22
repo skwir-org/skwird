@@ -270,3 +270,67 @@ fn reading_again_through_the_keeper() {
         );
     }
 }
+
+/// What a save costs (`Keeper::save`), as the engine saves after what is
+/// heard: with nothing changed since the last, with one folder changed,
+/// and with ten in chunks apart; in the thread's processor time and the
+/// clock's. A trial; `ROUNDS` saves of each.
+#[test]
+#[ignore = "builds a tree of 900,000 entries and an index of it; run by hand"]
+fn saving() {
+    use skwird_index::keeper::Keeper;
+    let base = tree();
+    let dir = base.with_file_name("reread-cost-saves");
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = Root::open(&base, Exclusions::none()).unwrap();
+    let opts = Options {
+        acls: true,
+        ..Options::default()
+    };
+    let cancel = Cancel::default();
+    let (mut keeper, _) = Keeper::open(&dir, root, opts, Limits::default(), &cancel).unwrap();
+    keeper.save().unwrap();
+    let rounds: usize = std::env::var("ROUNDS")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(10);
+    let chunks = keeper.index().tree().chunk_ids().len();
+    let mut n = 0;
+    for (label, folders) in [
+        ("nothing changed", Vec::new()),
+        ("one folder", vec!["t050/0500".to_owned()]),
+        (
+            "ten folders",
+            (0..10)
+                .map(|i| format!("t{:03}/0{:03}", i * 10, i * 37))
+                .collect(),
+        ),
+    ] {
+        let mut cpu = Vec::new();
+        let mut wall = Vec::new();
+        for _ in 0..rounds {
+            for rel in &folders {
+                n += 1;
+                std::fs::write(base.join(rel).join("entry-000003"), format!("s{n}")).unwrap();
+                let folder = keeper.index().folder_at(Path::new(rel)).unwrap();
+                let names: HashSet<Box<[u8]>> = [Box::from(&b"entry-000003"[..])].into();
+                keeper
+                    .heard_named(&[(folder, Some(names))], &cancel)
+                    .unwrap();
+            }
+            let (c, w) = (thread_time(), std::time::Instant::now());
+            keeper.save().unwrap();
+            cpu.push(thread_time().saturating_sub(c));
+            wall.push(w.elapsed());
+        }
+        cpu.sort_unstable();
+        wall.sort_unstable();
+        println!(
+            "a save, {label:15}: {:?} of processor time at the median ({:?} at most), {:?} of the clock's; {chunks} chunks",
+            cpu[rounds / 2],
+            cpu[rounds - 1],
+            wall[rounds / 2]
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

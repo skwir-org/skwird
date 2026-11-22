@@ -571,6 +571,40 @@ fn a_folders_acl_is_kept_through_applications_and_saves() {
     assert_eq!(has(&k), (true, true), "its ACL given again");
 }
 
+/// A save with nothing new since the last writes nothing, not even the
+/// manifest (DESIGN 8, "A save writes what is new"): the service saves
+/// every root at once, most of them unchanged. A change heard after is
+/// saved, and read back.
+#[test]
+fn a_save_with_nothing_new_writes_nothing() {
+    let s = Scratch::new("keeper-save-nothing");
+    s.file("a/one");
+    let (mut k, _) = keeper(&s);
+    let manifest = s.join("index/manifest");
+    let written = || std::fs::metadata(&manifest).unwrap().modified().unwrap();
+    k.save().unwrap();
+    let before = written();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    k.save().unwrap();
+    assert_eq!(written(), before, "nothing new: nothing saved again");
+    s.file("a/two");
+    let a = k.index().folder_at(Path::new("a")).unwrap();
+    k.heard_named(&[(a, None)], &Cancel::default()).unwrap();
+    k.save().unwrap();
+    assert!(written() > before, "a change saved");
+    let after = written();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    k.save().unwrap();
+    assert_eq!(written(), after, "nothing new since");
+    drop(k);
+    let (k, opened) = keeper(&s);
+    assert!(
+        matches!(opened, Opened::Loaded { replayed: 0, .. }),
+        "{opened:?}"
+    );
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+}
+
 /// A file written to, heard by its name, is patched into its chunk, not
 /// cut again (DESIGN 8): its new size is answered, a query on size
 /// finding it by its zone, and it is saved and read back so, under its

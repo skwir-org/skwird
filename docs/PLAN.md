@@ -1476,6 +1476,17 @@ committed once the gate holds.
    gave"). The account is still owed on this desktop: saves of 67 to
    116 ms and reads of 75 ms of the large folders are charged to it.
 
+   **Measured at `c4c55ca`**, at a load of 10 to 22, the heaviest of the
+   day: a change answered in 3.0 s at the median, four of ten not within
+   10 s; the sync 0.53 s (0.41 s on a processor, none waiting for one);
+   idle 2.4%. While the home was built, finding took 1 to 8 ms a save
+   interval against 273 ms. Saves cost 18 to 86 ms each, every root
+   saved whether changed or not. The user's choice: keep the budget,
+   make the saves cheaper. Now a root with nothing new is not saved,
+   and a save reads its names again only where it wrote one (DESIGN 8,
+   "A save writes what is new"). Still to see: what each chunk made
+   durable costs a save of many folders.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
