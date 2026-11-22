@@ -62,7 +62,14 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   is heard (finding, applying, saving) is timed by its own thread's
   clock and held to 1%, half the idle budget. Reading events cannot wait
   without losing them. A share that counted applying alone took the
-  whole 2%, and the system service took 2.8%.
+  whole 2%, and the system service took 2.8%. A share each folder keeps
+  to bounds one folder, not many: what no folder's own hold bounds goes
+  through one account (`live::Gather::spent`), or 30 busy folders take
+  20% of a core.
+- **Wake for a batch, not for each event.** A thread woken once for each
+  event spends more on waking than on the event: the writer woke 3,300
+  times for 3,700 events, 60% of its time. The reader waits a little
+  after a read that gave events (`live::READ_EVERY`), never while idle.
 - **What is found in an index is kept only while the index keeps its
   shape** (`Tree::shape`: no folder made, moved or let go of). An
   identity does not say where a folder is: a folder moved is in the

@@ -555,7 +555,10 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
-        done: Done::default(),
+        done: Done {
+            since: thread_time(),
+            ..Done::default()
+        },
         pending: Vec::new(),
     };
     w.hear_whole(since, &built);
@@ -572,6 +575,7 @@ pub fn writer(
                     match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
                         Ok(c) => c,
                         Err(RecvTimeoutError::Timeout) => {
+                            w.done.wakes += 1;
                             w.on_time();
                             continue;
                         }
@@ -580,6 +584,7 @@ pub fn writer(
                 }
             },
         };
+        w.done.wakes += 1;
         if !w.answer(commands, command) {
             break;
         }
@@ -795,11 +800,17 @@ impl Writing<'_> {
                 }
                 let _ = reply.send(theirs(&self.kept_live, &client, None));
             }
-            Command::Heard { generation, heard } => self.heard(generation, heard),
+            // What finding what was heard takes is charged to the account
+            // (`live::DUTY`), as applying it is.
+            Command::Heard { generation, heard } => {
+                let start = thread_time();
+                self.heard(generation, heard);
+                self.noticing(start);
+            }
             Command::Marks { generation, heard } => {
                 let start = thread_time();
                 self.noticed(generation, heard);
-                self.done.noticing += thread_time().saturating_sub(start);
+                self.noticing(start);
             }
             Command::Mounts => self.mounts_changed(),
         }
@@ -874,6 +885,14 @@ impl Writing<'_> {
         }
     }
 
+    /// What finding what was heard took, since `start`: counted, and
+    /// charged to the account.
+    fn noticing(&mut self, start: std::time::Duration) {
+        let took = thread_time().saturating_sub(start);
+        self.done.noticing += took;
+        self.gather.spent(took, Instant::now());
+    }
+
     /// What is due now: gatherings done applied, the check after an
     /// overflow, a save.
     fn on_time(&mut self) {
@@ -887,25 +906,27 @@ impl Writing<'_> {
             self.forget_cookie(w.cookie);
             self.check_now(w.root, w.replies);
         }
-        let due = self.gather.due(now);
-        if !due.is_empty() {
-            // Timed by this thread's own processor clock, so that applying
-            // what is heard keeps to its share of a core (`live::DUTY`):
-            // the waits of a busy disk are not the engine's processor time.
-            for (root, folders) in due {
-                let start = thread_time();
-                let read = self.apply_heard(root, &folders);
-                let took = thread_time().saturating_sub(start);
-                self.done.applying += took;
-                self.gather.applied(root, &read, took, Instant::now());
-            }
+        // A batch at a time, each charged before the next is taken. Timed by
+        // this thread's own processor clock, so that applying what is heard
+        // keeps to its share of a core (`live::DUTY`): the waits of a busy
+        // disk are not the engine's processor time.
+        while let Some((root, folders)) = self.gather.due(Instant::now()) {
+            let start = thread_time();
+            let read = self.apply_heard(root, &folders);
+            let took = thread_time().saturating_sub(start);
+            self.done.applying += took;
+            self.gather.applied(root, &read, took, Instant::now());
         }
         if self.gather.recheck_due(now) {
+            let start = thread_time();
             for (i, keeper) in self.keepers.iter_mut().enumerate() {
                 if let Some(keeper) = keeper {
                     refresh(keeper, i, self.shared, &self.cancel);
                 }
             }
+            // Charged, not held: it is what makes the roots live again.
+            self.gather
+                .spent(thread_time().saturating_sub(start), Instant::now());
         }
         if self.gather.save_due(now) {
             self.done.say();
@@ -1597,6 +1618,10 @@ struct Done {
     applying: std::time::Duration,
     saving: std::time::Duration,
     giving_back: std::time::Duration,
+    /// How often the writer woke, and its whole processor time, since
+    /// the last save: what the kinds above leave out is its own.
+    wakes: u64,
+    since: std::time::Duration,
 }
 
 impl Done {
@@ -1611,7 +1636,10 @@ impl Done {
 
     /// Said, and begun again.
     fn say(&mut self) {
+        let now = thread_time();
+        let whole = now.saturating_sub(self.since);
         let done = std::mem::take(self);
+        self.since = now;
         if done.events == 0 {
             return;
         }
@@ -1620,7 +1648,7 @@ impl Done {
             "since the last save: {} events heard, {} overflows; {} folders read again \
              ({} distinct), {} entries stat-ed, the largest folder {} entries, the busiest \
              read {} times; processor time: {} ms finding, {} ms applying, {} ms saving, \
-             {} ms giving memory back",
+             {} ms giving memory back, of {} ms the writer took, woken {} times",
             done.events,
             done.overflows,
             done.reread,
@@ -1631,7 +1659,9 @@ impl Done {
             done.noticing.as_millis(),
             done.applying.as_millis(),
             done.saving.as_millis(),
-            done.giving_back.as_millis()
+            done.giving_back.as_millis(),
+            whole.as_millis(),
+            done.wakes
         ));
     }
 }

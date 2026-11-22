@@ -746,6 +746,47 @@ writer's. A change in a small folder meanwhile was answered in 119 ms,
 then 112. The large folder is read every 4 s or so, not every 2: live
 still, and a sync applies it at once.
 
+**Whatever the folders do** (the same day, from the user's machine at a
+load of 6 to 15: 4.4% of a core idle). A share each limited folder
+holds to bounds what large folders cost. It does not bound many busy
+medium ones, each read once a second at its own pace. Nor does it bound
+the writer's waking, once for each event. So, the user choosing the
+budget over the lag:
+- **the share's halves.** Folders whose share limits them divide
+  0.5%, held as above and not charged to the account; all the rest the
+  writer does for what is heard goes to an account at 0.5%: finding,
+  the other folders' applications, saves, the check after an overflow.
+  The account lets 50 ms of work through at once after a quiet time,
+  and is owed 50 ms at most (its window, 10 s): no burst holds what
+  follows longer;
+- **while the account is owed, nothing due is applied,** but one
+  folder due for longer than the window, one a window. Finding cannot
+  wait and may overdraw the account for good; this keeps everything
+  moving then;
+- **taken in batches that fit.** The folders of one root are taken
+  while what each cost when last applied fits what the account holds,
+  and one at least; each batch is charged before the next is taken. The
+  least used lately go first (what a folder cost, forgotten by e each
+  minute), so that a quiet folder's change waits for no round of the
+  busy ones; then the longest due;
+- **the reader wakes the writer for a batch,** waiting 10 ms after a
+  read that gave events, a tenth of a gathering's quiet. Woken for each
+  event, the writer spent more on waking than on what it was woken for:
+  3,300 wakes for 3,700 events, 60% of its time.
+
+A sync takes what is gathered at once, all the same, and is not
+charged. In the root tests' machine, built optimised, 30 folders of 3,000
+entries each written every 100 ms took 20% of a core before (6.4 s in
+32 s), and 0.9% after, the trial's own client aside. A small folder's
+change was answered in 113 ms before. After, its first change, the
+folder quiet, took 2.4 s; once it changed again 2 s after each answer,
+as busy as the others, 54 to 55 s: each of 31 folders read once in a
+round, each read about 6 ms of the account's 0.5%. With one large busy
+folder, 1.0% of a core, a small folder's change in 113 to 120 ms. What
+a busy machine lags is what a read of a folder costs: a folder of 3,000
+entries heard for one file costs a whole read of it and its chunk
+(below), the next thing to make cheaper.
+
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
 its block and every block after it that is deeper, so no block stores
@@ -936,8 +977,12 @@ built, then 100 to 160 in each 10 s, a cache folder of 58,919 entries
 read again up to 20 times in one. Since, the whole of what the writer
 does for what is heard keeps to half the budget (8): in the root
 tests' machine, a folder of 59,000 entries written every 100 ms took
-2.3% of a core before, 1.3 to 1.6% after. Met there; on the user's
-machine, to be measured again.
+2.3% of a core before, 1.3 to 1.6% after. Measured again on the
+user's machine at `8cb2d43`, at a load of 6 to 15 (its own activity 5
+to 50 times the last run's): 4.4%, many busy medium folders each read at
+its own pace. Since, whatever the folders do (8): a trial of 30 such
+folders took 20% of a core before, 0.9% after; on the user's machine,
+to be measured again, on a quiet machine.
 
 Not set: the first build. The run built every root in 28.9 s, the home
 in 27.6 s, three times phase 1's warm build of it; the step ran alone,

@@ -1309,6 +1309,24 @@ committed once the gate holds.
    (`tools/measure.sh --only engine,system`, which sets the first
    build's budget too).
 
+   **Measured again on 2026-11-22**, at `8cb2d43`, at a load of 6 to 15:
+   most figures 3 to 5 times slower than before, those of untouched code
+   (a user's engine reading its index back: 3.48 s against 0.63 s)
+   alike, so the run sets no budget. Idle, 4.4% of a core. The save's
+   log line showed why, whatever the load: 20 to 27 folders of up to
+   15,756 entries read again in each 10 s, each at its own pace, which
+   no share bounded. The user chose the budget over the lag: the writer
+   now keeps to its share whatever the folders do (DESIGN 8: an account
+   for what no folder's own hold bounds, batches that fit it, the least
+   used first, the reader batching what it hears). Its threads are
+   named (`skwird-writer`, `skwird-heard`, `skwird-client`,
+   `skwird-query`). A trial of 30 folders of 3,000 entries written
+   every 100 ms took 20% of a core before, 0.9% after. A quiet folder's
+   change waited 2.4 s, one changing again and again about 55 s: what a
+   read costs (a whole folder and its chunk for one file) is what lags
+   now, the next thing to make cheaper. To be measured again on a quiet
+   machine.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

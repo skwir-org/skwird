@@ -116,7 +116,9 @@ pub fn serve(config: &Config) -> Result<(), String> {
     let (watcher, group) = sources(config, &commands);
     let writing = {
         let (config, shared) = (config.clone(), Arc::clone(&shared));
-        std::thread::spawn(move || writer(&config, &shared, &received, watcher, group))
+        named("skwird-writer", move || {
+            writer(&config, &shared, &received, watcher, group);
+        })
     };
     let live = Arc::new(Live {
         state: Mutex::new((0, Instant::now())),
@@ -159,7 +161,7 @@ pub fn serve(config: &Config) -> Result<(), String> {
         };
         live.join();
         let (shared, commands, live) = (Arc::clone(&shared), commands.clone(), Arc::clone(&live));
-        std::thread::spawn(move || {
+        named("skwird-client", move || {
             connection(stream, &shared, &commands, &asker);
             drop(open);
             live.leave();
@@ -194,11 +196,11 @@ fn sources(
     };
     if let Some(w) = &watcher {
         let (w, commands) = (Arc::clone(w), commands.clone());
-        std::thread::spawn(move || crate::live::listen(&*w, &commands));
+        named("skwird-heard", move || crate::live::listen(&*w, &commands));
     }
     if let Some(g) = &group {
         let (g, commands) = (Arc::clone(g), commands.clone());
-        std::thread::spawn(move || crate::live::listen(&*g, &commands));
+        named("skwird-heard", move || crate::live::listen(&*g, &commands));
     }
     (watcher, group)
 }
@@ -527,7 +529,7 @@ fn spawn_query(
         Arc::clone(cancels),
         who.clone(),
     );
-    std::thread::spawn(move || {
+    named("skwird-query", move || {
         let answer = answer_query(&shared, &writer, id, &query, &flag, &who);
         cancels
             .lock()
@@ -903,6 +905,18 @@ fn answer_in(
         hits.iter().map(|h| convert::hit(root, h)).collect(),
         coverage,
     ))
+}
+
+/// A thread started under `name`, which the system shows for it (in
+/// `/proc`, `top -H`, a profiler's samples): at most 15 bytes on Linux.
+fn named<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(f)
+        .expect("a thread starts, as std::thread::spawn would have it")
 }
 
 #[cfg(test)]
