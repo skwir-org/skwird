@@ -482,6 +482,77 @@ impl Chunk {
         Chunk::from_bytes(Bytes::Owned(assemble(&columns).into_boxed_slice())).ok()
     }
 
+    /// The chunk with block `at` replaced by `block`, the same folder at
+    /// the same place, its entries any: each entry column with the block's
+    /// rows put in place of the old ones, the entries of the blocks after
+    /// it ending as many further on, every zone from the first changed
+    /// summed up again. An entry made or removed costs the chunk's columns
+    /// packed again, not its blocks decoded and cut again (DESIGN 8). It
+    /// reads back as [`Chunk::new`] would make it. `old` is block `at` as
+    /// decoded. None where the folder or its place is not the same.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)] // counts far below 2^63
+    pub fn spliced(&self, at: usize, old: &Block, block: &Block) -> Option<Chunk> {
+        let view = self.view();
+        debug_assert_eq!(*old, view.block(at), "old is the chunk's block");
+        let same_place = view.folder(at) == old.folder
+            && old.folder == block.folder
+            && old.parent == block.parent
+            && old.name == block.name
+            && old.depth == block.depth;
+        if !same_place {
+            return None;
+        }
+        let entries = view.entries(at);
+        let delta = block.items.len() as i64 - old.items.len() as i64;
+        let shift = |end: u64| (end as i64 + delta) as u64;
+        let mut columns: Vec<Cow<'_, [u8]>> = Vec::with_capacity(COLUMNS);
+        // A value a block: its own row, and where the entries of the
+        // blocks from it on end.
+        let row = block_values(block, shift(view.col(B_END).get(at)));
+        for (c, v) in row {
+            let bytes = self.column_bytes(c);
+            columns.push(if c == B_END {
+                let mut ends = view.values(B_END, 0..self.blocks);
+                for end in &mut ends[at..] {
+                    *end = shift(*end);
+                }
+                Cow::Owned(pack(&ends))
+            } else if view.col(c).get(at) == v {
+                Cow::Borrowed(bytes)
+            } else {
+                Cow::Owned(patch(bytes, &[(at, v)]).ok()?)
+            });
+        }
+        // A value an entry: the block's rows in place of the old.
+        let rows: Vec<_> = block.items.iter().map(item_values).collect();
+        let mut kept: Vec<Vec<u64>> = Vec::with_capacity(Z_SIZE - I_NAME);
+        for c in I_NAME..Z_SIZE {
+            let mut values = Vec::with_capacity(self.items - old.items.len() + rows.len());
+            values.extend(view.values(c, 0..entries.start));
+            values.extend(rows.iter().map(|r| r[c - I_NAME].1));
+            values.extend(view.values(c, entries.end..self.items));
+            columns.push(Cow::Owned(pack(&values)));
+            kept.push(values);
+        }
+        // A value a zone, each summed up again.
+        let items = kept[0].len();
+        let (kinds, sizes, mtimes) = (
+            &kept[I_KIND - I_NAME],
+            &kept[I_SIZE - I_NAME],
+            &kept[I_MTIME - I_NAME],
+        );
+        let mut zones: Vec<Vec<u64>> = vec![Vec::new(); COLUMNS - Z_SIZE];
+        for z in 0..items.div_ceil(ZONE) {
+            let range = z * ZONE..((z + 1) * ZONE).min(items);
+            let summed = zone_values(range.map(|i| (kinds[i], sizes[i], mtimes[i])));
+            for (c, v) in summed {
+                zones[c - Z_SIZE].push(v);
+            }
+        }
+        columns.extend(zones.iter().map(|z| Cow::Owned(pack(z))));
+        Chunk::from_bytes(Bytes::Owned(assemble(&columns).into_boxed_slice())).ok()
+    }
+
     /// Column `c`'s bytes, as the header places them.
     fn column_bytes(&self, c: usize) -> &[u8] {
         let offset = |i: usize| {
@@ -710,6 +781,17 @@ impl View<'_> {
 mod tests {
     use super::*;
 
+    impl Item {
+        /// This entry under another name, and inode.
+        fn clone_with(&self, name: u32) -> Item {
+            Item {
+                name,
+                ino: 100_000 + u64::from(name),
+                ..*self
+            }
+        }
+    }
+
     fn sample() -> Vec<Block> {
         let facts = Facts {
             id: FileId { dev: 42, ino: 256 },
@@ -868,6 +950,66 @@ mod tests {
         let mut more = want[0].clone();
         more.items.push(more.items[0]);
         assert!(chunk.patched(0, &want[0], &more).is_none(), "an entry made");
+    }
+
+    /// A chunk spliced block by block, entries made and removed, reads
+    /// back as one made anew of the same blocks, zones and all; another
+    /// folder in the place is refused.
+    #[test]
+    fn a_spliced_chunk_reads_as_one_made_anew() {
+        type Edit = (usize, Box<dyn Fn(&mut Block)>);
+        let mut want = sample();
+        let mut chunk = Chunk::new(&want);
+        let zones = |c: &Chunk| {
+            let view = c.view();
+            (0..c.entries().div_ceil(ZONE))
+                .map(|z| view.zone(z))
+                .collect::<Vec<_>>()
+        };
+        let file = |name: u32| want[2].items[0].clone_with(name);
+        let made = file(5_000);
+        let edits: Vec<Edit> = vec![
+            // A file made in the first block.
+            (0, Box::new(move |b| b.items.insert(1, made))),
+            // Files removed, across a zone's edge.
+            (2, Box::new(|b| drop(b.items.drain(1000..1100)))),
+            // The empty block given entries, the folder's facts new.
+            (
+                1,
+                Box::new(|b| {
+                    b.items = (6_000..6_010)
+                        .map(|n| sample()[2].items[0].clone_with(n))
+                        .collect();
+                    b.state = State::Listed { again: false };
+                }),
+            ),
+            // Enough made to need another zone.
+            (
+                2,
+                Box::new(|b| {
+                    let more: Vec<Item> =
+                        (7_000..9_000).map(|n| b.items[0].clone_with(n)).collect();
+                    b.items.extend(more);
+                }),
+            ),
+            // A block emptied.
+            (0, Box::new(|b| b.items.clear())),
+        ];
+        for (n, (at, edit)) in edits.iter().enumerate() {
+            edit(&mut want[*at]);
+            let old = chunk.block(*at);
+            chunk = chunk
+                .spliced(*at, &old, &want[*at])
+                .expect("the same place");
+            assert_eq!(chunk.decode(), want, "edit {n}");
+            assert_eq!(zones(&chunk), zones(&Chunk::new(&want)), "edit {n}'s zones");
+        }
+        let mut other = want[2].clone();
+        other.folder = 77;
+        assert!(
+            chunk.spliced(2, &want[2], &other).is_none(),
+            "another folder"
+        );
     }
 
     #[test]

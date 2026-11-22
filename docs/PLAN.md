@@ -1357,6 +1357,19 @@ committed once the gate holds.
    measurement says memory in two (the process's own, its files mapped),
    and the save's line what a read costs. To be measured again, quiet.
 
+   **Measured at `e7417bb`**, at a load of 6 to 24: memory said in two
+   for the first time. Most of an engine's is its index's files mapped
+   (24 MB per million entries at both); the system service's own was
+   8.0 to 8.7 MB per million, a user's engine's 1.6 to 2.9. The user
+   chose to budget the two apart (DESIGN 10): its own 10 MB per million,
+   its files mapped no more than its index on disk. Both met. glibc's
+   arenas, limited in the root tests' machine, did not explain the
+   service's more, and are left. A read cost 0.9 to 1.7 ms at the median
+   there: the save's line now says how each read was written (as it was,
+   patched, spliced, cut again), and a file made or removed is spliced
+   into its chunk's columns, not cut again (DESIGN 8): 464 µs for a folder
+   of 8 entries, against 1,224. To be measured again, quiet.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

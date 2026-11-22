@@ -878,6 +878,26 @@ of 60,000, 30 ms, not 42. What is left of a large folder's read is its
 own entries: the listing, the map of what it knew (hashed with SipHash,
 which names chosen by another user cannot flood), the merge.
 
+**An entry made or removed costs its chunk's columns** (the same day).
+The save's line counts how a read was written: as it was, patched,
+spliced, or cut again (`update::Written`), so a run says which reads
+a machine makes. A file made or removed changes its folder's shape,
+and was cut again: every block of its chunk decoded, the chunk cut and
+encoded. Now it is **spliced** (`Chunk::spliced`): in each entry column
+the folder's rows in place of the old, where the entries of the blocks
+after it end shifted, every zone summed up again. A chunk spliced reads
+back as one made anew, a test proves. A splice is only made where the
+chunk is left as a cut would leave it: at most the limit unless it
+holds a single block, and with no neighbour it would join, either of
+them below the floor. Otherwise the chunk is cut again, as is any read
+that makes, moves or lets go of a folder. In the same run, on the host,
+an entry removed from a folder of 8 entries was spliced in 464 µs and
+cut again in 1,224; of 3,000, 472 against 675 µs; in a chunk of its own
+of 60,000, 2.9 against 3.1 ms. A read for a file made or removed then
+takes 481 µs for 8 entries, and a file written to 51 µs: what is left is
+the chunk's columns packed again, which packing only from the rows
+changed on would halve.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three
@@ -1015,7 +1035,7 @@ a load of 4 to 5. Memory is per million entries, as phase 1's.
 | A sync of a live folder | 0.1 s | 0.09 s | met |
 | First live answer, read back and every root checked | 0.3 s per million entries | 1.35 s (0.19 s per million) | met |
 | A query answered to a user, filtered for them, against root's | 1.25 times root's | 0.63 s against 0.54 s for 100,000 results (1.17) | met |
-| Memory at rest | as a user's engine's, 26 MB per million entries | 168 to 187 MB (24 to 27 MB per million) | met |
+| Memory at rest | as a user's engine's, 26 MB per million entries (since in two: its own 10 MB per million, its files mapped no more than its index on disk; below) | 168 to 187 MB (24 to 27 MB per million) | met |
 | Memory at the peak of a first build | 150 MB per million entries, as phase 1's | 584 MB (84 MB per million) | met |
 | Processor time, no client asking | 2% of a core | 0.85 s in 30 s (2.8%) | not met |
 
@@ -1088,6 +1108,26 @@ cause. Since:
   most, each folder's share of its batch by entries.
 
 To be measured again, quiet.
+
+**Memory, in two** (the user's choice, the same day, from the run at
+`e7417bb`, the first to say memory in two). Of what an engine holds,
+most is its index's files mapped: about 24 MB per million entries at
+both engines, the page cache's to drop. What the process holds of its
+own was 1.6 to 2.9 MB per million at a user's engine and 8.0 to 8.7 at
+the system service. So the budget for memory at rest is now in two:
+- **the process's own** (`RssAnon`): 10 MB per million entries. Met:
+  68 to 74 MB at the system service (8.0 to 8.7 per million), 11 to 20
+  MB at a user's engine;
+- **its files mapped** (`RssFile`): no more than its index on disk.
+  Met: 201 to 209 MB of 357 at the system service, 160 to 166 of 287 at
+  a user's engine.
+
+The peak of a first build stays as it was, all of it counted. Why the
+system service holds more of its own was not found: glibc's arenas,
+limited to 4 or 2, held 6.0 MB against 2.1 in the root tests' machine
+after building four roots of 200,000 entries in 201 folders, but 3.2
+against 2.7 and 2.4 with 100,000 folders of 8 entries, the shape of
+the user's trees, so they are left as they are.
 
 ## Protocol (a sketch; experimental until declared stable)
 

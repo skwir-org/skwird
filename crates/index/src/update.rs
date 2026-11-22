@@ -72,6 +72,24 @@ pub struct Reread {
     pub fresh: Vec<FolderId>,
     /// What changed of its entries.
     pub changes: Vec<Change>,
+    /// How its block was written: what its read cost the tree.
+    pub written: Written,
+}
+
+/// How a folder's block read again was written into the tree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Written {
+    /// Not: it read back as it was.
+    #[default]
+    Not,
+    /// Patched into its chunk, its shape the same (a file written to).
+    Patched,
+    /// Spliced into its chunk's columns, its entries changed (an entry
+    /// made or removed), the chunk left as a cut would leave it.
+    Spliced,
+    /// Its chunk cut and encoded again (an entry made or removed, a
+    /// folder made, moved or let go of).
+    Cut,
 }
 
 /// The records of a crawl grafted in, each folder's entries all added,
@@ -158,6 +176,11 @@ pub struct Refreshed {
     /// What came of watching each folder read or crawled, where a watch
     /// was asked ([`Options::watcher`]).
     pub watches: Vec<(FolderId, Watch)>,
+    /// Of the folders read again, how many were patched into their chunk,
+    /// how many spliced into it, and how many cut it again ([`Written`]).
+    pub patched: usize,
+    pub spliced: usize,
+    pub cut: usize,
 }
 
 /// Whether `entry` is the folder whose block is `child`, by identity.
@@ -274,12 +297,19 @@ impl Index {
             state,
             items,
         };
+        let mut written = Written::Not;
         if block != *old {
             // A file written to, its folder the same shape: its chunk
-            // patched, not cut again.
-            if !self.tree_mut().patch(old, &block) {
+            // patched. An entry made or removed: its chunk's columns
+            // spliced. Else its chunk cut again.
+            written = if self.tree_mut().patch(old, &block) {
+                Written::Patched
+            } else if self.tree_mut().splice(old, &block) {
+                Written::Spliced
+            } else {
                 self.tree_mut().replace(block);
-            }
+                Written::Cut
+            };
         }
         for child in m.gone {
             self.tree_mut().remove(child);
@@ -290,6 +320,7 @@ impl Index {
         Reread {
             fresh,
             changes: m.changes,
+            written,
         }
     }
 
@@ -770,6 +801,12 @@ fn apply(
             Seen::NotCovered(_) => 0,
         };
         let reread = index.reread_block(&old, folder_facts, seen);
+        match reread.written {
+            Written::Patched => done.patched += 1,
+            Written::Spliced => done.spliced += 1,
+            Written::Cut => done.cut += 1,
+            Written::Not => {}
+        }
         fresh.extend(reread.fresh);
         done.records.push(Record::Folder(FolderRecord {
             path: stored.rel(i).to_path_buf(),

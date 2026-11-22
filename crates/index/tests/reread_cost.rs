@@ -68,6 +68,7 @@ fn tree() -> PathBuf {
 
 #[test]
 #[ignore = "builds a tree of 900,000 entries; run by hand"]
+#[allow(clippy::too_many_lines)] // a trial's steps, in the order they run
 fn reading_a_folder_again_for_one_file() {
     let base = tree();
     let root = Root::open(&base, Exclusions::none()).unwrap();
@@ -109,6 +110,27 @@ fn reading_a_folder_again_for_one_file() {
                 runs.saturating_sub(start) / 200,
                 one.saturating_sub(runs) / 200
             );
+            let old = index.tree().block(folder).unwrap();
+            let mut fewer = old.clone();
+            fewer.items.remove(fewer.items.len() / 2);
+            let start = thread_time();
+            for _ in 0..200 {
+                let mut tree = index.tree().clone();
+                assert!(tree.splice(&old, &fewer));
+                std::hint::black_box(tree);
+            }
+            let spliced = thread_time();
+            for _ in 0..200 {
+                let mut tree = index.tree().clone();
+                tree.replace(fewer.clone());
+                std::hint::black_box(tree);
+            }
+            let cut = thread_time();
+            println!(
+                "{label:6}: an entry removed, spliced {:?}, cut again {:?}",
+                spliced.saturating_sub(start) / 200,
+                cut.saturating_sub(spliced) / 200
+            );
         }
         let name = "entry-000003";
         let mut reads = Vec::with_capacity(rounds);
@@ -128,6 +150,30 @@ fn reading_a_folder_again_for_one_file() {
             reads.push(read.saturating_sub(start));
             snapshots.push(cloned.saturating_sub(read));
         }
+        // A file made, then removed: its folder's entries change.
+        let mut shaped = Vec::with_capacity(2 * rounds);
+        for i in 0..rounds {
+            let made = format!("made-{i:04}");
+            for make in [true, false] {
+                let path = base.join(rel).join(&made);
+                if make {
+                    std::fs::write(&path, b"x").unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                let names: HashSet<Box<[u8]>> = [Box::from(made.as_bytes())].into();
+                let start = thread_time();
+                reread_named(&mut index, &root, &opts, &cancel, &[(folder, Some(names))]).unwrap();
+                root.let_go();
+                shaped.push(thread_time().saturating_sub(start));
+            }
+        }
+        shaped.sort_unstable();
+        println!(
+            "{label:6}: an entry made or removed {:?} at the median, {:?} at least",
+            shaped[shaped.len() / 2],
+            shaped[0]
+        );
         reads.sort_unstable();
         snapshots.sort_unstable();
         println!(

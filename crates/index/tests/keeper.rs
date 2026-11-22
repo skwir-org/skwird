@@ -513,11 +513,12 @@ fn a_folder_with_an_acl_is_kept_like_any() {
     }
 }
 
-/// A file written to, heard by its name (its chunk patched, DESIGN 8): its
-/// new size is answered, a query on size finding it by its zone, and it
-/// is saved and read back so, under its chunk's new number. That the
-/// patch reads as a chunk made anew is `chunk`'s test; this one holds its
-/// place in the keeper: the places it moves, the zones, the save.
+/// A file written to, heard by its name, is patched into its chunk, not
+/// cut again (DESIGN 8): its new size is answered, a query on size
+/// finding it by its zone, and it is saved and read back so, under its
+/// chunk's new number. A file made splices it. That a patch
+/// reads as a chunk made anew is `chunk`'s test; this one holds its place
+/// in the keeper: the places it moves, the zones, the save.
 #[test]
 fn a_file_written_to_is_patched_saved_and_read_back() {
     let s = Scratch::new("keeper-patch");
@@ -543,8 +544,14 @@ fn a_file_written_to_is_patched_saved_and_read_back() {
     std::fs::write(s.join("a/entry-07"), vec![b'x'; 4321]).unwrap();
     let folder = k.index().folder_at(Path::new("a")).unwrap();
     let names: HashSet<Box<[u8]>> = [Box::from(&b"entry-07"[..])].into();
-    k.heard_named(&[(folder, Some(names))], &Cancel::default())
+    let done = k
+        .heard_named(&[(folder, Some(names))], &Cancel::default())
         .unwrap();
+    assert_eq!(
+        (done.patched, done.spliced, done.cut),
+        (1, 0, 0),
+        "patched, not cut again"
+    );
     assert_eq!(sized(k.index()), vec![PathBuf::from("a/entry-07")]);
     let after = k.index().tree().chunk_ids().to_vec();
     assert_eq!(after.len(), before.len(), "no chunk cut again");
@@ -558,5 +565,16 @@ fn a_file_written_to_is_patched_saved_and_read_back() {
     let (k, opened) = keeper(&s);
     assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
     assert_eq!(sized(k.index()), vec![PathBuf::from("a/entry-07")]);
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+    // A file made changes the folder's shape: its chunk's columns are
+    // spliced.
+    let mut k = k;
+    s.file("a/entry-99");
+    let folder = k.index().folder_at(Path::new("a")).unwrap();
+    let names: HashSet<Box<[u8]>> = [Box::from(&b"entry-99"[..])].into();
+    let done = k
+        .heard_named(&[(folder, Some(names))], &Cancel::default())
+        .unwrap();
+    assert_eq!((done.patched, done.spliced, done.cut), (0, 1, 0));
     assert_eq!(ours(k.index()), of_walk(s.path()));
 }

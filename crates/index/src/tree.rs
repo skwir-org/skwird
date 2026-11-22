@@ -297,11 +297,57 @@ impl Tree {
         let Some(chunk) = self.chunks[&loc.chunk].patched(loc.block as usize, old, block) else {
             return false;
         };
+        self.renumbered(loc.chunk, chunk);
+        true
+    }
+
+    /// Put `block`, its folder's at the same place, its entries any
+    /// ([`Chunk::spliced`]), in place of the folder's block `old`: its
+    /// chunk's columns spliced, its blocks not decoded and cut again, so
+    /// that an entry made or removed costs the chunk's columns. Only where
+    /// the chunk is left as a cut would leave it: at most [`Limits::max`]
+    /// unless it holds a single block, and with no neighbour it would join,
+    /// either of them below [`Limits::min`]. Whether
+    /// it was: false, and nothing done, otherwise.
+    pub fn splice(&mut self, old: &Block, block: &Block) -> bool {
+        let Some(loc) = self.loc(block.folder) else {
+            return false;
+        };
+        let chunk = &self.chunks[&loc.chunk];
+        let weight = (chunk.items() + block.items.len()).saturating_sub(old.items.len());
+        let fits = weight <= self.limits.max || chunk.len() == 1;
+        // Two neighbours, either below the floor, that fit together are
+        // joined by a cut, as [`Tree::place`] joins them.
+        let at = self.position(loc.chunk);
+        let joins = [at.checked_sub(1), Some(at + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|n| self.order.get(n))
+            .any(|other| {
+                let theirs = self.chunks[other].items();
+                (weight < self.limits.min || theirs < self.limits.min)
+                    && weight + theirs <= self.limits.max
+            });
+        if !fits || joins {
+            return false;
+        }
+        let Some(chunk) = chunk.spliced(loc.block as usize, old, block) else {
+            return false;
+        };
+        self.renumbered(loc.chunk, chunk);
+        true
+    }
+
+    /// `chunk` in place of chunk `was`, the same blocks in the same order,
+    /// under a number of its own, as any chunk changed takes, so that no
+    /// file a saved manifest names is written over; each block's place
+    /// follows it.
+    fn renumbered(&mut self, was: ChunkId, chunk: Chunk) {
         let id = self.next_chunk;
         self.next_chunk += 1;
-        let at = self.position(loc.chunk);
+        let at = self.position(was);
         self.order[at] = id;
-        self.chunks.remove(&loc.chunk);
+        self.chunks.remove(&was);
         {
             let view = chunk.view();
             for b in 0..chunk.len() {
@@ -315,7 +361,6 @@ impl Tree {
             }
         }
         self.chunks.insert(id, Arc::new(chunk));
-        true
     }
 
     /// Insert `blocks`, folders' subtrees in pre-order, right after the

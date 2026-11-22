@@ -149,6 +149,15 @@ fn assert_matches(tree: &Tree, model: &Model) {
     }
 }
 
+/// A folder's block of new files put in the tree as the index puts one:
+/// patched, else spliced, else its chunk cut again.
+fn rewrite(tree: &mut Tree, block: Block) {
+    let old = tree.block(block.folder).unwrap();
+    if !tree.patch(&old, &block) && !tree.splice(&old, &block) {
+        tree.replace(block);
+    }
+}
+
 fn run(seed: u64, steps: usize, limits: Limits) {
     let mut rng = Rng(seed);
     let mut model = Model::default();
@@ -177,13 +186,13 @@ fn run(seed: u64, steps: usize, limits: Limits) {
                 let many = rng.below(10) == 0;
                 let n = 1 + rng.below(if many { 80 } else { 3 });
                 model.add_files(folder, n);
-                tree.replace(model.block(folder));
+                rewrite(&mut tree, model.block(folder));
             }
             // A file removed.
             3 => {
                 if let Some(&file) = model.files[&folder].iter().next() {
                     model.files.get_mut(&folder).unwrap().remove(&file);
-                    tree.replace(model.block(folder));
+                    rewrite(&mut tree, model.block(folder));
                 }
             }
             // A folder made, sometimes with a folder in it.

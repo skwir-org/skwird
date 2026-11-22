@@ -1647,6 +1647,12 @@ struct Done {
     events: u64,
     overflows: u64,
     reread: u64,
+    /// Of the folders read again, how many were patched into their
+    /// chunk, spliced into it, and cut it again
+    /// (`skwird_index::update::Written`).
+    patched: u64,
+    spliced: u64,
+    cut: u64,
     entries: u64,
     largest: usize,
     /// How often each folder was read again.
@@ -1685,6 +1691,9 @@ impl Done {
 
     fn read_again(&mut self, root: usize, done: &skwird_index::Refreshed) {
         self.reread += done.reread as u64;
+        self.patched += done.patched as u64;
+        self.spliced += done.spliced as u64;
+        self.cut += done.cut as u64;
         self.entries += done.entries as u64;
         self.largest = self.largest.max(done.largest);
         for &(folder, _) in &done.folders {
@@ -1707,7 +1716,7 @@ impl Done {
         let read = |at: Option<&std::time::Duration>| at.map_or(0, std::time::Duration::as_micros);
         log(&format!(
             "since the last save: {} events heard, {} overflows; {} folders read again \
-             ({} distinct), {} entries stat-ed, the largest folder {} entries, the busiest \
+             ({} distinct; {} as they were, {} patched, {} spliced, {} cut again), {} entries stat-ed, the largest folder {} entries, the busiest \
              read {} times, a read {} µs at the median, {} µs at most; processor time: {} ms \
              finding, {} ms applying, {} ms saving, {} ms giving memory back, of {} ms the \
              writer took, woken {} times",
@@ -1715,6 +1724,11 @@ impl Done {
             done.overflows,
             done.reread,
             done.by_folder.len(),
+            done.reread
+                .saturating_sub(done.patched + done.spliced + done.cut),
+            done.patched,
+            done.spliced,
+            done.cut,
             done.entries,
             done.largest,
             busiest,
