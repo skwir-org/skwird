@@ -5,9 +5,9 @@
 //! mode evaluated against them in the kernel's order.
 //!
 //! A result is answered only if the asker may list its folder and search
-//! every folder above it. A folder with an access ACL is not known until
-//! ACLs are evaluated: what it holds is never answered as its mode alone
-//! says, and the folder is not covered for that answer.
+//! every folder above it. A folder with an access ACL is judged by it,
+//! as read (`skwird_crawl::acl`); one whose ACL was not read is not
+//! known: never answered as its mode alone says, and not covered.
 #![allow(unsafe_code)] // SO_PEERGROUPS has no safe binding; the one block says why it is sound.
 
 use std::collections::HashMap;
@@ -59,11 +59,32 @@ impl Asker {
     /// the owner's bits for its owner, the group's for a member of its
     /// group, the others' for anyone else, as the kernel takes them.
     pub fn may(&self, folder: Owned, bits: u16) -> Sight {
+        self.may_by(folder, None, bits)
+    }
+
+    /// [`Asker::may`], a folder with an ACL judged by `acl`, its ACL as
+    /// read: not known if it was not read.
+    pub fn may_by(&self, folder: Owned, acl: Option<&skwird_crawl::acl::Acl>, bits: u16) -> Sight {
         if self.is_root() {
             return Sight::Seen;
         }
         if folder.mode & skwird_crawl::ACL != 0 {
-            return Sight::Unknown;
+            return match acl {
+                Some(acl)
+                    if acl.allows(
+                        self.uid,
+                        self.gid,
+                        &self.groups,
+                        folder.owner,
+                        folder.group,
+                        bits,
+                    ) =>
+                {
+                    Sight::Seen
+                }
+                Some(_) => Sight::Hidden,
+                None => Sight::Unknown,
+            };
         }
         let granted = if self.uid == folder.owner {
             folder.mode >> 6
@@ -147,9 +168,13 @@ pub(crate) fn sight(
         group: facts.group,
         mode: facts.mode,
     };
-    asker
-        .may(owned, LIST)
-        .and(reach(index, asker, above, index.parent_of(folder), memo))
+    asker.may_by(owned, index.acl_of(facts.id), LIST).and(reach(
+        index,
+        asker,
+        above,
+        index.parent_of(folder),
+        memo,
+    ))
 }
 
 /// Whether `asker` may search `folder` and every folder above it.
@@ -173,12 +198,13 @@ fn reach(
     }
     for f in chain.into_iter().rev() {
         let searched = index.facts_of(f).map_or(Sight::Hidden, |facts| {
-            asker.may(
+            asker.may_by(
                 Owned {
                     owner: facts.owner,
                     group: facts.group,
                     mode: facts.mode,
                 },
+                index.acl_of(facts.id),
                 SEARCH,
             )
         });
@@ -297,6 +323,35 @@ mod tests {
         let f = folder(1000, 100, 0o777 | skwird_crawl::ACL);
         assert_eq!(asker(1000, 100, &[]).may(f, LIST), Sight::Unknown);
         assert_eq!(asker(0, 0, &[]).may(f, LIST), Sight::Seen);
+    }
+
+    /// A folder with an ACL read is judged by it: the user it names may,
+    /// another may not.
+    #[test]
+    fn a_folder_with_an_acl_read_is_judged_by_it() {
+        // user::rwx, user:1001:r-x, group::---, mask::r-x, other::---.
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (1u16, 7u16, u32::MAX),
+            (2, 5, 1001),
+            (4, 0, u32::MAX),
+            (0x10, 5, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&perm.to_le_bytes());
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        let acl = skwird_crawl::acl::Acl::parse(&bytes).unwrap();
+        let f = folder(0, 0, 0o750 | skwird_crawl::ACL);
+        assert_eq!(
+            asker(1001, 1001, &[]).may_by(f, Some(&acl), LIST),
+            Sight::Seen
+        );
+        assert_eq!(
+            asker(1002, 1002, &[]).may_by(f, Some(&acl), LIST),
+            Sight::Hidden
+        );
     }
 
     /// Every folder above must be searchable; one hidden hides, one not

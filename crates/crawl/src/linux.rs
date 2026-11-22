@@ -140,6 +140,26 @@ impl Root {
         Ok(fd)
     }
 
+    /// The access ACL of the folder at `rel`, if it is still the folder of
+    /// identity `id`: opened beneath the root, following no link. None if
+    /// it is not, has none, or cannot be read.
+    pub fn access_acl(&self, rel: &Path, id: FileId) -> Option<crate::acl::Acl> {
+        let fd = self.dir().and_then(|d| open_beneath(&d, rel)).ok()?;
+        if id_of(&statx_fd(&fd).ok()?) != id {
+            return None;
+        }
+        let mut buf = vec![0u8; 4096];
+        let len = match rustix::fs::fgetxattr(&fd, "system.posix_acl_access", &mut buf[..]) {
+            Ok(len) => len,
+            Err(Errno::RANGE) => {
+                buf.resize(1 << 16, 0);
+                rustix::fs::fgetxattr(&fd, "system.posix_acl_access", &mut buf[..]).ok()?
+            }
+            Err(_) => return None,
+        };
+        crate::acl::Acl::parse(&buf[..len])
+    }
+
     /// Let go of its folder until it is next read: between reads, nothing of
     /// its filesystem is held open.
     pub fn let_go(&self) {

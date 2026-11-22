@@ -422,13 +422,23 @@ proved as root in the test machine on Linux 6.18.58):
   started. A folder they may read but not search holds names they are
   not given (`ls` would list them, and stat none).
 - Each folder is judged once a query, with what is above it.
-- **An ACL is not evaluated yet:** a folder with an access ACL (the
-  crawl says so, `skwird_crawl::ACL`, one `fgetxattr` a folder) is not
-  known for anyone but root. A result in it is withheld, and the
-  topmost such folder whose parent the asker may list is named not
-  covered (denied) in the answer's coverage, so that the client walks
-  it, and a coverage below names each such folder. Never answered as
-  its mode alone says, and never a name the asker could not list.
+- **ACLs are evaluated** (step 5b, `skwird_crawl::acl`). The crawl says
+  which folders have an access ACL (`skwird_crawl::ACL` in their mode,
+  one `fgetxattr` a folder); the keeper reads each such ACL through the
+  root, following no link, taken only if the folder there is the one the
+  index holds, and keeps it by the folder's identity until its change
+  time moves. The ACLs travel with each snapshot, so that answering
+  reads none. An asker is judged by a folder's ACL as acl(5) says: the
+  owner by the owner's entry; a named user within the mask; a member of
+  the owning or a named group by any of their entries that grants it,
+  within the mask, never falling to the others'; anyone else by the
+  others'. An ACL that cannot be read leaves its folder not known: a
+  result in it is withheld, and the topmost such folder whose parent
+  the asker may list is named not covered (denied), so that the client
+  walks it. After what was heard, the folders read again and the
+  folders they hold have their ACLs read; a folder with an ACL deeper in
+  a subtree just made is not known until the next check. A folder above
+  a root with an ACL is not known either.
 - **Whether a folder exists is said only to who could list its
   parent:** a coverage or a query at a folder the asker may not list,
   or at a path below one, is answered not covered (denied) alike.

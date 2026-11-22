@@ -107,6 +107,9 @@ pub struct Keeper {
     /// again, never leaves a descriptor behind.
     by_folder: HashMap<FolderId, i32>,
     live: Vec<Live>,
+    /// The access ACLs read, by folder identity, each with the change
+    /// time its folder had: read again once it moves.
+    acls: HashMap<skwird_crawl::FileId, (Time, skwird_crawl::acl::Acl)>,
 }
 
 /// An epoch not `other`: the time, and the process.
@@ -152,6 +155,7 @@ impl Keeper {
                         watches: HashMap::new(),
                         by_folder: HashMap::new(),
                         live: Vec::new(),
+                        acls: HashMap::new(),
                     };
                     if keeper.log.is_none() {
                         // The journal cannot go on from a log not found.
@@ -159,6 +163,7 @@ impl Keeper {
                     }
                     // The exclusions may have changed while no engine ran.
                     let reconciled = keeper.reconcile();
+                    keeper.read_acls(None);
                     keeper.root.let_go();
                     return Ok((
                         keeper,
@@ -195,11 +200,13 @@ impl Keeper {
             watches: HashMap::new(),
             by_folder: HashMap::new(),
             live: Vec::new(),
+            acls: HashMap::new(),
         };
         keeper.note(&built.watches);
         // Saved at once, so that the next start loads it; a save that
         // fails is tried again at the next.
         let _ = keeper.save();
+        keeper.read_acls(None);
         keeper.root.let_go();
         Ok((keeper, Opened::Built { because }))
     }
@@ -326,6 +333,7 @@ impl Keeper {
     /// and, once done, when its names were proven.
     pub fn refresh(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
         let done = self.refresh_held(cancel);
+        self.read_acls(None);
         self.root.let_go();
         done
     }
@@ -370,6 +378,7 @@ impl Keeper {
     /// lets go of the watches only it held.
     pub fn set_scopes(&mut self, scopes: &[PathBuf], cancel: &Cancel) -> Result<Refreshed, Error> {
         let done = self.set_scopes_held(scopes, cancel);
+        self.read_acls(None);
         self.root.let_go();
         done
     }
@@ -447,6 +456,65 @@ impl Keeper {
         (self.index.facts_of(folder)?.id == id).then_some(folder)
     }
 
+    /// The access ACLs of the folders whose mode says they have one, read
+    /// for the system service (`Options::acls`, DESIGN 4): of every folder,
+    /// or of those `only` names and the folders they hold. Each is read
+    /// again only once its folder's change time moved, which a change of
+    /// its ACL moves. One that cannot be read is left out: its folder is
+    /// not known then, never answered as its mode alone says.
+    fn read_acls(&mut self, only: Option<&[FolderId]>) {
+        if !self.opts.acls {
+            return;
+        }
+        let folders: Vec<FolderId> = match only {
+            None => self
+                .index
+                .root()
+                .map(|top| self.index.acl_folders_below(top))
+                .unwrap_or_default(),
+            Some(touched) => touched
+                .iter()
+                .flat_map(|&f| std::iter::once(f).chain(self.index.subfolders(f)))
+                .collect(),
+        };
+        let mut seen = std::collections::HashSet::new();
+        for folder in folders {
+            let Some(facts) = self.index.facts_of(folder) else {
+                continue;
+            };
+            seen.insert(facts.id);
+            if facts.mode & skwird_crawl::ACL == 0 {
+                self.acls.remove(&facts.id);
+                continue;
+            }
+            if self
+                .acls
+                .get(&facts.id)
+                .is_some_and(|(at, _)| *at == facts.ctime)
+            {
+                continue;
+            }
+            match self.root.access_acl(&self.index.path_of(folder), facts.id) {
+                Some(acl) => {
+                    self.acls.insert(facts.id, (facts.ctime, acl));
+                }
+                None => {
+                    self.acls.remove(&facts.id);
+                }
+            }
+        }
+        // Every folder looked at: those no longer there have no ACL here.
+        if only.is_none() {
+            self.acls.retain(|id, _| seen.contains(id));
+        }
+        let acls = self
+            .acls
+            .iter()
+            .map(|(id, (_, acl))| (*id, acl.clone()))
+            .collect();
+        self.index.set_acls(std::sync::Arc::new(acls));
+    }
+
     /// The subtrees watched, live or not.
     pub fn live(&self) -> &[Live] {
         &self.live
@@ -472,6 +540,10 @@ impl Keeper {
         cancel: &Cancel,
     ) -> Result<Refreshed, Error> {
         let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders);
+        if let Ok(d) = &done {
+            let touched: Vec<FolderId> = d.folders.iter().map(|&(f, _)| f).collect();
+            self.read_acls(Some(&touched));
+        }
         self.root.let_go();
         let done = done?;
         self.append(done.records.iter().cloned());

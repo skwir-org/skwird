@@ -86,9 +86,8 @@ own with two capabilities alone (`CAP_SYS_ADMIN` for fanotify,
 `CAP_DAC_READ_SEARCH` to read every folder), sandboxed, its index its
 own. Clients find it first, so a user's engine is no longer needed.
 
-Not yet: folders with an ACL are answered to root alone (others walk
-them), the journal is root's alone, and a filesystem mounted after it
-started waits for its next start.
+Not yet: the journal is root's alone, and a filesystem mounted after
+it started waits for its next start.
 
 ## Measuring
 

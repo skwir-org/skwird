@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub mod acl;
 pub mod exclude;
 pub mod fanotify;
 pub mod mounts;

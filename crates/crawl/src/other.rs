@@ -38,6 +38,10 @@ impl Root {
         match self.never {}
     }
 
+    pub fn access_acl(&self, _: &Path, _: FileId) -> Option<crate::acl::Acl> {
+        match self.never {}
+    }
+
     pub fn stat(&self) -> &FolderStat {
         match self.never {}
     }

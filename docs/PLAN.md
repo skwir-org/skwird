@@ -1171,9 +1171,22 @@ committed once the gate holds.
    folder only its owner reads, one its group reads, one any reads, one
    that may be passed through but not listed, and one with an ACL; each
    is answered exactly what they could list, and the ACL's folder is a
-   hole for both users. Not done: the ACLs evaluated (the next step,
-   5b), the answers kept per asker, the limits per asker; the journal
+   hole for both users. Not done here: the ACLs evaluated (step 5b,
+   below), the answers kept per asker, the limits per asker; the journal
    and registrations, refused to other users until step 6.
+
+   **5b, the ACLs evaluated, done on 2026-11-22** (DESIGN 4, "As built"):
+   `skwird_crawl::acl` reads an access ACL as the kernel writes it and
+   judges an asker by it as acl(5) does, tested on its own (a named user,
+   a named group, the mask, a matching group never falling to the
+   others', and the bytes Linux 6.18 writes). The keeper reads each
+   flagged folder's ACL through the root, keeps it by identity until its
+   change time moves, and puts the ACLs in each snapshot. In the root
+   test, the folder whose ACL names one user is answered to that user,
+   hidden from the other, with no hole; an ACL granted to the other while
+   the service runs is heard and answered at once. Not done: a folder
+   with an ACL above a root, and one deep in a subtree just made, which
+   stay not known until the next check.
 6. **Each user's exclusions** (DESIGN 5): the default ones in every
    home, each user's files read, registrations kept per user, each
    applying to folders that user owns.

@@ -83,6 +83,10 @@ pub struct Index {
     /// The subtrees live, by path below the root, each since when
     /// ([`crate::keeper::Live`]): shared by snapshots.
     live: Arc<[(PathBuf, Time)]>,
+    /// The access ACLs of its folders that have one, by identity, as the
+    /// system service reads them ([`skwird_crawl::ACL`]): shared by
+    /// snapshots, so that answering reads none.
+    acls: Arc<HashMap<FileId, skwird_crawl::acl::Acl>>,
 }
 
 /// A name's bytes as a path's component.
@@ -108,6 +112,7 @@ impl Index {
             proof: Proof::AsOf(Time::default()),
             crawled_at: Time::default(),
             live: Arc::from([]),
+            acls: Arc::default(),
         }
     }
 
@@ -125,6 +130,17 @@ impl Index {
 
     pub fn set_crawled_at(&mut self, at: Time) {
         self.crawled_at = at;
+    }
+
+    /// The access ACLs of its folders, by identity.
+    pub fn set_acls(&mut self, acls: Arc<HashMap<FileId, skwird_crawl::acl::Acl>>) {
+        self.acls = acls;
+    }
+
+    /// The access ACL of the folder of identity `id`, if it has one and it
+    /// was read.
+    pub fn acl_of(&self, id: FileId) -> Option<&skwird_crawl::acl::Acl> {
+        self.acls.get(&id)
     }
 
     /// The subtrees live, each since when.
@@ -459,6 +475,17 @@ impl Index {
             }
         }
         out
+    }
+
+    /// The folders `folder` holds, from its block alone.
+    pub fn subfolders(&self, folder: FolderId) -> Vec<FolderId> {
+        let Some(loc) = self.tree.loc(folder) else {
+            return Vec::new();
+        };
+        let view = self.tree.chunk(loc.chunk).view();
+        view.entries(loc.block as usize)
+            .filter_map(|j| view.item(j).child)
+            .collect()
     }
 
     /// A folder's facts, read from its block alone.

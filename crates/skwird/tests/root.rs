@@ -265,8 +265,8 @@ fn an_asker() {
 
 /// The system service answers every user what they could list (DESIGN 4):
 /// a folder only its owner may read, one its group may, one any may, one
-/// that may be passed through but not listed, and one with an ACL, whose
-/// names are withheld from all but root, and said not covered.
+/// that may be passed through but not listed, and one with an ACL that
+/// names one user: answered to them, as the kernel would let them list it.
 #[test]
 fn each_user_is_answered_what_they_could_list() {
     let Some(m) = machine() else { return };
@@ -303,7 +303,6 @@ fn each_user_is_answered_what_they_could_list() {
         "found passage",
         "found passage/inner/through a passage.txt",
         "found acl",
-        "hole acl",
     ];
     let mut someone = set(&everyone);
     someone.extend(set(&[
@@ -318,6 +317,7 @@ fn each_user_is_answered_what_they_could_list() {
     );
     let mut other = set(&everyone);
     other.extend(set(&[
+        "found acl/granted by an acl.txt",
         "covers someone: Denied",
         "covers someone/not there: Denied",
     ]));
@@ -327,6 +327,17 @@ fn each_user_is_answered_what_they_could_list() {
     assert!(all.contains("found acl/granted by an acl.txt"), "{all:?}");
     assert!(all.contains("found passage/inner"), "{all:?}");
     assert!(!all.iter().any(|s| s.starts_with("hole")), "{all:?}");
+    // The ACL changed while it runs: heard, read again, answered at once.
+    let granted = Command::new("setfacl")
+        .args(["-m", "u:1000:rx"])
+        .arg(&acl)
+        .status()
+        .unwrap();
+    assert!(granted.success());
+    wait_for(5, "an ACL granted heard", || {
+        as_user(&service.socket, &place.0, 1000, 1000, &[2000])
+            .contains("found acl/granted by an acl.txt")
+    });
 }
 
 /// Two users the machine's user database names for the test, their homes
