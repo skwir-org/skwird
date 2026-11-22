@@ -186,6 +186,11 @@ impl Shared {
         self.publish(i, Published::Failed("no longer mounted".into()));
     }
 
+    /// Whether root `i` is still a root: not let go of since.
+    pub fn is_alive(&self, i: usize) -> bool {
+        self.read_roots().get(i).is_some_and(|r| r.1)
+    }
+
     /// The other roots strictly below `path`, which root `of` holds: the
     /// system service's other filesystems mounted below the folder asked.
     pub fn roots_below(&self, path: &Path, of: usize) -> Vec<usize> {
@@ -270,6 +275,16 @@ pub enum Command {
     Marks {
         generation: u64,
         heard: Vec<fanotify::Heard>,
+    },
+    /// Root `root` opened on a thread of its own ([`Writing::open_later`]):
+    /// its keeper, none if it could not be, whether it was built, and
+    /// whether it was proven current there (by its crawl, or by the check
+    /// of an index read back).
+    Opened {
+        root: usize,
+        keeper: Option<Box<Keeper>>,
+        built: bool,
+        current: bool,
     },
     Stop,
 }
@@ -538,8 +553,13 @@ fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
         if let Some(command) = command {
             let by_client = command.asked();
             let start = thread_time();
+            // Asked to stop while roots are opening, it stops once they are,
+            // so that a first build is kept.
             if !w.answer(commands, command) {
-                break;
+                if w.opening.is_empty() {
+                    break;
+                }
+                w.stopping = true;
             }
             if by_client {
                 asked = thread_time().saturating_sub(start);
@@ -555,13 +575,17 @@ fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
             Instant::now(),
         );
         mark = end;
+        if w.stopping && w.opening.is_empty() {
+            break;
+        }
     }
 }
 
 pub fn writer(
     config: &Config,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     commands: &Receiver<Command>,
+    sender: Sender<Command>,
     watcher: Option<Arc<Watcher>>,
     group: Option<Arc<Group>>,
 ) {
@@ -598,17 +622,14 @@ pub fn writer(
         (None, Some(g)) => marked_cookie_folder(&config.dirs, g, &table),
         (None, None) => None,
     };
-    let (keepers, built) = open_all(config, shared, &registrations, &opts, &cancel);
-    if built.contains(&true) {
-        // What a first build freed, given back now that it is saved.
-        crate::memory::give_back();
-    }
+    let (ex, refused) = exclusions(config, &registrations);
+    log_refused(refused);
     let mut w = Writing {
         config,
         shared,
         cancel,
         opts: opts.clone(),
-        keepers,
+        keepers: (0..config.roots.len()).map(|_| None).collect(),
         registrations,
         kept_live,
         watcher,
@@ -625,8 +646,19 @@ pub fn writer(
             ..Done::default()
         },
         pending: Vec::new(),
+        opening: HashMap::new(),
+        held: Vec::new(),
+        parked: Vec::new(),
+        stopping: false,
+        registered: 0,
+        shared_arc: Arc::clone(shared),
+        sender,
     };
-    w.hear_whole(since, &built);
+    // Each root opened on a thread of its own, the writer answering
+    // meanwhile: none waits for another, a slow one for itself alone.
+    for (i, path) in config.roots.iter().enumerate() {
+        w.open_later(i, path.clone(), since, ex.clone());
+    }
     w.apply_scopes();
     turns(&mut w, commands);
     w.flush_all();
@@ -647,25 +679,6 @@ fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
-}
-
-/// Open every root: its index read back, or crawled; each published as it
-/// is ready. Says which were built.
-fn open_all(
-    config: &Config,
-    shared: &Shared,
-    registrations: &[Registration],
-    opts: &Options,
-    cancel: &Cancel,
-) -> (Vec<Option<Keeper>>, Vec<bool>) {
-    let (ex, refused) = exclusions(config, registrations);
-    log_refused(refused);
-    config
-        .roots
-        .iter()
-        .enumerate()
-        .map(|(i, path)| open_one(config, shared, i, path, &ex, opts, cancel))
-        .unzip()
 }
 
 /// Open root `i`, at `path`: its index read back, or crawled; published
@@ -757,13 +770,61 @@ struct Writing<'a> {
     done: Done,
     /// Commands taken while gathering syncs, to answer next.
     pending: Vec<Command>,
+    /// The roots being opened, each on a thread of its own
+    /// ([`Writing::open_later`]): the writer answers meanwhile, and a slow
+    /// root (a spinning disk) delays itself alone.
+    opening: HashMap<usize, Opening>,
+    /// What was heard that no root open could take, while roots are
+    /// opening: handled again as each is. At most [`HELD_MOST`].
+    held: Vec<HeldEvent>,
+    /// Syncs of roots being opened, answered once each is.
+    parked: Vec<Command>,
+    /// Asked to stop while roots were opening: stopping once they are, so
+    /// that a first build is kept.
+    stopping: bool,
+    /// How often clients' registrations changed: a root opened meanwhile
+    /// is held to them again.
+    registered: u64,
+    /// For the threads that open roots: the shared state, and where they
+    /// send what they opened.
+    shared_arc: Arc<Shared>,
+    sender: Sender<Command>,
 }
+
+/// A root being opened: since when its filesystem was marked, and whether
+/// what was held for it overflowed, so that it is checked before live.
+struct Opening {
+    since: Time,
+    overflowed: bool,
+    /// The writer's count of registrations changed when it began.
+    registered: u64,
+}
+
+/// An event held while roots are opening, with its source's generation.
+enum HeldEvent {
+    Marks(u64, fanotify::Heard),
+    Watched(u64, Heard),
+}
+
+/// The most events held while roots are opening: past them, every root
+/// being opened is checked once it is, before it is live.
+const HELD_MOST: usize = 65_536;
 
 impl Writing<'_> {
     /// Answer one command: false to stop.
     fn answer(&mut self, commands: &Receiver<Command>, command: Command) -> bool {
         match command {
             Command::Stop => return false,
+            Command::Opened {
+                root,
+                keeper,
+                built,
+                current,
+            } => self.opened(root, keeper, built, current),
+            // A root being opened is synced once it is.
+            Command::Sync { root, rel, reply } if self.opening.contains_key(&root) => {
+                self.parked.push(Command::Sync { root, rel, reply });
+            }
             Command::Sync { root, rel, reply } => {
                 // Every sync asked of this root meanwhile is served alike;
                 // others wait their turn.
@@ -835,6 +896,7 @@ impl Writing<'_> {
             } => {
                 if changed(&mut self.kept_live, &client, None, &add, &remove) {
                     save_registered(&self.config.dirs, WATCHED, &self.kept_live);
+                    self.registered += 1;
                     self.apply_scopes();
                 }
                 let _ = reply.send(theirs(&self.kept_live, &client, None));
@@ -866,6 +928,25 @@ impl Writing<'_> {
         // never wrong), but its cookies prove nothing (DESIGN 2).
         let mut lowered = BTreeSet::new();
         for h in heard {
+            // A watch no root open knows of, while roots are opening, may
+            // be one of theirs: held until they are.
+            let watch = match &h {
+                Heard::Changed(wd) | Heard::Entry(wd, _) | Heard::Moved(wd) | Heard::Gone(wd) => {
+                    Some(*wd)
+                }
+                _ => None,
+            };
+            if let Some(wd) = watch
+                && !self.opening.is_empty()
+                && !self
+                    .keepers
+                    .iter()
+                    .flatten()
+                    .any(|k| k.watched(wd).is_some())
+            {
+                self.hold(HeldEvent::Watched(generation, h));
+                continue;
+            }
             match h {
                 Heard::Changed(wd) => {
                     for (i, keeper) in self.keepers.iter().enumerate() {
@@ -906,6 +987,7 @@ impl Writing<'_> {
                 }
                 Heard::Overflow => {
                     self.done.overflows += 1;
+                    self.opening_overflowed();
                     for (i, keeper) in self.keepers.iter_mut().enumerate() {
                         if let Some(keeper) = keeper {
                             keeper.overflowed();
@@ -1121,6 +1203,13 @@ impl Writing<'_> {
         // Kept first: a kill before the purge's save leaves it to the next
         // open, which holds the index to what is kept.
         save_registered(&self.config.dirs, EXCLUDED, &self.registrations);
+        self.registered += 1;
+        self.exclusions_held();
+    }
+
+    /// The index held to the exclusions derived again: what they add
+    /// purged, the roots of what they take back read again.
+    fn exclusions_held(&mut self) {
         let (readmitting, refused) = self.hold_to_exclusions();
         log_refused(refused);
         for i in readmitting {
@@ -1370,42 +1459,128 @@ fn marked_cookie_folder(dirs: &Dirs, group: &Group, table: &Table) -> Option<Pat
 }
 
 impl Writing<'_> {
-    /// Every root whose filesystem was marked before `since` heard whole
-    /// from then on: once its index is proven current after the mark, by
-    /// its crawl (`built`) or by the check now.
-    fn hear_whole(&mut self, since: Time, built: &[bool]) {
-        for (root, &crawled) in built.iter().enumerate() {
-            self.hear_root(root, since, crawled);
+    /// Root `i`, at `path`, its filesystem marked before `since`, opened
+    /// on a thread of its own: its index read back and checked, or
+    /// crawled, so that the writer answers meanwhile and no stat of it is
+    /// the writer's (AGENTS.md, "Blocking"). It comes back as
+    /// [`Command::Opened`].
+    fn open_later(&mut self, i: usize, path: PathBuf, since: Time, ex: Exclusions) {
+        self.opening.insert(
+            i,
+            Opening {
+                since,
+                overflowed: false,
+                registered: self.registered,
+            },
+        );
+        let (config, shared) = (self.config.clone(), Arc::clone(&self.shared_arc));
+        let (opts, cancel, sender) = (self.opts.clone(), self.cancel.clone(), self.sender.clone());
+        // Heard whole once marked (the system service): an index read back
+        // is checked first. A user's engine hears its scopes alone.
+        let marked = self.marked.get(i).copied().flatten().is_some();
+        crate::serve::named("skwird-open", move || {
+            let (mut keeper, built) = open_one(&config, &shared, i, &path, &ex, &opts, &cancel);
+            // A crawl proves it current; an index read back, its check.
+            let mut current = built;
+            if let Some(keeper) = keeper.as_mut().filter(|_| !built && marked) {
+                let start = Instant::now();
+                match keeper.refresh(&cancel) {
+                    Ok(done) => {
+                        log(&format!(
+                            "root {i} checked in {:.2?}: {} read again, {} crawled",
+                            start.elapsed(),
+                            done.reread,
+                            done.crawled
+                        ));
+                        current = true;
+                    }
+                    Err(e) => log(&format!("root {i} cannot be checked, so not live: {e}")),
+                }
+            }
+            let _ = sender.send(Command::Opened {
+                root: i,
+                keeper: keeper.map(Box::new),
+                built,
+                current,
+            });
+        });
+    }
+
+    /// Root `root` opened ([`Writing::open_later`]): its keeper taken in,
+    /// heard whole from its mark on where it was proven current, what was
+    /// held for it handled, its exclusions derived again (a registration
+    /// made meanwhile holds for it too), and the syncs that waited for it
+    /// answered. Where what was held for it overflowed, it is checked
+    /// before it is live, as after events dropped. One let go of meanwhile
+    /// is let go of.
+    fn opened(&mut self, root: usize, keeper: Option<Box<Keeper>>, built: bool, current: bool) {
+        let Some(opening) = self.opening.remove(&root) else {
+            return;
+        };
+        if !self.shared.is_alive(root) {
+            return;
+        }
+        self.keepers[root] = keeper.map(|k| *k);
+        if built {
+            crate::memory::give_back();
+        }
+        let marked = self.marked.get(root).copied().flatten().is_some();
+        if let Some(keeper) = self.keepers[root].as_mut() {
+            if current && marked {
+                keeper.heard_whole(opening.since);
+            }
+            if opening.overflowed {
+                keeper.overflowed();
+                self.gather.overflowed(Instant::now());
+            }
+        }
+        self.publish(root);
+        self.replay_held();
+        if self.registered != opening.registered {
+            self.exclusions_held();
+        }
+        self.apply_scopes();
+        self.unpark(root);
+    }
+
+    /// The syncs that waited for root `root` to be opened, answered as any.
+    fn unpark(&mut self, root: usize) {
+        let (theirs, others): (Vec<Command>, Vec<Command>) = std::mem::take(&mut self.parked)
+            .into_iter()
+            .partition(|c| matches!(c, Command::Sync { root: r, .. } if *r == root));
+        self.parked = others;
+        self.pending.extend(theirs);
+    }
+
+    /// An event no open root could take, held while roots are opening:
+    /// past [`HELD_MOST`], none is held, and every root being opened is
+    /// checked before it is live.
+    fn hold(&mut self, event: HeldEvent) {
+        if self.held.len() >= HELD_MOST {
+            self.held.clear();
+            self.opening_overflowed();
+            return;
+        }
+        self.held.push(event);
+    }
+
+    /// Events were dropped while roots were opening: each is checked once
+    /// opened, before it is live.
+    fn opening_overflowed(&mut self) {
+        for opening in self.opening.values_mut() {
+            opening.overflowed = true;
         }
     }
 
-    /// Root `root`, its filesystem marked before `since`, heard whole from
-    /// then on, once proven current after: by its crawl (`crawled`), or by
-    /// the check now.
-    fn hear_root(&mut self, root: usize, since: Time, crawled: bool) {
-        if self.marked.get(root).copied().flatten().is_none() {
-            return;
-        }
-        let Some(keeper) = self.keepers.get_mut(root).and_then(Option::as_mut) else {
-            return;
-        };
-        if !crawled {
-            let start = Instant::now();
-            match keeper.refresh(&self.cancel) {
-                Ok(done) => log(&format!(
-                    "root {root} checked in {:.2?}: {} read again, {} crawled",
-                    start.elapsed(),
-                    done.reread,
-                    done.crawled
-                )),
-                Err(e) => {
-                    log(&format!("root {root} cannot be checked, so not live: {e}"));
-                    return;
-                }
+    /// What was held handled again, a root having opened: what is still
+    /// for a root opening is held again.
+    fn replay_held(&mut self) {
+        for event in std::mem::take(&mut self.held) {
+            match event {
+                HeldEvent::Marks(generation, heard) => self.noticed(generation, vec![heard]),
+                HeldEvent::Watched(generation, heard) => self.heard(generation, vec![heard]),
             }
         }
-        keeper.heard_whole(since);
-        self.publish(root);
     }
 
     /// The system service's roots followed as filesystems are mounted and
@@ -1430,6 +1605,10 @@ impl Writing<'_> {
                 self.keepers[i] = None;
                 self.marked[i] = None;
                 self.shared.drop_root(i);
+                // Being opened, it is let go of as it comes back; its syncs
+                // are answered now, as of a root that is none.
+                self.opening.remove(&i);
+                self.unpark(i);
                 log(&format!("root {i}: no longer mounted, let go of"));
             }
         }
@@ -1451,17 +1630,7 @@ impl Writing<'_> {
                 .as_ref()
                 .and_then(|g| mark(g, i, path, &self.table));
             let since = Time::now();
-            let (keeper, built) = open_one(
-                self.config,
-                self.shared,
-                i,
-                path,
-                &ex,
-                &self.opts,
-                &self.cancel,
-            );
-            self.keepers[i] = keeper;
-            self.hear_root(i, since, built);
+            self.open_later(i, path.clone(), since, ex.clone());
         }
     }
 
@@ -1471,8 +1640,9 @@ impl Writing<'_> {
     /// root's index has the shape it had then, no folder made, moved or let
     /// go of since, and holds it with the identity it was found with
     /// ([`Keeper::holds`]); otherwise it is found again. What finding takes
-    /// is charged to the folder, as its application is (DESIGN 8).
-    #[allow(clippy::type_complexity)] // three results of one pass, used once
+    /// is charged to the folder, as its application is (DESIGN 8). And the
+    /// folders in a root being opened, whose events are held until it is.
+    #[allow(clippy::type_complexity)] // four results of one pass, used once
     fn find_heard(
         &mut self,
         group: &Group,
@@ -1481,10 +1651,12 @@ impl Writing<'_> {
         HashMap<fanotify::Folder, Option<(usize, FolderId)>>,
         BTreeSet<u64>,
         Vec<(usize, FolderId, std::time::Duration)>,
+        std::collections::HashSet<fanotify::Folder>,
     ) {
         let mut found: HashMap<fanotify::Folder, Option<(usize, FolderId)>> = HashMap::new();
         let mut failed: BTreeSet<u64> = BTreeSet::new();
         let mut charges = Vec::new();
+        let mut held = std::collections::HashSet::new();
         let mut resolver = group.resolver(&self.table);
         for h in heard {
             let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h else {
@@ -1510,15 +1682,24 @@ impl Writing<'_> {
             }
             let start = thread_time();
             let at = match resolver.resolve(folder) {
-                Resolved::At(path, id) => self.shared.locate(&path).and_then(|(root, rel)| {
-                    let keeper = self.keepers[root].as_ref()?;
-                    keeper.folder_of(&rel, id).map(|f| Found {
-                        root,
-                        folder: f,
-                        id,
-                        shape: keeper.shape(),
-                    })
-                }),
+                Resolved::At(path, id) => match self.shared.locate(&path) {
+                    // In a root being opened: held until it is.
+                    Some((root, _))
+                        if self.keepers[root].is_none() && self.opening.contains_key(&root) =>
+                    {
+                        held.insert(folder.clone());
+                        None
+                    }
+                    Some((root, rel)) => self.keepers[root].as_ref().and_then(|keeper| {
+                        keeper.folder_of(&rel, id).map(|f| Found {
+                            root,
+                            folder: f,
+                            id,
+                            shape: keeper.shape(),
+                        })
+                    }),
+                    None => None,
+                },
                 // Gone, its removal is heard in a parent; no mount reaches
                 // it, or no mark kept has it: no root holds it.
                 Resolved::Gone | Resolved::Unreachable(_) | Resolved::Unmarked => None,
@@ -1536,7 +1717,7 @@ impl Writing<'_> {
             }
             found.insert(folder.clone(), at.map(|at| (at.root, at.folder)));
         }
-        (found, failed, charges)
+        (found, failed, charges, held)
     }
 
     /// What the group heard: each folder named found by its handle, at its
@@ -1549,17 +1730,27 @@ impl Writing<'_> {
         };
         let now = Instant::now();
         self.done.events += heard.len() as u64;
-        let (found, failed, charges) = self.find_heard(&group, &heard);
+        let (found, failed, charges, held) = self.find_heard(&group, &heard);
         let mut lowered = BTreeSet::new();
         for h in heard {
             match h {
                 fanotify::Heard::Entry(folder, name) => {
-                    if let Some(&Some((root, f))) = found.get(&folder) {
+                    if held.contains(&folder) {
+                        self.hold(HeldEvent::Marks(
+                            generation,
+                            fanotify::Heard::Entry(folder, name),
+                        ));
+                    } else if let Some(&Some((root, f))) = found.get(&folder) {
                         self.gather.note_entry(root, f, name, now);
                     }
                 }
                 fanotify::Heard::Changed(folder) => {
-                    if let Some(&Some((root, f))) = found.get(&folder) {
+                    if held.contains(&folder) {
+                        self.hold(HeldEvent::Marks(
+                            generation,
+                            fanotify::Heard::Changed(folder),
+                        ));
+                    } else if let Some(&Some((root, f))) = found.get(&folder) {
                         self.gather.note(root, f, now);
                     }
                 }
@@ -1571,6 +1762,7 @@ impl Writing<'_> {
                 }
                 fanotify::Heard::Overflow => {
                     self.done.overflows += 1;
+                    self.opening_overflowed();
                     for (i, keeper) in self.keepers.iter_mut().enumerate() {
                         if let Some(keeper) = keeper {
                             keeper.overflowed();

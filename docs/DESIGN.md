@@ -110,6 +110,35 @@ several roots (`/` above `/home`) is answered from each, every root
 below at its place: its mount hole gone, the proof the weaker of all;
 one the asker may not reach, or not read yet, a hole there.
 
+**Each root is opened on its own** (2026-11-22, from the user's
+machine with a spinning disk mounted in the home). The writer opened
+every root in turn, and listened, answered syncs and took registrations
+only once the last was built; a filesystem mounted while it ran was
+crawled in it the same way. With the disk, no root was live after
+30 minutes, and a disk mounted while running would have held every
+client's sync for its whole crawl: against AGENTS.md's "Blocking". Now
+each root is opened on a thread of its own (`skwird-open`): its index
+read back and, at the system service, checked there, or crawled. The
+writer answers meanwhile, and takes each root in as it comes:
+- a root is live from its filesystem's mark once it is open, the
+  others' answers never waiting for it; above it, a folder is answered
+  with a hole there, not read yet;
+- what is heard for a root being opened (a handle whose path is in
+  it, a watch no root open knows of) is held, 65,536 events at most,
+  and handled once it is: a change after the crawl read its folder is
+  applied, one before was read. Past that, or after events dropped, the
+  root is checked before it is live;
+- a sync of it waits for it; a registration made meanwhile holds for it
+  once open, derived again;
+- a user's engine asked to stop while its root is opening stops once it
+  is, so that a first build is kept.
+
+A root test proves it on a filesystem whose device waits 20 ms for each
+read (dm-delay), as a spinning disk's seek does: another root is live,
+answered and synced while it is crawled, and files made in it meanwhile,
+in folders read already or not, are answered once it is open. It fails
+on the writer as it was.
+
 An engine a client starts runs in a process group of its own, so that a
 terminal's interrupt does not reach it, but in the client's control
 group. Where a service manager runs the client, the engine ends with the

@@ -440,6 +440,30 @@ pub struct Machine {
     /// system's homes often are, holding two subvolumes of its own (`a`
     /// and `b`).
     pub btrfs: PathBuf,
+    /// An ext4 filesystem on a device whose every read waits 20 ms, as a
+    /// spinning disk's seek does (dm-delay): what is read from it cold is
+    /// slow ([`Machine::cold`]).
+    pub slow: PathBuf,
+    slow_device: PathBuf,
+}
+
+impl Machine {
+    /// What is written made durable, and the caches dropped: what is read
+    /// next comes from the devices, from [`Machine::slow`]'s slowly. That
+    /// one is mounted again: what its journal holds of blocks just written,
+    /// dropping the caches does not let go of.
+    pub fn cold(&self) {
+        rustix::fs::sync();
+        let run = |cmd: &mut std::process::Command| {
+            let done = cmd.status().expect("cannot run mount");
+            assert!(done.success(), "{cmd:?}: {done}");
+        };
+        run(std::process::Command::new("umount").arg(&self.slow));
+        run(std::process::Command::new("mount")
+            .arg(&self.slow_device)
+            .arg(&self.slow));
+        std::fs::write("/proc/sys/vm/drop_caches", b"3\n").expect("cannot drop the caches");
+    }
 }
 
 /// Where the machine names its filesystems.
@@ -472,6 +496,8 @@ pub fn machine() -> Option<Machine> {
     Some(Machine {
         ext4: path("ext4"),
         btrfs: path("btrfs"),
+        slow: path("slow"),
+        slow_device: path("slow_device"),
     })
 }
 

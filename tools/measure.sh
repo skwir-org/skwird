@@ -132,11 +132,13 @@ skw() {
 
 # The engine, in the background: through `env`, which becomes the program,
 # so that `$!` is the engine's own pid. A function run with `&` would be a
-# subshell, and its pid not the engine's.
+# subshell, and its pid not the engine's. Run as its unit runs it: at a
+# niceness of 10, its I/O idle (`Nice=10`, `IOSchedulingClass=idle`), so
+# that it yields to the machine's own work as it would.
 serve_engine() {
     env XDG_RUNTIME_DIR="$engine_dir/run" XDG_CACHE_HOME="$engine_dir/cache" \
-        XDG_STATE_HOME="$engine_dir/state" "$engine" serve --root "$root" --idle 600 \
-        2>>"$engine_dir/engine.log" &
+        XDG_STATE_HOME="$engine_dir/state" nice -n 10 ionice -c 3 \
+        "$engine" serve --root "$root" --idle 600 2>>"$engine_dir/engine.log" &
     engine_pid=$!
 }
 
@@ -310,10 +312,12 @@ sys_sudo=
 sysw() {
     env XDG_RUNTIME_DIR="$sys_dir/run" SKWIRD_NO_START=1 "$engine" "$@"
 }
+# The system service, as its unit runs it: at a niceness of 10, its I/O
+# idle.
 serve_system() {
     sudo -n env RUNTIME_DIRECTORY="$sys_dir/run/skwird" CACHE_DIRECTORY="$sys_dir/cache" \
         STATE_DIRECTORY="$sys_dir/state" CONFIGURATION_DIRECTORY="$sys_dir/config" \
-        "$engine" serve --system --forever 2>>"$sys_dir/engine.log" &
+        nice -n 10 ionice -c 3 "$engine" serve --system --forever 2>>"$sys_dir/engine.log" &
     sys_sudo=$!
     sys_pid=
     # sudo's child, or, where sudo runs it through a pty, its grandchild.
@@ -347,6 +351,25 @@ live_answer() {
     done
     return 1
 }
+# Wait until the service has a line matching `$2` for every root it serves,
+# in its log from line `$1` on: each root built (or read back), or checked.
+# Gives up after half an hour.
+every_root() {
+    local deadline=$((SECONDS + 1800)) log n opened
+    while [ $SECONDS -lt $deadline ]; do
+        log=$(tail -n +"$1" "$sys_dir/engine.log" 2>/dev/null)
+        n=$(printf '%s\n' "$log" | sed -n 's/^skwird: serving \([0-9]*\) roots$/\1/p' | head -1)
+        opened=$(printf '%s\n' "$log" | grep -cE "^skwird: root [0-9]+ ($2)" || true)
+        if [ -n "$n" ] && [ "$opened" -ge "$n" ]; then return 0; fi
+        sleep 0.2
+    done
+    return 1
+}
+# The service's log, which says counts and times, never a name or a path.
+system_log() {
+    echo "the service's log (counts and times):"
+    sed 's/^/  /' "$sys_dir/engine.log"
+}
 measure_system() {
     if [ -S /run/skwird/socket ]; then
         echo "(a system service runs here: not measured, so as not to meet it)"
@@ -360,9 +383,17 @@ measure_system() {
     if [ -z "$sys_pid" ] || ! live_answer; then
         echo "(the service never answered live)"
         stop_system
+        system_log
         return 1
     fi
-    echo "first live answer, every filesystem built: $(since "$start") s"
+    # Each root is opened on a thread of its own: the home is answered
+    # live once its own roots are, a slow filesystem built after.
+    echo "your home answered live: $(since "$start") s"
+    if every_root 1 'built|loaded|cannot be opened'; then
+        echo "every filesystem built: $(since "$start") s"
+    else
+        echo "(not every filesystem built in half an hour)"
+    fi
     echo "memory once built: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
     local times=() i t0 name
     for i in $(seq 1 10); do
@@ -394,16 +425,20 @@ measure_system() {
     echo "idle, 30 s without a client: $(sudo -n awk -v a="$before" -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15 - a) / hz }' "/proc/$sys_pid/stat") s of processor time"
     echo "memory idle: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
     stop_system
+    local from
+    from=$(($(wc -l <"$sys_dir/engine.log") + 1))
     start=$(now)
     serve_system
     if [ -n "$sys_pid" ] && live_answer; then
-        echo "first live answer, read back and checked: $(since "$start") s"
+        echo "your home answered live, read back and checked: $(since "$start") s"
+        if every_root "$from" 'checked in|cannot be checked|cannot be opened'; then
+            echo "every filesystem read back and checked: $(since "$start") s"
+        fi
     else
         echo "(the service never answered live, read back)"
     fi
     stop_system
-    echo "the service's log (counts and times):"
-    sed 's/^/  /' "$sys_dir/engine.log"
+    system_log
     echo "index on disk: $(sudo -n du -sb "$sys_dir/cache" | awk '{ printf "%.1f MB", $1 / 1e6 }')"
     sudo -n rm -rf "$sys_dir"
 }

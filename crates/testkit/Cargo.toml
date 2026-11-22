@@ -8,7 +8,7 @@ publish = false
 description = "Synthetic trees, a reference walk and namespaces for skwird's tests"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 
 [lints]
 workspace = true

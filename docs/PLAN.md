@@ -1370,6 +1370,17 @@ committed once the gate holds.
    into its chunk's columns, not cut again (DESIGN 8): 464 µs for a folder
    of 8 entries, against 1,224. To be measured again, quiet.
 
+   **A spinning disk mounted in the home** (the user's run at `a85cfa3`):
+   the system step failed, no root live after 30 minutes, the disk's
+   crawl holding every root, since the writer opened every root itself,
+   in turn, before listening or answering. Each root now opens on a
+   thread of its own, what is heard for it meanwhile held (DESIGN 1, "Each
+   root is opened on its own"); a root test on a slow device (dm-delay in
+   the root tests' machine) proves it. The measurement now runs both
+   engines as their units do (niceness 10, idle I/O), prints the
+   service's log when a step fails, and says when the home is answered
+   live and when every filesystem is built.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

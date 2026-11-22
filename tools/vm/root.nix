@@ -1,8 +1,9 @@
 # The tests that need root (crates/*/tests/root*.rs), run as root in a
 # virtual machine (AGENTS.md, Testing), with filesystems of its own that
 # they may mark, mount and fill (skwird_testkit::Machine): an ext4 one,
-# and a btrfs one mounted through a subvolume, as a system's homes often
-# are, holding two subvolumes of its own.
+# a btrfs one mounted through a subvolume, as a system's homes often are,
+# holding two subvolumes of its own, and an ext4 one on a device whose
+# every read waits 20 ms, as a spinning disk's seek does (dm-delay).
 #
 # One machine, two ways of giving it the tests:
 # - `tests`, the binaries Nix built (the flake's `checks.root`, for
@@ -31,8 +32,8 @@ in
       virtualisation = {
         memorySize = 2048;
         cores = 4;
-        # /dev/vdb and /dev/vdc, in MiB.
-        emptyDiskImages = [1024 1024];
+        # /dev/vdb, /dev/vdc and /dev/vdd, in MiB.
+        emptyDiskImages = [1024 1024 256];
         sharedDirectories = lib.optionalAttrs shared {
           skwird-tests = {
             source = ''"$SKWIRD_VM_TESTS"'';
@@ -41,10 +42,13 @@ in
         };
       };
       boot.supportedFilesystems = ["btrfs"];
-      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs pkgs.acl];
+      boot.kernelModules = ["dm-delay"];
+      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs pkgs.acl pkgs.lvm2];
       environment.etc."skwird-test-machine".text = ''
         ext4=/mnt/ext4
         btrfs=/mnt/btrfs
+        slow=/mnt/slow
+        slow_device=/dev/mapper/slow
       '';
     };
 
@@ -59,6 +63,9 @@ in
           "mount -o subvol=home /dev/vdc /mnt/btrfs",
           "btrfs -q subvolume create /mnt/btrfs/a",
           "btrfs -q subvolume create /mnt/btrfs/b",
+          "dmsetup create slow --table \"0 $(blockdev --getsz /dev/vdd) delay /dev/vdd 0 20 /dev/vdd 0 0\"",
+          "mkfs.ext4 -q /dev/mapper/slow",
+          "mkdir -p /mnt/slow && mount /dev/mapper/slow /mnt/slow",
       )
       print(machine.succeed("uname -r"))
       tests = [t for t in machine.succeed("ls ${dir}").split() if t.startswith("root-")]

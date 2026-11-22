@@ -48,7 +48,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   `SAFETY:` comment on every block. Use rustix where it has the call.
 - **Blocking.** A stat can block on a sleeping disk or a dead network
   share: crawls and checks run on threads of their own and can be
-  cancelled; nothing that answers a client waits on one.
+  cancelled; nothing that answers a client waits on one. The writer
+  answers syncs: it opened every root itself once, so a spinning disk
+  held every root for its crawl. Each root opens on a thread of its own
+  (`Writing::open_later`); what is heard for it meanwhile is held.
 - **Hold nothing of a filesystem between reads.** A descriptor kept on
   a mount makes its user's `umount` fail, and a `cryptsetup close` after
   it. A root's folder is open while it is read and let go of after

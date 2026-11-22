@@ -115,9 +115,9 @@ pub fn serve(config: &Config) -> Result<(), String> {
     let (commands, received) = channel();
     let (watcher, group) = sources(config, &commands, &shared);
     let writing = {
-        let (config, shared) = (config.clone(), Arc::clone(&shared));
+        let (config, shared, sender) = (config.clone(), Arc::clone(&shared), commands.clone());
         named("skwird-writer", move || {
-            writer(&config, &shared, &received, watcher, group);
+            writer(&config, &shared, &received, sender, watcher, group);
         })
     };
     let live = Arc::new(Live {
@@ -914,7 +914,7 @@ fn answer_in(
 
 /// A thread started under `name`, which the system shows for it (in
 /// `/proc`, `top -H`, a profiler's samples): at most 15 bytes on Linux.
-fn named<T: Send + 'static>(
+pub(crate) fn named<T: Send + 'static>(
     name: &str,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> std::thread::JoinHandle<T> {

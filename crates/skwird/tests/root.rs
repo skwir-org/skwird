@@ -757,3 +757,52 @@ fn a_folder_found_then_moved_is_heard_at_its_new_place() {
         .into()
     );
 }
+
+/// A root on a slow disk delays itself alone (AGENTS.md, "Blocking"): each
+/// root is opened on a thread of its own, so another is live, its changes
+/// answered and its syncs served, while the slow one is still crawled. A
+/// change made in the slow one meanwhile is held, and applied once it is
+/// open; a sync of it waits for it.
+#[test]
+fn a_root_slow_to_open_delays_itself_alone() {
+    let Some(m) = machine() else { return };
+    let slow = Place::new(&m.slow, "slow-root");
+    for a in 0..200 {
+        let dir = slow.join(&format!("d{a:03}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..10 {
+            std::fs::File::create(dir.join(format!("entry-{i}"))).unwrap();
+        }
+    }
+    let quick = Place::new(&m.ext4, "quick-root");
+    std::fs::write(quick.join("quick.txt"), b"x").unwrap();
+    m.cold();
+    let dirs = Place::new(&m.ext4, "slow-dirs");
+    let service = Service::start(&dirs.0, &[&slow.0, &quick.0]);
+    let mut c = service.client(&quick.0);
+    wait_for(20, "the quick root live", || live(&mut c, &quick.0));
+    assert!(!live(&mut c, &slow.0), "the slow root still opening");
+    std::fs::write(quick.join("made later.txt"), b"x").unwrap();
+    let synced = c.sync(&quick.0).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{:?}", synced.names);
+    assert_eq!(
+        answered(&mut c, &named(&quick.0, "made later")),
+        [quick.join("made later.txt")].into()
+    );
+    // Made while the slow root is crawled: some in folders it read already.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!live(&mut c, &slow.0), "the slow root still opening");
+    let made: BTreeSet<PathBuf> = (0..200)
+        .step_by(10)
+        .map(|a| slow.join(&format!("d{a:03}/made while opening.txt")))
+        .collect();
+    for path in &made {
+        std::fs::write(path, b"x").unwrap();
+    }
+    let synced = c.sync(&slow.0).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{:?}", synced.names);
+    assert_eq!(
+        answered(&mut c, &named(&slow.0, "made while opening")),
+        made
+    );
+}
