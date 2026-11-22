@@ -456,6 +456,22 @@ impl Keeper {
         (self.index.facts_of(folder)?.id == id).then_some(folder)
     }
 
+    /// Its index's shape ([`crate::tree::Tree::shape`]), for
+    /// [`Keeper::holds`].
+    pub fn shape(&self) -> u64 {
+        self.index.tree().shape()
+    }
+
+    /// Whether `folder`, found ([`Keeper::folder_of`]) with the identity
+    /// `id` while the index had the shape `shape`, is still what finding
+    /// it again would give: no folder made, moved or let go of since, so
+    /// that none of the index holds that identity elsewhere (a folder
+    /// moved, read at its new place before its old parent is read again),
+    /// and it is still that identity.
+    pub fn holds(&self, folder: FolderId, id: skwird_crawl::FileId, shape: u64) -> bool {
+        self.shape() == shape && self.index.facts_of(folder).is_some_and(|f| f.id == id)
+    }
+
     /// The access ACLs of the folders whose mode says they have one, read
     /// for the system service (`Options::acls`, DESIGN 4): of every folder,
     /// or of those `only` names and the folders they hold. Each is read

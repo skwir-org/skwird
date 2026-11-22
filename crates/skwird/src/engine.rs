@@ -288,6 +288,20 @@ struct Registration {
 const EXCLUDED: &str = "registered";
 const WATCHED: &str = "watched";
 
+/// A folder heard, found in root `root`'s index while it had the shape
+/// `shape` ([`Keeper::holds`]).
+#[derive(Clone, Copy)]
+struct Found {
+    root: usize,
+    folder: FolderId,
+    id: skwird_crawl::FileId,
+    shape: u64,
+}
+
+/// The most folders heard the system service keeps as found: past them,
+/// every one is let go of, and found again when heard.
+const FOUND_KEPT: usize = 4096;
+
 /// The most folders a user keeps out at the system service, each derived
 /// again at every sync.
 const MOST_REGISTERED: usize = 256;
@@ -536,6 +550,7 @@ pub fn writer(
         group,
         table,
         marked,
+        found: HashMap::new(),
         gather: Gather::default(),
         cookies,
         next_cookie: 0,
@@ -684,6 +699,10 @@ struct Writing<'a> {
     /// Each root's filesystem marked, by its device: none if it is not,
     /// and the root is checked, never live.
     marked: Vec<Option<(u32, u32)>>,
+    /// Each folder heard found in an index, kept while finding it again
+    /// would give the same ([`Keeper::holds`]): a busy folder is not found
+    /// again for each event (DESIGN 8). At most [`FOUND_KEPT`].
+    found: HashMap<fanotify::Folder, Found>,
     /// What was heard and not applied yet, and what is due.
     gather: Gather,
     /// The folder cookies are made in, once watched.
@@ -777,7 +796,11 @@ impl Writing<'_> {
                 let _ = reply.send(theirs(&self.kept_live, &client, None));
             }
             Command::Heard { generation, heard } => self.heard(generation, heard),
-            Command::Marks { generation, heard } => self.noticed(generation, heard),
+            Command::Marks { generation, heard } => {
+                let start = thread_time();
+                self.noticed(generation, heard);
+                self.done.noticing += thread_time().saturating_sub(start);
+            }
             Command::Mounts => self.mounts_changed(),
         }
         true
@@ -873,6 +896,7 @@ impl Writing<'_> {
                 let start = thread_time();
                 let read = self.apply_heard(root, &folders);
                 let took = thread_time().saturating_sub(start);
+                self.done.applying += took;
                 self.gather.applied(root, &read, took, Instant::now());
             }
         }
@@ -885,12 +909,18 @@ impl Writing<'_> {
         }
         if self.gather.save_due(now) {
             self.done.say();
+            let start = thread_time();
             for keeper in self.keepers.iter_mut().flatten() {
                 if keeper.save().is_err() {
                     log("a save failed: the index is kept in memory, the log on disk");
                 }
             }
+            let saved = thread_time();
             crate::memory::give_back();
+            let end = thread_time();
+            self.done.saving += saved.saturating_sub(start);
+            self.done.giving_back += end.saturating_sub(saved);
+            self.gather.saved(end.saturating_sub(start), Instant::now());
         }
     }
 
@@ -1374,6 +1404,80 @@ impl Writing<'_> {
         }
     }
 
+    /// Each folder `heard` names found, before anything is applied: in the
+    /// root holding it, or none; the filesystems a handle failed to open
+    /// on; and what finding each took. One found before is taken while its
+    /// root's index has the shape it had then, no folder made, moved or let
+    /// go of since, and holds it with the identity it was found with
+    /// ([`Keeper::holds`]); otherwise it is found again. What finding takes
+    /// is charged to the folder, as its application is (DESIGN 8).
+    #[allow(clippy::type_complexity)] // three results of one pass, used once
+    fn find_heard(
+        &mut self,
+        group: &Group,
+        heard: &[fanotify::Heard],
+    ) -> (
+        HashMap<fanotify::Folder, Option<(usize, FolderId)>>,
+        BTreeSet<u64>,
+        Vec<(usize, FolderId, std::time::Duration)>,
+    ) {
+        let mut found: HashMap<fanotify::Folder, Option<(usize, FolderId)>> = HashMap::new();
+        let mut failed: BTreeSet<u64> = BTreeSet::new();
+        let mut charges = Vec::new();
+        let mut resolver = group.resolver(&self.table);
+        for h in heard {
+            let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h else {
+                continue;
+            };
+            if found.contains_key(folder) {
+                continue;
+            }
+            if let Some(&Found {
+                root,
+                folder: f,
+                id,
+                shape,
+            }) = self.found.get(folder)
+                && self
+                    .keepers
+                    .get(root)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|k| k.holds(f, id, shape))
+            {
+                found.insert(folder.clone(), Some((root, f)));
+                continue;
+            }
+            let start = thread_time();
+            let at = match resolver.resolve(folder) {
+                Resolved::At(path, id) => self.shared.locate(&path).and_then(|(root, rel)| {
+                    let keeper = self.keepers[root].as_ref()?;
+                    keeper.folder_of(&rel, id).map(|f| Found {
+                        root,
+                        folder: f,
+                        id,
+                        shape: keeper.shape(),
+                    })
+                }),
+                // Gone, its removal is heard in a parent; no mount reaches
+                // it, or no mark kept has it: no root holds it.
+                Resolved::Gone | Resolved::Unreachable(_) | Resolved::Unmarked => None,
+                Resolved::Failed(_) => {
+                    failed.insert(folder.fsid);
+                    None
+                }
+            };
+            if let Some(at) = at {
+                if self.found.len() >= FOUND_KEPT {
+                    self.found.clear();
+                }
+                self.found.insert(folder.clone(), at);
+                charges.push((at.root, at.folder, thread_time().saturating_sub(start)));
+            }
+            found.insert(folder.clone(), at.map(|at| (at.root, at.folder)));
+        }
+        (found, failed, charges)
+    }
+
     /// What the group heard: each folder named found by its handle, at its
     /// path, in the root holding it, known by its identity, and gathered;
     /// an overflow, or a handle that fails to open, lowering coverage at
@@ -1384,35 +1488,7 @@ impl Writing<'_> {
         };
         let now = Instant::now();
         self.done.events += heard.len() as u64;
-        // Each folder found once, before anything is applied.
-        let mut found: HashMap<fanotify::Folder, Option<(usize, FolderId)>> = HashMap::new();
-        let mut failed: BTreeSet<u64> = BTreeSet::new();
-        {
-            let mut resolver = group.resolver(&self.table);
-            for h in &heard {
-                let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h
-                else {
-                    continue;
-                };
-                if found.contains_key(folder) {
-                    continue;
-                }
-                let at = match resolver.resolve(folder) {
-                    Resolved::At(path, id) => self.shared.locate(&path).and_then(|(root, rel)| {
-                        let keeper = self.keepers[root].as_ref()?;
-                        keeper.folder_of(&rel, id).map(|f| (root, f))
-                    }),
-                    // Gone, its removal is heard in a parent; no mount
-                    // reaches it, or no mark kept has it: no root holds it.
-                    Resolved::Gone | Resolved::Unreachable(_) | Resolved::Unmarked => None,
-                    Resolved::Failed(_) => {
-                        failed.insert(folder.fsid);
-                        None
-                    }
-                };
-                found.insert(folder.clone(), at);
-            }
-        }
+        let (found, failed, charges) = self.find_heard(&group, &heard);
         let mut lowered = BTreeSet::new();
         for h in heard {
             match h {
@@ -1442,6 +1518,9 @@ impl Writing<'_> {
                     }
                 }
             }
+        }
+        for (root, f, took) in charges {
+            self.gather.found(root, f, took);
         }
         // A handle that did not open proves nothing heard on its filesystem.
         let marks = group.marks();
@@ -1511,6 +1590,13 @@ struct Done {
     largest: usize,
     /// How often each folder was read again.
     by_folder: std::collections::HashMap<(usize, FolderId), u32>,
+    /// The writer's processor time for what was heard: finding the
+    /// folders events name, applying them, saving, and giving memory back
+    /// (the last two, of the save before).
+    noticing: std::time::Duration,
+    applying: std::time::Duration,
+    saving: std::time::Duration,
+    giving_back: std::time::Duration,
 }
 
 impl Done {
@@ -1533,14 +1619,19 @@ impl Done {
         log(&format!(
             "since the last save: {} events heard, {} overflows; {} folders read again \
              ({} distinct), {} entries stat-ed, the largest folder {} entries, the busiest \
-             read {} times",
+             read {} times; processor time: {} ms finding, {} ms applying, {} ms saving, \
+             {} ms giving memory back",
             done.events,
             done.overflows,
             done.reread,
             done.by_folder.len(),
             done.entries,
             done.largest,
-            busiest
+            busiest,
+            done.noticing.as_millis(),
+            done.applying.as_millis(),
+            done.saving.as_millis(),
+            done.giving_back.as_millis()
         ));
     }
 }

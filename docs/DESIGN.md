@@ -711,6 +711,40 @@ most 2% of a core; a large folder heard without pause waits for
 itself alone; a sync applies it at once. On a synthetic tree, a folder
 of 62,000 entries written every 100 ms cost 1.4% of a core, and a
 change in a small folder meanwhile was answered in 122 to 282 ms.
+(Amended on 2026-11-22: the share counts all the writer's work for
+what is heard, and is 1%; below.)
+
+**All the writer does for what is heard keeps to half the budget**
+(2026-11-22, from the system service's measurement, DESIGN 10: 2.8% of
+a core against 2%). The share counted applying alone, and each folder
+had a whole share of its own. Finding each event's folder came on top
+(at the system service, a handle opened, its path read and checked,
+for each batch), and so did the saves; two large folders busy at once
+took two shares. At 2%, the share was the whole idle budget, leaving
+nothing for reading the events, which cannot wait without being lost.
+Now:
+- the share is 1%, and counts all the writer does for what is heard:
+  finding a folder, charged to its next application; applying it; and
+  saving, each save waiting for its share of the last;
+- folders whose share holds them longer than a gathering's most (1 s,
+  a read over 10 ms) divide the share: each is held as many times
+  longer as there are others so held, so that together they take 1%.
+  A small folder keeps a gathering's pace, never waiting on a large
+  one;
+- a folder found is kept as found while its root's index has the same
+  shape (no folder made, moved or let go of since) and still holds it
+  with the identity it was found with. Its identity alone does not say
+  where a folder is. A folder moved is in the index twice for a while:
+  read at its new place before its old parent is read again (held by
+  its share), what is heard in it would go to the old place and be
+  lost. A root test proves it, and fails with the identity alone.
+
+In the root tests' machine, built optimised, a folder of 59,000 entries
+written every 100 ms took 0.68 s in 30 s (2.3%) before, 0.65 s of it the
+writer's. After, it took 0.40 to 0.49 s (1.3 to 1.6%), 0.36 s the
+writer's. A change in a small folder meanwhile was answered in 119 ms,
+then 112. The large folder is read every 4 s or so, not every 2: live
+still, and a sync applies it at once.
 
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
@@ -899,8 +933,11 @@ not what finding each event's folder does (a handle opened, its path
 read and checked, for each folder heard in each batch), nor the saves.
 The machine's own activity was heard meanwhile: 2,875 events while it
 built, then 100 to 160 in each 10 s, a cache folder of 58,919 entries
-read again up to 20 times in one. Next:
-the whole of what the writer does for what is heard held to the share.
+read again up to 20 times in one. Since, the whole of what the writer
+does for what is heard keeps to half the budget (8): in the root
+tests' machine, a folder of 59,000 entries written every 100 ms took
+2.3% of a core before, 1.3 to 1.6% after. Met there; on the user's
+machine, to be measured again.
 
 Not set: the first build. The run built every root in 28.9 s, the home
 in 27.6 s, three times phase 1's warm build of it; the step ran alone,

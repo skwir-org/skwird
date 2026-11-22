@@ -703,3 +703,55 @@ fn a_folder_closed_above_a_root_closes_the_root() {
     assert!(before.contains(found), "{before:?}");
     assert!(owner.contains(found), "its owner still: {owner:?}");
 }
+
+/// A folder found once is found again once it moves (DESIGN 8). Here its
+/// old parent is large and was just applied, so its share holds it: the
+/// folder is read at its new place first, while the index still holds it
+/// at the old one, with the same identity. What is heard in it then is
+/// applied at its new place, never at the old one, where it would be lost.
+/// (Built optimised, the old parent's hold may end before the write: the
+/// test then proves less.)
+#[test]
+fn a_folder_found_then_moved_is_heard_at_its_new_place() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.btrfs, "moved");
+    std::fs::create_dir_all(place.join("old/inner")).unwrap();
+    std::fs::create_dir_all(place.join("new")).unwrap();
+    for i in 0..59_000 {
+        std::fs::File::create(place.join(&format!("old/entry-{i:06}"))).unwrap();
+    }
+    let dirs = Place::new(&m.ext4, "moved-dirs");
+    let service = Service::start(&dirs.0, &[&place.0]);
+    let mut c = service.client(&place.0);
+    wait_for(60, "live", || live(&mut c, &place.0));
+    let at = |c: &mut Client, name: &str| answered(c, &named(&place.0, name));
+    // Heard, the folder is found, and kept as found.
+    std::fs::write(place.join("old/inner/one.txt"), b"x").unwrap();
+    wait_for(5, "a file in the folder", || {
+        !at(&mut c, "one.txt").is_empty()
+    });
+    // Its large parent applied: held now for its share.
+    std::fs::write(place.join("old/busy.txt"), b"x").unwrap();
+    wait_for(5, "a file in its parent", || {
+        !at(&mut c, "busy.txt").is_empty()
+    });
+    std::fs::rename(place.join("old/inner"), place.join("new/inner")).unwrap();
+    wait_for(5, "the folder at its new place", || {
+        at(&mut c, "one.txt").contains(&place.join("new/inner/one.txt"))
+    });
+    std::fs::write(place.join("new/inner/two.txt"), b"x").unwrap();
+    wait_for(5, "a file made at its new place", || {
+        at(&mut c, "two.txt") == [place.join("new/inner/two.txt")].into()
+    });
+    let synced = c.sync(&place.0).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{:?}", synced.names);
+    assert_eq!(
+        at(&mut c, ".txt"),
+        [
+            place.join("new/inner/one.txt"),
+            place.join("new/inner/two.txt"),
+            place.join("old/busy.txt"),
+        ]
+        .into()
+    );
+}

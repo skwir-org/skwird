@@ -73,6 +73,15 @@ pub struct Tree {
     free: Vec<FolderId>,
     next_chunk: ChunkId,
     limits: Limits,
+    /// Its shape ([`Tree::shape`]).
+    shape: u64,
+}
+
+/// The shapes given so far, in this process.
+static SHAPES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_shape() -> u64 {
+    SHAPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Tree {
@@ -86,6 +95,7 @@ impl Tree {
             free: Vec::new(),
             next_chunk: 0,
             limits,
+            shape: next_shape(),
         };
         tree.place(0, 0, blocks);
         // Numbers below the highest given that no block holds are free.
@@ -112,6 +122,7 @@ impl Tree {
             free: Vec::new(),
             next_chunk: chunks.iter().map(|(id, _)| id + 1).max().unwrap_or(0),
             limits,
+            shape: next_shape(),
         };
         // The folders above the block being read, with their depths.
         let mut above: Vec<(FolderId, u32)> = Vec::new();
@@ -164,6 +175,14 @@ impl Tree {
     pub fn set_chunk(&mut self, id: ChunkId, chunk: Arc<Chunk>) {
         debug_assert_eq!(self.chunks[&id].len(), chunk.len());
         self.chunks.insert(id, chunk);
+    }
+
+    /// Which folders it holds, where: a number that changes whenever a
+    /// folder is made, moved or let go of, and that no other tree of this
+    /// process has had. While it stays, each folder is where it was, with
+    /// the number it had.
+    pub fn shape(&self) -> u64 {
+        self.shape
     }
 
     /// A number for a folder to be made.
@@ -267,6 +286,7 @@ impl Tree {
     /// own block of `parent`: their depths and the top ones' parents must
     /// already say so, and their numbers come from [`Tree::alloc`].
     pub fn insert_after(&mut self, parent: FolderId, blocks: Vec<Block>) {
+        self.shape = next_shape();
         let loc = self.loc(parent).expect("a parent is in the tree");
         let at = self.position(loc.chunk);
         let mut all = self.chunks[&loc.chunk].decode();
@@ -279,6 +299,7 @@ impl Tree {
     /// Take `folder`'s subtree out, in pre-order: its numbers stay given,
     /// for it to be inserted elsewhere ([`Tree::insert_after`]).
     pub fn take(&mut self, folder: FolderId) -> Vec<Block> {
+        self.shape = next_shape();
         let ranges = self.ranges(folder);
         let Some((first, _)) = ranges.first() else {
             return Vec::new();

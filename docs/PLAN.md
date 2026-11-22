@@ -1288,6 +1288,27 @@ committed once the gate holds.
    folders above a root, taken as they were at the start, are judged
    live since (a root test closes one while the service runs).
 
+   **The budget not met, 2026-11-22.** The save's log line now gives the
+   writer's processor time by kind: finding, applying, saving, giving
+   memory back. A root test reproduced the user's machine: a folder of
+   59,000 entries written every 100 ms, with the service watching. In
+   the debug build, about 40 ms went to finding and 220 ms to applying
+   in each 10 s, and saving under 5 ms; one read of the folder stat-ed
+   one entry and cost about 200 ms, in four passes over all of it. Saves
+   were not the cost, as had been thought. Since (DESIGN 8):
+   - the share is 1%, half the budget, and counts finding and saving
+     with applying;
+   - the folders it limits divide it;
+   - a folder found is kept as found while its index keeps its shape.
+     Kept by its identity alone, a folder moved lost what was heard in
+     it: the root test written for it failed so, and passes with the
+     shape.
+   Built optimised in the machine, the trial took 2.3% of a core before
+   and 1.3 to 1.6% after, a small folder's change answered in 112 to
+   119 ms throughout. On the user's machine, to be measured again
+   (`tools/measure.sh --only engine,system`, which sets the first
+   build's budget too).
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

@@ -57,6 +57,16 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   opened through the mount table's mounts when they are read. What is
   opened again is known by its identity and mount id, never by its path
   alone.
+- **A share counts all the work it bounds,** and stays under its
+  budget, leaving room for what cannot wait. The writer's work for what
+  is heard (finding, applying, saving) is timed by its own thread's
+  clock and held to 1%, half the idle budget. Reading events cannot wait
+  without losing them. A share that counted applying alone took the
+  whole 2%, and the system service took 2.8%.
+- **What is found in an index is kept only while the index keeps its
+  shape** (`Tree::shape`: no folder made, moved or let go of). An
+  identity does not say where a folder is: a folder moved is in the
+  index twice until its old parent is read again.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

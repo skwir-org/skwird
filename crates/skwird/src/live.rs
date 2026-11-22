@@ -29,10 +29,12 @@ const BACKOFF: Duration = Duration::from_secs(2);
 const BACKOFF_MOST: Duration = Duration::from_secs(60);
 /// An overflow this long after the last check starts the wait afresh.
 const CALM: Duration = Duration::from_secs(300);
-/// Applying what is heard takes at most one part in this many of the
-/// time: a folder that is large and busy costs a share of a core, never
-/// the core.
-const DUTY: u32 = 50;
+/// What the writer does for what is heard (finding each folder, applying,
+/// saving) takes one part in this many of the time, the folders it holds
+/// dividing that share: large and busy, they cost a share of a core, never
+/// the core. Half the budget (DESIGN 10): reading the events, which cannot
+/// wait without being lost, keeps the rest.
+const DUTY: u32 = 100;
 
 /// What the writer listens to: a user's engine's watcher (inotify), or
 /// the system service's group (fanotify).
@@ -148,11 +150,22 @@ pub use skwird_index::update::HeardFolder;
 /// gathering stays bounded.
 const NAMES: usize = 4096;
 
-/// A folder's gathering: when first heard, when last, and the names heard.
+/// A folder's gathering: when first heard, when last, the names heard,
+/// and what finding it took, charged to its application.
 struct Gathered {
     first: Instant,
     last: Instant,
     names: Option<HashSet<Box<[u8]>>>,
+    owed: Duration,
+}
+
+/// Until when a folder applied is not applied again, and whether its
+/// share holds it longer than a gathering's most: such folders divide the
+/// share between them.
+#[derive(Clone, Copy)]
+struct Hold {
+    until: Instant,
+    limited: bool,
 }
 
 /// What the writer has heard and not applied, and what is due after.
@@ -166,9 +179,13 @@ pub struct Gather {
     last_check: Option<Instant>,
     /// Since when what was heard has not been saved.
     unsaved: Option<Instant>,
-    /// Until when each folder applied is not applied again: what its
-    /// reads took, fifty times over.
-    holds: HashMap<(usize, FolderId), Instant>,
+    /// Until when no save is due: what the last took, `DUTY` - 1 times over.
+    save_held: Option<Instant>,
+    /// Until when each folder applied is not applied again: its share of
+    /// what its reads took, `DUTY` - 1 times over and more.
+    holds: HashMap<(usize, FolderId), Hold>,
+    /// What finding each folder due took, until it is applied.
+    owed: HashMap<(usize, FolderId), Duration>,
 }
 
 impl Gather {
@@ -203,15 +220,24 @@ impl Gather {
             first: now,
             last: now,
             names: None,
+            owed: Duration::ZERO,
         });
         g.last = now;
         g
     }
 
+    /// Finding `folder` of root `root`, heard, took `took` of the writer's
+    /// processor time: charged to its next application.
+    pub fn found(&mut self, root: usize, folder: FolderId, took: Duration) {
+        if let Some(g) = self.heard.get_mut(&(root, folder)) {
+            g.owed += took;
+        }
+    }
+
     /// The folders whose gathering is done, and whose hold is past, by
     /// root, let go of here.
     pub fn due(&mut self, now: Instant) -> Vec<(usize, Vec<HeardFolder>)> {
-        self.holds.retain(|_, until| now < *until);
+        self.holds.retain(|_, hold| now < hold.until);
         let mut by_root: HashMap<usize, Vec<HeardFolder>> = HashMap::new();
         let done: Vec<(usize, FolderId)> = self
             .heard
@@ -223,6 +249,9 @@ impl Gather {
             .collect();
         for (root, folder) in done {
             if let Some(g) = self.heard.remove(&(root, folder)) {
+                if !g.owed.is_zero() {
+                    self.owed.insert((root, folder), g.owed);
+                }
                 by_root.entry(root).or_default().push((folder, g.names));
             }
         }
@@ -236,10 +265,14 @@ impl Gather {
 
     /// The folders of `root` read, each with the entries its listing held,
     /// took `took` of processor time. Each is held, before it is applied
-    /// again, for its share of that time (by its entries) fifty times
-    /// over: applying takes at most one part in [`DUTY`] of the time, and
-    /// a large folder heard without pause waits for itself alone. Its
-    /// answers lag then, live still; a sync applies it at once.
+    /// again, for its share of that time (by its entries) and of what
+    /// finding it took, [`DUTY`] - 1 times over: a large folder heard
+    /// without pause waits for itself, and a small one read with it does
+    /// not. A folder held longer than a gathering's most is limited by the
+    /// share; such folders divide it, each held as many times longer as
+    /// there are others: together they take one part in [`DUTY`], however
+    /// many are busy. Their answers lag then, live still; a sync applies
+    /// them at once.
     pub fn applied(
         &mut self,
         root: usize,
@@ -247,14 +280,35 @@ impl Gather {
         took: Duration,
         now: Instant,
     ) {
+        let owed: Vec<Duration> = read
+            .iter()
+            .map(|(folder, _)| self.owed.remove(&(root, *folder)).unwrap_or_default())
+            .collect();
+        // What was due and not read (gone since) owes nothing.
+        self.owed.retain(|(r, _), _| *r != root);
         let total: usize = read.iter().map(|(_, n)| n + 1).sum();
         if total == 0 {
             return;
         }
-        for &(folder, n) in read {
-            let share = took.mul_f64((n + 1) as f64 / total as f64) * (DUTY - 1);
-            if share >= Duration::from_millis(1) {
-                self.holds.insert((root, folder), now + share);
+        self.holds.retain(|_, hold| now < hold.until);
+        let limited = self.holds.values().filter(|hold| hold.limited).count();
+        let sharing = u32::try_from(limited + 1).unwrap_or(u32::MAX);
+        for (&(folder, n), owed) in read.iter().zip(owed) {
+            let share = took.mul_f64((n + 1) as f64 / total as f64) + owed;
+            let alone = share * (DUTY - 1);
+            let wait = if alone > MOST {
+                share * DUTY.saturating_mul(sharing).saturating_sub(1)
+            } else {
+                alone
+            };
+            if wait >= Duration::from_millis(1) {
+                self.holds.insert(
+                    (root, folder),
+                    Hold {
+                        until: now + wait,
+                        limited: alone > MOST,
+                    },
+                );
             }
         }
     }
@@ -268,6 +322,8 @@ impl Gather {
             .filter(|(r, _)| *r == root)
             .copied()
             .collect();
+        // Asked for, not held: what finding them took is not owed.
+        self.owed.retain(|(r, _), _| *r != root);
         let mut folders: Vec<HeardFolder> = keys
             .into_iter()
             .filter_map(|key| self.heard.remove(&key).map(|g| (key.1, g.names)))
@@ -310,13 +366,26 @@ impl Gather {
         self.unsaved.get_or_insert(now);
     }
 
-    /// Whether the indexes changed by what was heard are to be saved now.
+    /// Whether the indexes changed by what was heard are to be saved now:
+    /// [`SAVE`] after the first change unsaved, and not before the last
+    /// save's hold is past.
     pub fn save_due(&mut self, now: Instant) -> bool {
-        if self.unsaved.is_some_and(|at| now >= at + SAVE) {
+        if self.save_at().is_some_and(|at| now >= at) {
             self.unsaved = None;
             return true;
         }
         false
+    }
+
+    /// The save took `took` of processor time: the next waits for its
+    /// share of it, as a folder's application does.
+    pub fn saved(&mut self, took: Duration, now: Instant) {
+        self.save_held = Some(now + took * (DUTY - 1));
+    }
+
+    fn save_at(&self) -> Option<Instant> {
+        let at = self.unsaved? + SAVE;
+        Some(self.save_held.map_or(at, |held| at.max(held)))
     }
 
     /// When something is due next, if anything is.
@@ -327,10 +396,10 @@ impl Gather {
             .map(|(key, g)| {
                 let at = (g.last + QUIET).min(g.first + MOST);
                 // Held after its last application, a folder waits for it.
-                self.holds.get(key).map_or(at, |&until| at.max(until))
+                self.holds.get(key).map_or(at, |hold| at.max(hold.until))
             })
             .min();
-        [gathering, self.recheck, self.unsaved.map(|at| at + SAVE)]
+        [gathering, self.recheck, self.save_at()]
             .into_iter()
             .flatten()
             .min()
@@ -447,6 +516,57 @@ mod tests {
         g.applied(0, &[(1, 62_000)], took, t);
         g.note(0, 1, t);
         assert_eq!(g.take(0), vec![(1, None)], "a sync is not held");
+    }
+
+    /// Folders limited by the share divide it: each held while the others
+    /// are is held as many times longer, so that together they take one
+    /// part in `DUTY`. A small folder is never limited, so never waits on
+    /// a large one.
+    #[test]
+    fn folders_the_share_limits_divide_it() {
+        let t = Instant::now();
+        let took = Duration::from_millis(50);
+        let mut g = Gather::default();
+        g.applied(0, &[(1, 62_000)], took, t);
+        g.applied(0, &[(2, 62_000)], took, t);
+        g.applied(0, &[(3, 10)], Duration::from_micros(100), t);
+        g.note(0, 1, t);
+        g.note(0, 2, t);
+        g.note(0, 3, t);
+        let until = |g: &Gather, f| g.holds[&(0, f)].until;
+        assert_eq!(until(&g, 1), t + took * (DUTY - 1), "alone");
+        assert_eq!(until(&g, 2), t + took * (2 * DUTY - 1), "while 1 is held");
+        assert!(until(&g, 3) < t + MOST, "a small one is not limited");
+        assert_eq!(g.due(t + MOST), vec![(0, vec![(3, None)])]);
+    }
+
+    /// What finding a folder took is charged to its next application, and
+    /// a save waits for its share of what the last took.
+    #[test]
+    fn finding_and_saving_keep_to_the_share() {
+        let t = Instant::now();
+        let mut g = Gather::default();
+        g.note(0, 1, t);
+        g.found(0, 1, Duration::from_millis(20));
+        assert_eq!(g.due(t + MOST), vec![(0, vec![(1, None)])]);
+        g.applied(0, &[(1, 10)], Duration::from_millis(1), t + MOST);
+        let held = g.holds[&(0, 1)].until;
+        assert_eq!(held, t + MOST + Duration::from_millis(21) * (DUTY - 1));
+        // Asked for by a sync, what finding took is not owed.
+        g.note(0, 2, t);
+        g.found(0, 2, Duration::from_millis(20));
+        assert_eq!(g.take(0), vec![(2, None)]);
+        assert!(g.owed.is_empty());
+
+        let mut s = Gather::default();
+        s.changed(t);
+        assert!(s.save_due(t + SAVE));
+        s.saved(Duration::from_millis(500), t + SAVE);
+        s.changed(t + SAVE);
+        assert!(!s.save_due(t + SAVE * 2), "the last save's share first");
+        let after = t + SAVE + Duration::from_millis(500) * (DUTY - 1);
+        assert_eq!(s.deadline(), Some(after));
+        assert!(s.save_due(after));
     }
     /// The check after an overflow waits for quiet, and longer for each
     /// overflow that follows soon.

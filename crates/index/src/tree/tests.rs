@@ -167,7 +167,11 @@ fn run(seed: u64, steps: usize, limits: Limits) {
     for step in 0..steps {
         let folders = model.folders();
         let folder = rng.pick(&folders);
-        match rng.below(10) {
+        let shape = tree.shape();
+        let edit = rng.below(10);
+        // Whether the edit makes, moves or lets go of a folder.
+        let mut reshaped = false;
+        match edit {
             // A file made, or several.
             0..=2 => {
                 let many = rng.below(10) == 0;
@@ -196,6 +200,7 @@ fn run(seed: u64, steps: usize, limits: Limits) {
                 }
                 tree.insert_after(folder, blocks.iter().map(|&f| model.block(f)).collect());
                 tree.replace(model.block(folder));
+                reshaped = true;
             }
             // A folder removed, with everything below it.
             6 | 7 => {
@@ -208,6 +213,7 @@ fn run(seed: u64, steps: usize, limits: Limits) {
                 }
                 tree.remove(folder);
                 tree.replace(model.block(parent));
+                reshaped = true;
             }
             // A folder moved elsewhere, not below itself.
             _ => {
@@ -230,9 +236,15 @@ fn run(seed: u64, steps: usize, limits: Limits) {
                 tree.insert_after(to, moved);
                 tree.replace(model.block(old));
                 tree.replace(model.block(to));
+                reshaped = true;
             }
         }
         assert_matches(&tree, &model);
+        assert_eq!(
+            tree.shape() != shape,
+            reshaped,
+            "seed {seed}, step {step}: the shape changes with the folders alone"
+        );
         assert!(
             model.parent.len() < 2000,
             "seed {seed}, step {step}: the model grew past what a test needs"

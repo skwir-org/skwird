@@ -484,7 +484,7 @@ impl Index {
         };
         let view = self.tree.chunk(loc.chunk).view();
         view.entries(loc.block as usize)
-            .filter_map(|j| view.item(j).child)
+            .filter_map(|j| view.item_child(j))
             .collect()
     }
 
