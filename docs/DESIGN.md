@@ -1429,6 +1429,27 @@ it waits for it. The account was owed now and then, the writer taking
 1.1 to 2.1% of a core between saves. What is left of a large folder's
 read is its own entries (8, "A file written to costs what changed").
 
+**Measured at the end of phase 3** (2026-11-23, at `9196a7f`, a load of
+4 to 6.6; eight roots, 8.28 million entries):
+
+| What | Budget | Measured | |
+|---|---|---|---|
+| Every filesystem built | 3 s per million entries | 7.69 s (0.93 s per million), the home answered live at 7.38 s | met |
+| A change to its answer, no sync | 0.25 s at the median, 1 s at most | 167 ms, 455 ms at most | met |
+| A sync of a live folder | 0.1 s | 0.13 s, 0.09 s of it on a processor | not met |
+| Read back and every root checked | 0.3 s per million | 1.13 s (0.14 per million) | met |
+| A query answered to a user, against root's | 1.25 times | 0.61 s against 0.56 (1.09) | met |
+| Memory at rest, its own | 10 MB per million | 26 to 28 MB (3.4 per million) | met |
+| Memory at rest, its files mapped | no more than its index on disk | 195 to 196 MB of 351 | met |
+| Processor time, no client asking | 2% of a core | 0.47 s in 30 s (1.6%): the writer 0.42 s, the reader 0.03 s | met |
+
+The sync is left over its budget by the user's choice, to move on: what
+it costs is mostly what it applies at once, among it the user's busy
+folder of 59,469 entries, read in 26 to 45 ms. No storm came in this
+run; what one costs on the user's machine since the reader's longer
+wait (8, "A wake for many events") is measured in the root tests'
+machine alone, a third of before.
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`

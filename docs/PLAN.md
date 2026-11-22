@@ -4,7 +4,7 @@ Each phase is useful alone, and ends with what was measured and what is
 left, honestly. The design is `docs/DESIGN.md`; a phase that changes a
 decision changes it there.
 
-## Where it stands (2026-11-22, morning)
+## Where it stands (2026-11-23)
 
 Phase 0 is done. Phase 1 is done, its eight steps: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
@@ -13,15 +13,15 @@ the user's home and given budgets (DESIGN 10), the three of memory
 third measurements. Phase 2 is done, its seven steps: the engine as a
 user service, folders its clients register watched and answered live,
 a sync of them a barrier, the mount table followed, within budgets of
-its own (DESIGN 10). Phase 3 is built and measured (step 8: one budget
-not met, idle processor time, and the build's not set):
-the system service, fanotify on whole filesystems, every user answered
-what they could list (ACLs evaluated), each user's exclusions kept, a
-sandboxed unit and a NixOS module, proven as root in virtual machines.
-The
-choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
-Protocol): private folders a client registers, tool stores indexed,
-network mounts never crawled, no crate on crates.io. skwir released
+its own (DESIGN 10). Phase 3 is done, its eight steps, every budget met
+but a sync's, 0.13 s against 0.1, left so by the user's choice (DESIGN
+10, "Measured at the end of phase 3"): the system service, fanotify on
+whole filesystems, every user answered what they could list (ACLs
+evaluated), each user's exclusions kept, a sandboxed unit and a NixOS
+module, proven as root in virtual machines. The choices phase 1 waited
+on were made on 2026-11-11 (DESIGN 2, 5 and the Protocol): private
+folders a client registers, tool stores indexed, network mounts never
+crawled, no crate on crates.io. skwir released
 0.6.0 on 2026-11-21, and its steps for skwird (below, "skwir, the first
 client") can take the client's copies now.
 
@@ -1019,7 +1019,7 @@ committed once the gate holds.
 - a sync of a live folder answers with a change made just before it;
 - a mount made below a watched folder: not covered, a mount.
 
-## Phase 3: Linux, the system service
+## Phase 3: Linux, the system service (done)
 
 - fanotify on whole filesystems. On btrfs, use a detached read-only
   top-level mount when marking through a subvolume is refused (DESIGN 3).
@@ -1237,7 +1237,9 @@ committed once the gate holds.
    holds from every sync now, and a test of the user's engine proves it
    (it fails without the fix).
 8. **Budgets,** measured by the user on their machine, as root (done on
-   2026-11-22, but for one not met and one not set).
+   2026-11-23: every budget met but a sync's, 0.13 s against 0.1, left
+   so by the user's choice; a storm's cost since the reader's longer
+   wait measured in the root tests' machine alone).
 
    **Ready, not run:** `tools/measure.sh --only system` (README,
    "Measuring"), never run unless named. It runs the system service as
