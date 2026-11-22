@@ -317,7 +317,7 @@ mod tests {
         let mut g = Gather::default();
         g.note(0, 7, t);
         assert_eq!(g.deadline(), Some(t + QUIET));
-        assert!(g.due(t + QUIET / 2).is_empty());
+        assert_eq!(g.due(t + QUIET / 2), Vec::new());
         g.note(0, 7, t + QUIET / 2);
         assert!(g.due(t + QUIET).is_empty(), "heard again: quiet anew");
         assert_eq!(g.due(t + QUIET / 2 + QUIET), vec![(0, vec![(7, None)])]);
@@ -326,7 +326,7 @@ mod tests {
         let mut at = t;
         while at < t + MOST {
             busy.note(1, 3, at);
-            assert!(busy.due(at).is_empty());
+            assert_eq!(busy.due(at), Vec::new());
             at += QUIET / 2;
         }
         assert_eq!(busy.due(t + MOST), vec![(1, vec![(3, None)])]);
@@ -376,9 +376,9 @@ mod tests {
             held > t + took * (DUTY - 2),
             "the large one held for its share"
         );
-        assert!(
-            g.due(held.checked_sub(Duration::from_millis(1)).unwrap())
-                .is_empty()
+        assert_eq!(
+            g.due(held.checked_sub(Duration::from_millis(1)).unwrap()),
+            Vec::new()
         );
         assert_eq!(g.due(held), vec![(0, vec![(1, None)])]);
         g.applied(0, &[(1, 62_000)], took, t);

@@ -737,7 +737,7 @@ fn a_mount_made_below_a_watched_folder_is_a_hole_at_once() {
     wait_for(5, "read again once the mount is gone", || {
         answered(&mut c, &report).len() == 1
     });
-    assert!(c.coverage(&docs).unwrap().holes.is_empty());
+    assert_eq!(c.coverage(&docs).unwrap().holes, Vec::new());
 }
 
 /// The units run the engine for the session, on the socket clients look

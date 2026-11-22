@@ -77,6 +77,13 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   `.driverInteractive` to work in the machine by hand. They use KVM
   where the processor's virtualization is on; otherwise QEMU emulates
   the processor, many times slower.
+- A test that needs root lives in a `tests/root*.rs` of its crate, and
+  starts with `let Some(m) = skwird_testkit::machine() else { return };`:
+  it runs only as root in the root tests' machine, and is skipped
+  anywhere else. `tools/vm/root-tests` builds them with cargo and runs
+  them there in about 15 s; the gate runs it (`--no-machine` skips it).
+  The machine gives them an ext4 filesystem and a btrfs one mounted
+  through a subvolume (`m.ext4`, `m.btrfs`, its subvolumes `a` and `b`).
 - Assert what an answer holds, not merely that it parses.
 
 ## Shell hygiene

@@ -1067,6 +1067,27 @@ committed once the gate holds.
    shared into it, with disks of its own (ext4, btrfs with subvolumes);
    a pure check builds them with Nix for `nix flake check`. They skip
    anywhere else, `sudo cargo test` on a developer's system included.
+
+   **Done on 2026-11-22.** A test that needs root is in a
+   `tests/root*.rs` of its crate and asks `skwird_testkit::machine()`
+   first: it runs only as root in the machine, where the machine names
+   its filesystems in `/etc/skwird-test-machine`, and is skipped
+   anywhere else. The machine sets `SKWIRD_TEST_MACHINE`, so that a test
+   that would skip there fails instead. `tools/vm/root.nix` is the
+   machine: two disks of its own, one ext4, one btrfs mounted through a
+   subvolume (`home`) holding two more (`a`, `b`); Linux 6.18.58, as
+   nixpkgs pins it. `tools/vm/root-tests` builds the tests with cargo,
+   shares them into the machine and runs them: 6 s to boot, 14 s in
+   all. `checks.root` runs the same machine with tests Nix built. The
+   gate runs the root tests too (`--no-machine` skips them).
+
+   The first test proves the machine is what the tests rely on: each
+   filesystem's kind, each subvolume a device of its own, its top folder
+   inode 256 (DESIGN 6).
+
+   Clippy 1.99, which the gate runs since the toolchain moved, asks for
+   `assert_eq!(x, Vec::new())` over `assert!(x.is_empty())`, which shows
+   the value on failure: four tests changed.
 3. **fanotify** in the crawl crate, from phase 0's probe: one mark per
    filesystem, btrfs through the detached top-level mount, events
    resolved to their folders by handle; an overflow, a mark refused and

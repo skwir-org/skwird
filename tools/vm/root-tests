@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Run the tests that need root (crates/*/tests/root*.rs) as root in a
+# virtual machine (tools/vm/root.nix; AGENTS.md, Testing): cargo builds
+# them here, and the machine runs them from this build's folder, shared
+# into it. Arguments go to cargo, e.g. `-p skwird-crawl`.
+#
+#   tools/vm/root-tests            every root test
+#   tools/vm/root-tests -p skwird-crawl
+#
+# The machine boots in about 10 s with KVM. `nix flake check` runs the
+# same machine with binaries Nix built (`checks.root`).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")/../.." && pwd)
+out=$here/target/vm-tests
+rm -rf "$out"
+mkdir -p "$out"
+
+# Each test binary cargo makes for a root* target, copied where the
+# machine sees it.
+cargo test --manifest-path "$here/Cargo.toml" --no-run --workspace --test 'root*' \
+  --message-format=json-render-diagnostics "$@" |
+  jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' |
+  while read -r exe; do cp "$exe" "$out/"; done
+[ -n "$(ls -A "$out")" ] || { echo "no root tests built" >&2; exit 1; }
+
+driver=$(nix build "$here#root-machine" --no-link --print-out-paths)
+# The machine's disks and state, off a /tmp that may be memory.
+state=$here/target/vm-state
+rm -rf "$state"
+mkdir -p "$state"
+cd "$state"
+SKWIRD_VM_TESTS=$out TMPDIR=$state "$driver/bin/nixos-test-driver"

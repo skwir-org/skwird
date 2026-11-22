@@ -5,6 +5,8 @@
 //!   be a tmpfs with other rules for change times;
 //! - [`reference_walk`]: a plain walk of a tree, one folder after the
 //!   other, to compare an answer with;
+//! - [`machine`]: the machine the tests that need root run in, and its
+//!   filesystems (`tools/vm/root.nix`);
 //! - [`in_namespace`]: a test run again in a user and mount namespace of
 //!   its own, where it may mount without root.
 //!
@@ -426,4 +428,49 @@ pub fn in_namespace() -> bool {
         "the test failed in its namespace:\n{stdout}\n{stderr}"
     );
     false
+}
+
+/// The machine the tests that need root run in (`tools/vm/root.nix`,
+/// AGENTS.md, Testing): filesystems of its own, which a test may mark,
+/// mount and fill as root.
+pub struct Machine {
+    /// An ext4 filesystem, mounted.
+    pub ext4: PathBuf,
+    /// A btrfs filesystem mounted through a subvolume (`home`), as a
+    /// system's homes often are, holding two subvolumes of its own (`a`
+    /// and `b`).
+    pub btrfs: PathBuf,
+}
+
+/// Where the machine names its filesystems.
+const MACHINE: &str = "/etc/skwird-test-machine";
+
+/// The test machine, when this runs in it as root; otherwise `None`,
+/// having said so, and the test is skipped: a test that needs root runs
+/// in the machine, never on a developer's own system, even under sudo.
+///
+/// The machine sets `SKWIRD_TEST_MACHINE` for its runs, so that a test
+/// that would skip there fails instead.
+pub fn machine() -> Option<Machine> {
+    let inside = std::env::var_os("SKWIRD_TEST_MACHINE").is_some();
+    let named = std::fs::read_to_string(MACHINE).ok();
+    let root = rustix::process::geteuid().is_root();
+    let Some(named) = named.filter(|_| root) else {
+        assert!(
+            !inside,
+            "SKWIRD_TEST_MACHINE is set, but this is not the test machine as root"
+        );
+        eprintln!("skipped: needs root in the test machine (tools/vm/root-tests)");
+        return None;
+    };
+    let path = |key: &str| {
+        named
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .map_or_else(|| panic!("{MACHINE} names no {key}"), PathBuf::from)
+    };
+    Some(Machine {
+        ext4: path("ext4"),
+        btrfs: path("btrfs"),
+    })
 }

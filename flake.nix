@@ -41,6 +41,7 @@
         targets = ["x86_64-pc-windows-gnu" "aarch64-apple-darwin"];
       };
 
+
       # The package (`packages.default`, dist/nix/package.nix), made as
       # skwir's is: built from what the build reads of the git tree (the
       # workspace, the units, the licences), so a change to the docs or the
@@ -48,25 +49,48 @@
       # in its sysroot, so no binary names the toolchain (the package
       # refuses one that does).
       rustMinimal = pkgs.rust-bin.stable.${pinned}.minimal;
+      rustPlatform = pkgs.makeRustPlatform {
+        cargo = rustMinimal;
+        rustc = rustMinimal;
+      };
+      src = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./Cargo.toml
+          ./Cargo.lock
+          ./crates
+          ./dist/systemd
+          ./LICENSE-MIT
+          ./LICENSE-APACHE
+        ];
+      };
+      # The skwird crate's: the workspace has no version of its own.
+      inherit ((builtins.fromTOML (builtins.readFile ./crates/skwird/Cargo.toml)).package) version;
+      cargoLock.lockFile = ./Cargo.lock;
       skwird = pkgs.callPackage ./dist/nix/package.nix {
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustMinimal;
-          rustc = rustMinimal;
-        };
-        src = lib.fileset.toSource {
-          root = ./.;
-          fileset = lib.fileset.unions [
-            ./Cargo.toml
-            ./Cargo.lock
-            ./crates
-            ./dist/systemd
-            ./LICENSE-MIT
-            ./LICENSE-APACHE
-          ];
-        };
-        # The skwird crate's: the workspace has no version of its own.
-        inherit ((builtins.fromTOML (builtins.readFile ./crates/skwird/Cargo.toml)).package) version;
-        cargoLock.lockFile = ./Cargo.lock;
+        inherit rustPlatform src version cargoLock;
+      };
+
+      # The tests that need root (crates/*/tests/root*.rs), built by Nix for
+      # the machine that runs them (`checks.root`).
+      rootTests = rustPlatform.buildRustPackage {
+        pname = "skwird-root-tests";
+        inherit version src cargoLock;
+        nativeBuildInputs = [pkgs.jq];
+        buildPhase = ''
+          runHook preBuild
+          cargo test --offline --no-run --workspace --test 'root*' \
+            --message-format=json-render-diagnostics > artifacts.json
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+            artifacts.json | while read -r exe; do cp "$exe" $out/bin/; done
+          runHook postInstall
+        '';
+        doCheck = false;
       };
     in {
       # The C compiler that links comes with mkShell's stdenv.
@@ -74,6 +98,7 @@
         nativeBuildInputs = [
           rustToolchain
           pkgs.shellcheck # tools/measure.sh
+          pkgs.jq # tools/vm/root-tests
         ];
         RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         RUST_BACKTRACE = "1";
@@ -87,6 +112,9 @@
       # Linux's engine alone so far: macOS's is phase 5's.
       packages = lib.optionalAttrs stdenv.hostPlatform.isLinux {
         default = skwird;
+        # The root tests' machine, given cargo's binaries from the host
+        # (tools/vm/root-tests).
+        root-machine = (import ./tools/vm/root.nix {inherit pkgs;}).driver;
       };
 
       # What needs a machine of its own runs in a virtual one, never on the
@@ -95,6 +123,10 @@
       # where it is not.
       checks = lib.optionalAttrs stdenv.hostPlatform.isLinux {
         user-service = import ./tools/vm/user-service.nix {inherit self pkgs;};
+        root = import ./tools/vm/root.nix {
+          inherit pkgs;
+          tests = rootTests;
+        };
       };
     });
 }
