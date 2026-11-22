@@ -1062,7 +1062,35 @@ committed once the gate holds.
    It passed on the developer's machine with its virtualization off,
    the processor emulated: 187 s to boot, 228 s in all; with KVM, 10 s
    to boot, 17 s in all.
-2. fanotify, in a machine of its own (the bullets above).
+2. **Root tests in a machine.** Tests that need root are built by cargo
+   on the host and run as root in a machine, the host's build folder
+   shared into it, with disks of its own (ext4, btrfs with subvolumes);
+   a pure check builds them with Nix for `nix flake check`. They skip
+   anywhere else, `sudo cargo test` on a developer's system included.
+3. **fanotify** in the crawl crate, from phase 0's probe: one mark per
+   filesystem, btrfs through the detached top-level mount, events
+   resolved to their folders by handle; an overflow, a mark refused and
+   a handle that does not open lower coverage, for what they concern.
+4. **The system engine** (`skwird serve --system`): its roots (DESIGN
+   1), its socket (`/run/skwird/socket`), its index readable by it
+   alone, every folder's owner, group, mode and ACL, live from fanotify
+   with phase 2's machinery (generations, gathering, the duty cycle,
+   the barrier).
+5. **Answers filtered per asker** (DESIGN 4): `SO_PEERCRED` and
+   `SO_PEERGROUPS`, modes and ACLs evaluated, each folder's answer kept
+   per asker until it changes, limits per asker.
+6. **Each user's exclusions** (DESIGN 5): the default ones in every
+   home, each user's files read, registrations kept per user, each
+   applying to folders that user owns.
+7. **The sandboxed unit,** the module's `services.skwird.system`, and a
+   machine proving the service whole with two users.
+8. **Budgets,** measured by the user on their machine, as root.
+
+The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
+modes and ACLs evaluated by the service (DESIGN 4), each user's files
+read (DESIGN 5). A finding that contradicts a decision is recorded
+here as a question, and the work goes on with what does not depend on
+it; phase 4, under Wine, if nothing of phase 3 is left.
 
 ## Phase 4: Windows
 

@@ -74,6 +74,20 @@ first exits, even during its first crawl; it does not poll the lock, as
 fsearch's followers do every 10 seconds (10). A user's engine that
 finds the system service covering its roots live (2) leaves them to it.
 
+**What the system service covers** (the user's choice, 2026-11-22):
+every local filesystem that stores files, except the Nix store
+(`/nix/store`): millions of read-only entries, changed by nix's builds
+alone, whose names nix answers for itself. Never covered, whatever is
+configured:
+- the kernel's own filesystems (proc, sysfs, cgroup, devpts and the
+  like) and memory ones (tmpfs, ramfs), whose names are the running
+  system's state, not files kept;
+- network mounts (2);
+- removable volumes, until open question 8 is answered: not covered,
+  removable.
+
+A configuration file names other exclusions, as a user's does (5).
+
 An engine a client starts runs in a process group of its own, so that a
 terminal's interrupt does not reach it, but in the client's control
 group. Where a service manager runs the client, the engine ends with the
@@ -288,18 +302,28 @@ and a handle that does not open.
 
 ### 4. A system service answers only what the asker could list
 
-- **Who asks** comes from the transport: `SO_PEERCRED` on Linux,
-  `getpeereid` on macOS, impersonating the named pipe's client on
-  Windows.
+- **Who asks** comes from the transport: `SO_PEERCRED` and
+  `SO_PEERGROUPS` on Linux (the asker's user and every group, as the
+  kernel holds them when it connected, with no lookup in the user
+  database), `getpeereid` on macOS, impersonating the named pipe's
+  client on Windows.
 - **A result is given only if the asker could list its folder and enter
   every folder above it.**
-  - The index keeps each folder's owner, group and mode, and whether it
-    has an ACL.
-  - Plain modes are evaluated against the asker's user and groups.
-  - A folder with an ACL, or under a security module's rules, is tried
-    as the asker. On Linux that is a thread taking the asker's
-    filesystem ids (`setfsuid` and `setfsgid` are per thread). On
-    Windows it is a check while impersonating.
+  - The index keeps each folder's owner, group and mode, and its access
+    ACL where it has one.
+  - The service evaluates them itself (the user's choice, 2026-11-22),
+    against the asker's user and groups, in the kernel's order (acl(5)):
+    the owner; the named users; the owning and named groups, under the
+    mask; the others. An ACL that cannot be read leaves the folder
+    unanswered, never answered as its mode says.
+  - No thread takes the asker's ids, as this decision first had it
+    (`setfsuid`): that needs `CAP_SETUID` and `CAP_SETGID`, beyond the
+    two below, and gains nothing over the evaluation. A security module
+    (SELinux, AppArmor, Smack) judges the service's own context, not
+    the asker's, either way: its rules for users are not applied. On a
+    system whose security module narrows what a user may list beyond
+    modes and ACLs, the service answers what the modes and ACLs allow.
+    On Windows, the check is made while impersonating.
   - Each folder's answer is kept for each asker until the folder
     changes. plocate checks every parent folder of a result for the same
     reason.
@@ -354,6 +378,19 @@ The same registration answers how a system service learns a user's
 exclusions (open question 3). It applies only to folders the
 registering user owns, so no user can take another's folders out of
 the index.
+
+**The system service reads each user's own files too** (the user's
+choice, 2026-11-22), so that a user's private folders are never indexed,
+even by a first crawl before their client connects: their exclusions
+(`~/.config/skwird/exclude`) and what their clients registered with
+their own engine (`~/.local/state/skwird/registered`), at the default
+places, since the service knows no user's environment. It reads them
+through the home's handle, following no link, only if the user (or
+root) owns them and no other user can write them, as sshd reads a
+user's keys. Each folder they name applies only if that user owns it.
+The default exclusions hold in every home the user database names.
+What the user's clients register with the service itself is kept for
+them by the service.
 
 An exclusion, like a root, is resolved once to the folder it names, and
 compared as that folder (its identity, or its range in the index),
