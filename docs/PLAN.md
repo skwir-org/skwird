@@ -1495,6 +1495,16 @@ committed once the gate holds.
    service's threads: whether the writer keeps to its account (1.5%) and
    what reading the events takes beside it.
 
+   **Measured at `cbb07a7`**, at a load of 5.5 to 17.5: none of the ten
+   changes answered within 10 s; the sync 1.13 s, 0.97 s of it on a
+   processor (146 folders waiting, taken at once); idle 0.57 s in 30 s,
+   the writer 0.39 s and the reader 0.19 s. Half the writer's time was
+   its turns' bookkeeping, about 160 µs a wake, going over every folder
+   waiting, which the owed account made many. Now bounds keep a turn
+   at 63 to 86 ns whatever waits (DESIGN 8, "A turn costs what it does,
+   not what waits"). Still to see: what a wake costs beside, and the
+   reader's 0.6%.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

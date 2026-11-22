@@ -1090,6 +1090,38 @@ each. On the user's machine, the hold of the kept finding showed too:
 while the home was built, finding took 1 to 8 ms a save interval, 82
 folders in a root being opened found and 511 taken as known.
 
+**A turn costs what it does, not what waits** (the same day, the user's
+run at `cbb07a7`, at a load of 5.5 to 17.5: none of the ten changes
+answered within 10 s). Of the writer's time in a save interval, what
+was neither finding, applying nor saving was half: 128 ms in 784 wakes,
+143 ms in 911, some 160 µs a wake. The idle time by thread showed the
+writer at 1.3% of a core and the reader of what is heard at 0.6%.
+After every turn the writer asked what was due and when the next would
+be: each went over every folder waiting, its hold, how much it was used
+lately, and sorted them. While the account was owed, folders waited
+and piled up (146 when the sync took them), each turn cost the more,
+and the turns, charged to the account, kept it owed. In a trial of the
+gathering alone, built optimised, a turn cost 0.44 µs with 10 folders
+waiting, 6.9 µs with 150 and 28 µs with 500, warm.
+
+Now the gathering keeps two bounds: a time before which no folder heard
+is ready, and one before which none may be taken while the account is
+owed. What is heard of a folder, or a hold, only makes it later, and a
+folder new is ready a gathering's quiet after it at the soonest: a new
+folder lowers them, nothing else does, and they are found again from
+what waits only where one passes. Before them, what is due is nothing,
+and the deadline is made from them, never later than what is due. A
+turn now costs 63 to 86 ns, whatever waits. A test drives the gathering
+through 20,000 steps of folders heard, charges, applications and syncs:
+the deadline is never later than the one found by going over every
+folder, and woken at it the writer takes what is due or finds a later
+one, never one passed. With a new folder not lowering the bound, the
+deadline comes 10 s past what is due there.
+
+What a wake costs beside its bookkeeping, the thread woken on a loaded
+machine, is to be measured; and the reader's 0.6% against the half
+point the account leaves it.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

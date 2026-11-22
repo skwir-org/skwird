@@ -284,6 +284,16 @@ pub struct Gather {
     /// What each folder applied lately cost, decaying by [`USE_DECAY`],
     /// as of when: the least used go first. At most [`COSTS_KEPT`].
     used: HashMap<(usize, FolderId), (f64, Instant)>,
+    /// A time before which no folder heard is ready ([`Gather::ready`]),
+    /// and one before which none may be taken while the account is owed:
+    /// none while none is heard. Bounds, kept as folders are heard and
+    /// found again only where they pass, not at each of the writer's
+    /// turns: a turn went over every folder waiting, which a busy machine
+    /// made many, and was charged to the account it held owed. What is
+    /// heard of a folder, or a hold, only makes it later; a folder new is
+    /// ready a gathering's quiet after it at the soonest.
+    soonest: Option<Instant>,
+    forced_at: Option<Instant>,
 }
 
 impl Gather {
@@ -313,6 +323,12 @@ impl Gather {
         // The check after an overflow waits for the queue to be quiet.
         if let Some(at) = self.recheck.as_mut() {
             *at = (*at).max(now + self.backoff);
+        }
+        if !self.heard.contains_key(&(root, folder)) {
+            let at = now + QUIET;
+            self.soonest = Some(self.soonest.map_or(at, |s| s.min(at)));
+            let forced = at + window();
+            self.forced_at = Some(self.forced_at.map_or(forced, |f| f.min(forced)));
         }
         let g = self.heard.entry((root, folder)).or_insert(Gathered {
             first: now,
@@ -384,6 +400,33 @@ impl Gather {
     /// window at most: what cannot wait (finding what is heard) may
     /// overdraw it for good, and nothing then waits on it for good.
     pub fn due(&mut self, now: Instant) -> Option<(usize, Vec<HeardFolder>)> {
+        // Before the bounds, nothing can be taken: found out without going
+        // over what waits.
+        let earliest = if self.open(now) {
+            self.soonest
+        } else {
+            self.forced_at
+        };
+        if earliest.is_none_or(|at| now < at) {
+            return None;
+        }
+        let taken = self.take_due(now);
+        self.bound();
+        taken
+    }
+
+    /// The bounds found again from what waits ([`Gather::soonest`]).
+    fn bound(&mut self) {
+        let soonest = self.heard.iter().map(|(key, g)| self.ready(key, g)).min();
+        self.soonest = soonest;
+        self.forced_at = soonest.map(|at| {
+            self.forced
+                .map_or(at + window(), |last| (last + window()).max(at + window()))
+        });
+    }
+
+    /// What [`Gather::due`] takes, going over what waits.
+    fn take_due(&mut self, now: Instant) -> Option<(usize, Vec<HeardFolder>)> {
         self.holds.retain(|_, hold| now < hold.until);
         let mut ready: Vec<(u64, Instant, (usize, FolderId))> = self
             .heard
@@ -530,6 +573,7 @@ impl Gather {
             .filter_map(|key| self.heard.remove(&key).map(|g| (key.1, g.names)))
             .collect();
         folders.sort_unstable_by_key(|(folder, _)| *folder);
+        self.bound();
         folders
     }
 
@@ -592,25 +636,21 @@ impl Gather {
         Some(self.save_held.map_or(at, |held| at.max(held)))
     }
 
+    /// When a folder heard may be due next, from the bounds
+    /// ([`Gather::soonest`]): never later than one is, so that what wakes
+    /// early finds the bounds again.
+    fn gathering(&self) -> Option<Instant> {
+        self.soonest.map(|at| match self.account {
+            None => at,
+            Some(open) => at.max(open).min(self.forced_at.unwrap_or(at + window())),
+        })
+    }
+
     /// When something is due next, if anything is.
     pub fn deadline(&self) -> Option<Instant> {
         // What is due waits for the account too, or to be due a window,
         // a window after the last taken so.
-        let gathering = self
-            .heard
-            .iter()
-            .map(|(key, g)| self.ready(key, g))
-            .min()
-            .map(|at| {
-                let Some(open) = self.account else {
-                    return at;
-                };
-                let forced = self
-                    .forced
-                    .map_or(at + window(), |last| (last + window()).max(at + window()));
-                at.max(open).min(forced)
-            });
-        [gathering, self.recheck, self.save_at()]
+        [self.gathering(), self.recheck, self.save_at()]
             .into_iter()
             .flatten()
             .min()
@@ -901,5 +941,133 @@ mod tests {
         let later = again + CALM * 2;
         g.overflowed(later);
         assert!(g.recheck_due(later + BACKOFF), "calm since: afresh");
+    }
+
+    /// What the deadline would be, every folder waiting gone over: as it
+    /// was found at each turn before the bounds.
+    fn exact_deadline(g: &Gather) -> Option<Instant> {
+        let gathering = g
+            .heard
+            .iter()
+            .map(|(key, x)| g.ready(key, x))
+            .min()
+            .map(|at| match g.account {
+                None => at,
+                Some(open) => {
+                    let forced = g
+                        .forced
+                        .map_or(at + window(), |last| (last + window()).max(at + window()));
+                    at.max(open).min(forced)
+                }
+            });
+        [gathering, g.recheck, g.save_at()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// The deadline from the bounds is never later than the one found by
+    /// going over every folder waiting, so that nothing due waits past
+    /// it; and once what is due is taken, it is that one.
+    #[test]
+    fn the_bounds_are_never_later_than_what_is_due() {
+        let mut g = Gather::default();
+        let start = Instant::now();
+        let mut now = start;
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |m: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % m
+        };
+        let later = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
+            (Some(a), Some(b)) => a > b,
+            (Some(_), None) => false,
+            (None, b) => b.is_some(),
+        };
+        for step in 0..20_000 {
+            now += Duration::from_millis(next(40));
+            let folder = u32::try_from(next(60)).unwrap();
+            match next(10) {
+                0..=5 => g.note_entry(
+                    usize::from(folder % 2 == 0),
+                    folder,
+                    Box::from(&b"x"[..]),
+                    now,
+                ),
+                6 => g.spent(Duration::from_millis(next(30)), now),
+                7 => {
+                    // Woken at its deadline, as the writer is: what is due
+                    // is taken, or a later deadline found, never one passed
+                    // already, which would wake it again at once for nothing.
+                    if let Some(at) = g.gathering() {
+                        now = now.max(at);
+                    }
+                    let due = g.due(now);
+                    if due.is_none() {
+                        assert!(
+                            g.gathering().is_none_or(|at| at > now),
+                            "step {step}: woken for nothing"
+                        );
+                    }
+                    if let Some((root, folders)) = due {
+                        let read: Vec<(FolderId, usize)> =
+                            folders.iter().map(|(f, _)| (*f, 100)).collect();
+                        // Up to 60 ms: held for seconds, past a new one's quiet.
+                        g.applied(root, &read, Duration::from_millis(next(60)), now);
+                    }
+                }
+                8 => g.note(0, folder, now),
+                _ => {
+                    if next(20) == 0 {
+                        let _ = g.take(usize::from(folder % 2 == 0));
+                    }
+                }
+            }
+            assert!(
+                !later(g.deadline(), exact_deadline(&g)),
+                "step {step}: {:?} later than {:?}",
+                g.deadline(),
+                exact_deadline(&g)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_cost {
+    use super::*;
+
+    /// What the writer's bookkeeping costs at each turn (an event noted,
+    /// what is due, the next deadline), with `n` folders waiting and the
+    /// account owed. A trial; run by hand.
+    #[test]
+    #[ignore = "a trial"]
+    fn a_turn_costs() {
+        for n in [10u32, 150, 500] {
+            let mut g = Gather::default();
+            let start = Instant::now();
+            for f in 0..n {
+                g.note_entry(0, f, Box::from(&b"x"[..]), start);
+            }
+            // Some applied before: held, and used.
+            for f in 0..n / 2 {
+                g.applied(0, &[(f + n, 10)], Duration::from_millis(2), start);
+            }
+            g.spent(Duration::from_secs(5), start);
+            let now = start + Duration::from_secs(3);
+            let rounds = 20_000;
+            let t = Instant::now();
+            for i in 0..rounds {
+                g.note_entry(0, i % n, Box::from(&b"y"[..]), now);
+                assert!(g.due(now).is_none());
+                std::hint::black_box(g.deadline());
+            }
+            println!(
+                "TURN: {n} folders waiting, the account owed: {:?} a turn",
+                t.elapsed() / rounds
+            );
+        }
     }
 }
