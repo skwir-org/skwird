@@ -1160,8 +1160,8 @@ committed once the gate holds.
    again (done after, on 2026-11-22: a root from then on, and one
    unmounted let go of, proven in the system-service machine); a query
    above several roots, answered from one (done after, on 2026-11-22:
-   each answers, at its place). Open for the
-   user: snapshots (DESIGN, open question 10).
+   each answers, at its place). Snapshots (DESIGN, open question 10),
+   answered by the user on 2026-11-22: below a root, left out.
 5. **Answers filtered per asker** (DESIGN 4): `SO_PEERCRED` and
    `SO_PEERGROUPS`, modes and ACLs evaluated, each folder's answer kept
    per asker until it changes, limits per asker.

@@ -84,7 +84,9 @@ configured:
   system's state, not files kept;
 - network mounts (2);
 - removable volumes, until open question 8 is answered: not covered,
-  removable.
+  removable;
+- btrfs snapshots (read-only subvolumes) below a root: left out, as
+  excluded, their names kept (open question 10).
 
 A configuration file names other exclusions, as a user's does (5).
 
@@ -1037,6 +1039,9 @@ A warm run sets it. The index on disk was 294 MB.
 10. **Snapshots** (found on 2026-11-22, phase 3, step 4): a btrfs
     snapshot is a subvolume, not a mount, so a root holding snapshots
     (snapper's `/.snapshots`, timeshift's, btrbk's) would index each
-    whole, a copy of the system each. Proposed: snapshots, read-only
-    subvolumes, are not covered (snapshot), as a network mount is not;
-    a client that wants one names it as a root. For the user.
+    whole, a copy of the system each. Answered on 2026-11-22, the
+    user's choice: a snapshot below a root, a read-only subvolume (its
+    top folder inode 256, btrfs saying read-only), is left out, its name
+    kept, not covered as excluded (no reason of its own: a client of the
+    crates vendored now would not read one); a root named as a snapshot
+    is read. A root test proves both, beside a writable subvolume read.

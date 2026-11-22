@@ -76,6 +76,58 @@ fn a_root_holds_its_filesystem_only_while_read() {
     std::fs::remove_dir(&point).unwrap();
 }
 
+/// A btrfs snapshot below a root, a read-only subvolume, is left out, its
+/// name kept; a writable subvolume beside it is read; the snapshot named
+/// as a root is read (DESIGN, open question 10).
+#[test]
+fn a_snapshot_below_a_root_is_left_out() {
+    use skwird_crawl::{Cancel, Exclusions, Options, Outcome, Root, Why, crawl_all};
+    let Some(m) = machine() else { return };
+    let place = skwird_testkit::Place::new(&m.btrfs, "snapshots");
+    let btrfs = |args: &[&std::ffi::OsStr]| {
+        let ok = std::process::Command::new("btrfs")
+            .arg("-q")
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "btrfs {args:?}");
+    };
+    let live = place.join("live");
+    let snapshot = place.join("snapshot");
+    btrfs(&["subvolume".as_ref(), "create".as_ref(), live.as_os_str()]);
+    std::fs::write(live.join("in the subvolume.txt"), b"x").unwrap();
+    btrfs(&[
+        "subvolume".as_ref(),
+        "snapshot".as_ref(),
+        "-r".as_ref(),
+        live.as_os_str(),
+        snapshot.as_os_str(),
+    ]);
+    let crawl = |at: &std::path::Path| {
+        let root = Root::open(at, Exclusions::none()).unwrap();
+        crawl_all(&root, &Options::default(), &Cancel::default()).unwrap()
+    };
+    let outcome = |c: &skwird_crawl::Crawl, rel: &str| {
+        c.folders
+            .iter()
+            .find(|f| f.rel == std::path::Path::new(rel))
+            .map(|f| matches!(f.outcome, Outcome::NotCovered(Why::Excluded)))
+    };
+    let below = crawl(&place.0);
+    assert_eq!(outcome(&below, "snapshot"), Some(true), "left out");
+    assert_eq!(outcome(&below, "live"), Some(false), "read");
+    let named = crawl(&snapshot);
+    assert_eq!(outcome(&named, ""), Some(false), "named, read");
+    assert_eq!(named.folders.len(), 1);
+    btrfs(&[
+        "subvolume".as_ref(),
+        "delete".as_ref(),
+        snapshot.as_os_str(),
+    ]);
+    btrfs(&["subvolume".as_ref(), "delete".as_ref(), live.as_os_str()]);
+}
+
 mod fanotify {
     // The machine, a group, the table and a resolver, in every test: short
     // names read best beside the closures' own.

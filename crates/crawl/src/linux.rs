@@ -14,6 +14,7 @@ use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, Statx, StatxFlags};
 use rustix::io::Errno;
 
+mod btrfs;
 pub mod watch;
 
 use crate::mounts::{self, Mount, Table, component};
@@ -422,6 +423,16 @@ fn read(
         stat.mode |= crate::ACL;
     }
     if root.exclusions.holds(Some(stat.id), &root.path.join(rel)) {
+        return not_covered(Some(stat), Why::Excluded);
+    }
+    // A btrfs snapshot below the root (a read-only subvolume) is left out,
+    // its name kept: each would be another copy of what it was taken of
+    // (the user's choice, 2026-11-22). Named as a root, it is read.
+    if !rel.as_os_str().is_empty()
+        && stat.id.ino == btrfs::SUBVOLUME_TOP
+        && root.fs == "btrfs"
+        && btrfs::read_only_subvolume(fd.as_fd())
+    {
         return not_covered(Some(stat), Why::Excluded);
     }
     if stat.mount != root.stat.mount {
