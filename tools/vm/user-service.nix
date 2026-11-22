@@ -49,6 +49,8 @@ pkgs.testers.runNixOSTest {
 
     covered = "skwird coverage ~ | grep -Eq '^names: (checked|as of|live)'"
 
+    # Each user's service manager first: a fast boot asks before it runs.
+    machine.wait_for_unit("user@1000.service")
     machine.wait_for_unit("skwird.socket", "someone")
 
     with subtest("the socket waits for a client, and starts no engine before one"):
@@ -83,6 +85,7 @@ pkgs.testers.runNixOSTest {
         )
 
     with subtest("each user's engine is their own, and their socket theirs alone"):
+        machine.wait_for_unit("user@1001.service")
         machine.wait_for_unit("skwird.socket", "other")
         machine.succeed(client("other", 1001, "touch ~/mine.txt"))
         machine.wait_until_succeeds(client("other", 1001, covered))

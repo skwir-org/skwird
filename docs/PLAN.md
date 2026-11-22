@@ -1060,8 +1060,8 @@ committed once the gate holds.
      their socket.
 
    It passed on the developer's machine with its virtualization off,
-   the processor emulated: 187 s to boot, 228 s in all. With KVM, a
-   boot takes seconds.
+   the processor emulated: 187 s to boot, 228 s in all; with KVM, 10 s
+   to boot, 17 s in all.
 2. fanotify, in a machine of its own (the bullets above).
 
 ## Phase 4: Windows
