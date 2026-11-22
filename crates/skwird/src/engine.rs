@@ -64,7 +64,9 @@ pub struct Shared {
     /// to reach the root (DESIGN 4).
     pub above: Vec<Vec<Option<crate::asker::Owned>>>,
     /// The queries each user runs now (`serve::Running`).
-    pub running: std::sync::Mutex<std::collections::HashMap<u32, usize>>,
+    pub running: Arc<std::sync::Mutex<std::collections::HashMap<u32, usize>>>,
+    /// The connections each user holds open now.
+    pub connections: Arc<std::sync::Mutex<std::collections::HashMap<u32, usize>>>,
     pub published: RwLock<Vec<Published>>,
 }
 
@@ -88,7 +90,8 @@ impl Shared {
             roots,
             system,
             above,
-            running: std::sync::Mutex::default(),
+            running: Arc::default(),
+            connections: Arc::default(),
             published: RwLock::new(vec![Published::Opening; n]),
         }
     }

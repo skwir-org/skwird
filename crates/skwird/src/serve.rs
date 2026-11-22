@@ -30,6 +30,8 @@ const BATCH: usize = 512;
 /// most results a query gives, and the most queries a user runs at once.
 const MOST_RESULTS: u64 = 100_000;
 const MOST_QUERIES: usize = 4;
+/// And the most connections a user holds open at once.
+const MOST_CONNECTIONS: usize = 64;
 
 /// How many clients are connected, and since when none is.
 struct Live {
@@ -150,10 +152,16 @@ pub fn serve(config: &Config) -> Result<(), String> {
         if !config.system && asker.uid != me.as_raw() {
             continue;
         }
+        // Each connection is a thread of the service's: a user holds at most
+        // so many at once.
+        let Some(open) = Running::connection(&shared, asker.uid) else {
+            continue;
+        };
         live.join();
         let (shared, commands, live) = (Arc::clone(&shared), commands.clone(), Arc::clone(&live));
         std::thread::spawn(move || {
             connection(stream, &shared, &commands, &asker);
+            drop(open);
             live.leave();
         });
     }
@@ -362,45 +370,68 @@ fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -
     }
 }
 
-/// A query a user runs, counted while it runs: at the system service, a
-/// user runs at most [`MOST_QUERIES`] at once. Given back when dropped.
-struct Running {
-    shared: Arc<Shared>,
+/// What a user holds of the system service, counted while it is held:
+/// queries running, or connections open. Given back when dropped.
+struct Held {
+    counts: Arc<Mutex<HashMap<u32, usize>>>,
     uid: u32,
 }
 
-impl Running {
-    /// A query of user `uid` counted, or none if they run the most already.
-    fn take(shared: &Arc<Shared>, uid: u32) -> Option<Running> {
-        let mut running = shared
-            .running
+impl Held {
+    /// One more for user `uid`, or none if they hold `most` already (none
+    /// is the most: a user's engine counts, but never refuses).
+    fn take(
+        counts: &Arc<Mutex<HashMap<u32, usize>>>,
+        uid: u32,
+        most: Option<usize>,
+    ) -> Option<Held> {
+        let mut held = counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let n = running.entry(uid).or_insert(0);
-        if shared.system && *n >= MOST_QUERIES {
+        let n = held.entry(uid).or_insert(0);
+        if most.is_some_and(|most| *n >= most) {
             return None;
         }
         *n += 1;
-        Some(Running {
-            shared: Arc::clone(shared),
+        Some(Held {
+            counts: Arc::clone(counts),
             uid,
         })
     }
 }
 
-impl Drop for Running {
+impl Drop for Held {
     fn drop(&mut self) {
-        let mut running = self
-            .shared
-            .running
+        let mut held = self
+            .counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(n) = running.get_mut(&self.uid) {
+        if let Some(n) = held.get_mut(&self.uid) {
             *n = n.saturating_sub(1);
             if *n == 0 {
-                running.remove(&self.uid);
+                held.remove(&self.uid);
             }
         }
+    }
+}
+
+/// A query a user runs: at the system service, at most [`MOST_QUERIES`]
+/// at once.
+type Running = Held;
+
+impl Running {
+    fn query(shared: &Shared, uid: u32) -> Option<Running> {
+        Held::take(&shared.running, uid, shared.system.then_some(MOST_QUERIES))
+    }
+
+    /// A connection a user holds open: at the system service, at most
+    /// [`MOST_CONNECTIONS`] at once, each a thread of its own.
+    fn connection(shared: &Shared, uid: u32) -> Option<Held> {
+        Held::take(
+            &shared.connections,
+            uid,
+            shared.system.then_some(MOST_CONNECTIONS),
+        )
     }
 }
 
@@ -468,7 +499,7 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
             },
             Ask::Sync { root } => sync(shared, commands, &root, who),
             Ask::Query(query) => {
-                let Some(running) = Running::take(shared, who.uid) else {
+                let Some(running) = Running::query(shared, who.uid) else {
                     send(
                         &writer,
                         id,
@@ -805,15 +836,24 @@ mod tests {
     fn a_user_runs_so_many_queries_at_once() {
         let shared = Arc::new(Shared::new(Vec::new(), true));
         let held: Vec<Running> = (0..MOST_QUERIES)
-            .map(|_| Running::take(&shared, 1000).unwrap())
+            .map(|_| Running::query(&shared, 1000).unwrap())
             .collect();
-        assert!(Running::take(&shared, 1000).is_none(), "one more refused");
-        assert!(Running::take(&shared, 1001).is_some(), "another user's");
+        assert!(Running::query(&shared, 1000).is_none(), "one more refused");
+        assert!(Running::query(&shared, 1001).is_some(), "another user's");
         drop(held);
-        assert!(Running::take(&shared, 1000).is_some(), "given back");
+        assert!(Running::query(&shared, 1000).is_some(), "given back");
+        let open: Vec<Held> = (0..MOST_CONNECTIONS)
+            .map(|_| Running::connection(&shared, 1000).unwrap())
+            .collect();
+        assert!(
+            Running::connection(&shared, 1000).is_none(),
+            "one more refused"
+        );
+        assert!(Running::query(&shared, 1000).is_some(), "counted apart");
+        drop(open);
         let user = Arc::new(Shared::new(Vec::new(), false));
         let many: Vec<Running> = (0..10)
-            .map(|_| Running::take(&user, 1000).unwrap())
+            .map(|_| Running::query(&user, 1000).unwrap())
             .collect();
         assert_eq!(many.len(), 10);
     }
