@@ -160,10 +160,16 @@ ready() {
 # A process's processor time so far, in seconds.
 cpu() { awk -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15) / hz }' "/proc/$1/stat"; }
 
-# A process's memory now, and the most it held, from the kernel's count.
+# What a process's status on stdin says of its memory: resident now, of it
+# its own (the allocator's) and its files' mapped (the index's, the page
+# cache's to drop), and at most.
+status_memory() {
+    awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } /^RssAnon/ { own = $2 } /^RssFile/ { mapped = $2 }
+        END { printf "%.0f MB now (%.0f MB its own, %.0f MB of files mapped), %.0f MB at most", now / 1000, own / 1000, mapped / 1000, most / 1000 }'
+}
+
 memory() {
-    awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 }
-        END { printf "%.0f MB now, %.0f MB at most", now / 1000, most / 1000 }' "/proc/$1/status"
+    status_memory < "/proc/$1/status"
 }
 
 measure_engine() {
@@ -357,7 +363,7 @@ measure_system() {
         return 1
     fi
     echo "first live answer, every filesystem built: $(since "$start") s"
-    echo "memory once built: $(sudo -n cat "/proc/$sys_pid/status" | awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } END { printf "%.0f MB now, %.0f MB at most", now / 1000, most / 1000 }')"
+    echo "memory once built: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
     local times=() i t0 name
     for i in $(seq 1 10); do
         name="skwird-system-probe-$i"
@@ -386,7 +392,7 @@ measure_system() {
     before=$(sudo -n awk '{ print $14 + $15 }' "/proc/$sys_pid/stat")
     sleep 30
     echo "idle, 30 s without a client: $(sudo -n awk -v a="$before" -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15 - a) / hz }' "/proc/$sys_pid/stat") s of processor time"
-    echo "memory idle: $(sudo -n cat "/proc/$sys_pid/status" | awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } END { printf "%.0f MB now, %.0f MB at most", now / 1000, most / 1000 }')"
+    echo "memory idle: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
     stop_system
     start=$(now)
     serve_system

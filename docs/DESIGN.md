@@ -1063,6 +1063,32 @@ per million: met), but a warm sync took 1.16 s (0.17 s per million,
 against 0.15), where phase 1 measured 0.43 s: slower since phase 1, its
 cause not found yet.
 
+**Measured again** (2026-11-22, at `5f9997b`, the load at 1.4 and coming
+down from 10; 8.51 million entries): a change answered in 200 ms at the
+median, 629 ms at most (met again, the account sized to the budget); the
+first build 11.62 s (1.37 s per million); read back and checked 1.31 s
+(0.15 s per million); a user's query 1.09 times root's; 0.32 s of
+processor time in 30 s (1.1%); all met. Not met: the sync, 0.12 s, and
+memory at rest, 228 MB once built (26.8 MB per million) and 274 MB after
+the queries. The user's engine's warm sync took 0.52 s (0.08 s per
+million, met), its code unchanged since the run before: the 1.16 s then
+was most likely the caches' state, not a regression, though nothing
+proves it. The memory at rest has gone from run to run with no change
+of code between (168, 264, 166, 228 MB once built), so this run gave no
+cause. Since:
+- **a sync's cookie is not waited for.** The readers wait 10 ms after
+  a read to batch what they hear (8), and a cookie made meanwhile waited
+  with the rest. The writer wakes them as it makes one, and none waits
+  while one is awaited (`live::Readers`), derived from the syncs waiting
+  after each of the writer's turns;
+- **`tools/measure.sh` says memory in two:** the process's own (the
+  allocator's) and its files mapped (the index's, the page cache's to
+  drop), so that a run says which grew;
+- **the save's line says what a read costs,** at the median and at
+  most, each folder's share of its batch by entries.
+
+To be measured again, quiet.
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`

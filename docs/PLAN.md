@@ -1349,6 +1349,14 @@ committed once the gate holds.
    machine at a load of 7 to 19, whose own work made the root tests'
    machine's trials say nothing this time; to be measured again, quiet.
 
+   **Measured again**, at `5f9997b` (DESIGN 10): a change answered in
+   200 ms at the median, 629 ms at most, met again; idle 1.1%; the first
+   build 1.37 s per million. Not met, the sync (0.12 s) and memory at
+   rest (26.8 MB per million once built, 32 after the queries). Since: a
+   sync's cookie no longer waits for the readers' batching, the
+   measurement says memory in two (the process's own, its files mapped),
+   and the save's line what a read costs. To be measured again, quiet.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

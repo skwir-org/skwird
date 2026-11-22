@@ -77,6 +77,8 @@ pub struct Shared {
     /// registration, the journal), at the system service.
     pub asked: std::sync::Mutex<std::collections::HashMap<u32, Instant>>,
     pub published: RwLock<Vec<Published>>,
+    /// What the writer tells the readers of what it hears.
+    pub readers: crate::live::Readers,
 }
 
 /// The folders above a root, outermost first, as they are now, for the
@@ -104,6 +106,7 @@ impl Shared {
             connections: Arc::default(),
             asked: std::sync::Mutex::default(),
             published: RwLock::new(vec![Published::Opening; n]),
+            readers: crate::live::Readers::default(),
         }
     }
 
@@ -544,6 +547,8 @@ fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
         }
         // Heard without pause, the deadline would never pass.
         w.on_time();
+        // Derived again from the syncs waiting, after every turn.
+        w.shared.readers.set_awaited(!w.waiting.is_empty());
         let end = thread_time();
         w.gather.turned(
             end.saturating_sub(mark).saturating_sub(asked),
@@ -784,6 +789,7 @@ impl Writing<'_> {
                 // every change before it was heard (DESIGN 2). Otherwise,
                 // the check.
                 if live && let Some(cookie) = self.make_cookie() {
+                    self.shared.readers.wake();
                     self.waiting.push(Waiting {
                         cookie,
                         root,
@@ -948,6 +954,7 @@ impl Writing<'_> {
             let read = self.apply_heard(root, &folders);
             let took = thread_time().saturating_sub(start);
             self.done.applying += took;
+            self.done.reads_took(&read, took);
             self.gather.applied(root, &read, took, Instant::now());
         }
         if self.gather.recheck_due(now) {
@@ -1655,9 +1662,27 @@ struct Done {
     /// the last save: what the kinds above leave out is its own.
     wakes: u64,
     since: std::time::Duration,
+    /// What each folder read again for what was heard cost, its share of
+    /// its batch by entries: [`READ_SAMPLES`] at most.
+    reads: Vec<std::time::Duration>,
 }
 
+/// The most reads' costs a save's line is told of.
+const READ_SAMPLES: usize = 4096;
+
 impl Done {
+    /// The folders `read` again took `took`: each its share, by entries.
+    #[allow(clippy::cast_precision_loss)] // a share, from counts far below 2^52
+    fn reads_took(&mut self, read: &[(FolderId, usize)], took: std::time::Duration) {
+        let total: usize = read.iter().map(|(_, n)| n + 1).sum();
+        for &(_, n) in read {
+            if self.reads.len() < READ_SAMPLES {
+                self.reads
+                    .push(took.mul_f64((n + 1) as f64 / total.max(1) as f64));
+            }
+        }
+    }
+
     fn read_again(&mut self, root: usize, done: &skwird_index::Refreshed) {
         self.reread += done.reread as u64;
         self.entries += done.entries as u64;
@@ -1677,11 +1702,15 @@ impl Done {
             return;
         }
         let busiest = done.by_folder.values().max().copied().unwrap_or(0);
+        let mut reads = done.reads.clone();
+        reads.sort_unstable();
+        let read = |at: Option<&std::time::Duration>| at.map_or(0, std::time::Duration::as_micros);
         log(&format!(
             "since the last save: {} events heard, {} overflows; {} folders read again \
              ({} distinct), {} entries stat-ed, the largest folder {} entries, the busiest \
-             read {} times; processor time: {} ms finding, {} ms applying, {} ms saving, \
-             {} ms giving memory back, of {} ms the writer took, woken {} times",
+             read {} times, a read {} µs at the median, {} µs at most; processor time: {} ms \
+             finding, {} ms applying, {} ms saving, {} ms giving memory back, of {} ms the \
+             writer took, woken {} times",
             done.events,
             done.overflows,
             done.reread,
@@ -1689,6 +1718,8 @@ impl Done {
             done.entries,
             done.largest,
             busiest,
+            read(reads.get(reads.len() / 2)),
+            read(reads.last()),
             done.noticing.as_millis(),
             done.applying.as_millis(),
             done.saving.as_millis(),

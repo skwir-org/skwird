@@ -124,8 +124,9 @@ impl Source for Group {
 /// nothing heard since proves anything. The mount table is followed too,
 /// as skwir follows it: `/proc/self/mountinfo` signals a change with
 /// `POLLPRI`, and is read through so that it signals the next.
-pub fn listen<S: Source>(source: &S, commands: &Sender<Command>) {
+pub fn listen<S: Source>(source: &S, commands: &Sender<Command>, readers: &Readers) {
     use std::io::{Read, Seek};
+    readers.join();
     let mut heard = Vec::new();
     let mut table = std::fs::File::open("/proc/self/mountinfo").ok();
     let mut skip = Vec::new();
@@ -175,8 +176,54 @@ pub fn listen<S: Source>(source: &S, commands: &Sender<Command>) {
             return;
         }
         // What comes meanwhile queues in the kernel, read at once after:
-        // the writer wakes for a batch, not for each event.
-        std::thread::sleep(READ_EVERY);
+        // the writer wakes for a batch, not for each event. Not while a
+        // sync waits for its cookie, and woken as one is made.
+        if !readers.awaited() {
+            std::thread::park_timeout(READ_EVERY);
+        }
+    }
+}
+
+/// What the writer tells the readers ([`listen`]): whether a sync waits for
+/// its cookie, so that no reader waits to batch what it hears meanwhile,
+/// and the readers' threads, to wake one waiting as a cookie is made.
+#[derive(Default)]
+pub struct Readers {
+    awaited: std::sync::atomic::AtomicBool,
+    threads: std::sync::Mutex<Vec<std::thread::Thread>>,
+}
+
+impl Readers {
+    fn join(&self) {
+        self.threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(std::thread::current());
+    }
+
+    fn awaited(&self) -> bool {
+        self.awaited.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether a cookie is awaited: derived by the writer, after each of
+    /// its turns, from the syncs waiting.
+    pub fn set_awaited(&self, yes: bool) {
+        self.awaited
+            .store(yes, std::sync::atomic::Ordering::Release);
+    }
+
+    /// A cookie was made: awaited, and every reader woken, so that none
+    /// waits to read it.
+    pub fn wake(&self) {
+        self.set_awaited(true);
+        for t in self
+            .threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            t.unpark();
+        }
     }
 }
 
@@ -810,6 +857,29 @@ mod tests {
             Some((0, vec![(2, None), (1, None)])),
             "the quiet one first"
         );
+    }
+
+    /// A reader waiting to batch what it heard is woken as a cookie is made,
+    /// the wake given before it waits or after; and none waits while a
+    /// cookie is awaited.
+    #[test]
+    fn a_reader_is_woken_for_a_cookie() {
+        let readers = Arc::new(Readers::default());
+        let reader = Arc::clone(&readers);
+        let (joined, ready) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            reader.join();
+            joined.send(()).unwrap();
+            let start = Instant::now();
+            std::thread::park_timeout(Duration::from_secs(30));
+            start.elapsed()
+        });
+        ready.recv().unwrap();
+        readers.wake();
+        assert!(waiting.join().unwrap() < Duration::from_secs(5), "woken");
+        assert!(readers.awaited());
+        readers.set_awaited(false);
+        assert!(!readers.awaited());
     }
 
     /// The check after an overflow waits for quiet, and longer for each

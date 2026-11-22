@@ -113,7 +113,7 @@ pub fn serve(config: &Config) -> Result<(), String> {
     log(&format!("serving {} roots", config.roots.len()));
     let shared = Arc::new(Shared::new(config.roots.clone(), config.system));
     let (commands, received) = channel();
-    let (watcher, group) = sources(config, &commands);
+    let (watcher, group) = sources(config, &commands, &shared);
     let writing = {
         let (config, shared) = (config.clone(), Arc::clone(&shared));
         named("skwird-writer", move || {
@@ -185,6 +185,7 @@ pub fn serve(config: &Config) -> Result<(), String> {
 fn sources(
     config: &Config,
     commands: &Sender<Command>,
+    shared: &Arc<Shared>,
 ) -> (
     Option<Arc<skwird_crawl::Watcher>>,
     Option<Arc<skwird_crawl::fanotify::Group>>,
@@ -195,12 +196,16 @@ fn sources(
         (crate::live::watcher(config.watches), None)
     };
     if let Some(w) = &watcher {
-        let (w, commands) = (Arc::clone(w), commands.clone());
-        named("skwird-heard", move || crate::live::listen(&*w, &commands));
+        let (w, commands, shared) = (Arc::clone(w), commands.clone(), Arc::clone(shared));
+        named("skwird-heard", move || {
+            crate::live::listen(&*w, &commands, &shared.readers);
+        });
     }
     if let Some(g) = &group {
-        let (g, commands) = (Arc::clone(g), commands.clone());
-        named("skwird-heard", move || crate::live::listen(&*g, &commands));
+        let (g, commands, shared) = (Arc::clone(g), commands.clone(), Arc::clone(shared));
+        named("skwird-heard", move || {
+            crate::live::listen(&*g, &commands, &shared.readers);
+        });
     }
     (watcher, group)
 }
