@@ -787,6 +787,30 @@ a busy machine lags is what a read of a folder costs: a folder of 3,000
 entries heard for one file costs a whole read of it and its chunk
 (below), the next thing to make cheaper.
 
+**One account, sized to the budget** (the same day, from the user's
+machine quiet: a change answered in 1.39 s at the median and 10.0 s at
+most, the account's window). At 0.5%, the account was below what the
+writer's work costs on a quiet desktop: 0.6 to 1.6% of a core, saves
+of 22 to 32 ms every 10 s and 4 ms for each folder read, however small.
+Owed, it held every change. Now:
+- **one account, at 1.5% of a core,** for all the writer does for what
+  is heard, large folders' applications included: three quarters of
+  the budget, reading the events keeping the rest. The large folders
+  still divide 0.5% by their holds, a third of it at most. It lets
+  150 ms through after a quiet time, and is owed as much at most (its
+  window, 10 s);
+- **each of the writer's turns is charged whole,** but what a client
+  asked for (a sync, the journal, a registration): what no charge named
+  (waking, the bookkeeping) was a third of the writer's time, and took
+  it to 1.76% against an account of 1.5%. A share counts all the work
+  it bounds.
+
+In the root tests' machine, built optimised, the 30 busy folders above
+took 1.5% of a core in the writer, 1.7% with the reader. A small
+folder's changes came in 309 and 399 ms while it was quiet, and in 9.7
+to 11.8 s once it kept changing too. With one large busy folder, 0.9%
+of a core, a small folder's change in 105 to 122 ms.
+
 **How a subtree stays one range** (the format's spike, 2026-11-21).
 The blocks are in pre-order, each with its depth: a folder's subtree is
 its block and every block after it that is deeper, so no block stores
@@ -984,12 +1008,34 @@ its own pace. Since, whatever the folders do (8): a trial of 30 such
 folders took 20% of a core before, 0.9% after; on the user's machine,
 to be measured again, on a quiet machine.
 
-Not set: the first build. The run built every root in 28.9 s, the home
-in 27.6 s, three times phase 1's warm build of it; the step ran alone,
-nothing warming the home before, and a crawl stats every entry, so it
-was near cold. The flag of folders with an ACL (one `fgetxattr` each)
-cost 2.5 to 8% on a warm synthetic tree of 100,000 folders, not that.
-A warm run sets it. The index on disk was 294 MB.
+The first build had no budget from that run: it built every root in
+28.9 s, near cold (nothing warmed the home before). The flag of folders
+with an ACL (one `fgetxattr` each) cost 2.5 to 8% on a warm synthetic
+tree of 100,000 folders, not that. The index on disk was 294 MB.
+
+**Measured on a quiet machine** (2026-11-22, at `2d5571b`, a load of 0.6
+to 3.8; eight roots now, 8.43 million entries, a third filesystem
+mounted since):
+
+| What | Budget | Measured | |
+|---|---|---|---|
+| First live answer, every filesystem built | 3 s per million entries (set by this run) | 19.07 s (2.26 s per million), the home warmed by the run's step before, the others not | met |
+| A change to its answer, no sync | as above | 1.39 s at the median, 10.0 s at most | not met |
+| A sync of a live folder | as above | 0.19 s | not met |
+| First live answer, read back and checked | as above | 1.64 s (0.19 s per million) | met |
+| A query answered to a user, against root's | as above | 0.60 s against 0.55 s (1.09) | met |
+| Memory at rest | as above | 166 to 211 MB (20 to 25 MB per million) | met |
+| Processor time, no client asking | as above | 0.17 s in 30 s (0.6%) | met |
+
+The change and the sync were held by the account of that commit, at
+0.5% of a core, below what the writer's work costs on a quiet desktop
+(8: "One account, sized to the budget"); since, at 1.5%, to be
+measured again. The memory over budget at the run before (31 to 34 MB
+per million, at a load of 6 to 15) was the load's. The same run's
+user's engine, phase 1's step: its index read back in 0.64 s (0.10 s
+per million: met), but a warm sync took 1.16 s (0.17 s per million,
+against 0.15), where phase 1 measured 0.43 s: slower since phase 1, its
+cause not found yet.
 
 ## Protocol (a sketch; experimental until declared stable)
 

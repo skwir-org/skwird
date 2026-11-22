@@ -736,11 +736,13 @@ fn a_folder_found_then_moved_is_heard_at_its_new_place() {
         !at(&mut c, "busy.txt").is_empty()
     });
     std::fs::rename(place.join("old/inner"), place.join("new/inner")).unwrap();
-    wait_for(5, "the folder at its new place", || {
+    // The parent's read is charged to the writer's account (DESIGN 8):
+    // unoptimised, it may hold what follows for the account's window.
+    wait_for(15, "the folder at its new place", || {
         at(&mut c, "one.txt").contains(&place.join("new/inner/one.txt"))
     });
     std::fs::write(place.join("new/inner/two.txt"), b"x").unwrap();
-    wait_for(5, "a file made at its new place", || {
+    wait_for(15, "a file made at its new place", || {
         at(&mut c, "two.txt") == [place.join("new/inner/two.txt")].into()
     });
     let synced = c.sync(&place.0).unwrap();

@@ -271,6 +271,20 @@ pub enum Command {
     Stop,
 }
 
+impl Command {
+    /// Whether a client asked for it: its work is not what is heard, and
+    /// is not charged to the writer's share (`live::DUTY`).
+    fn asked(&self) -> bool {
+        matches!(
+            self,
+            Command::Sync { .. }
+                | Command::Changes { .. }
+                | Command::Exclude { .. }
+                | Command::Watch { .. }
+        )
+    }
+}
+
 /// A folder a client keeps out of the index.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Registration {
@@ -493,6 +507,52 @@ pub fn log(line: &str) {
 /// registered are watched, what it heard applied as it comes (DESIGN 8):
 /// the writer then waits with a deadline, but only while something is
 /// due.
+/// The writer's turns, until it is stopped: each command answered, and
+/// what is due done.
+fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
+    // Each turn's processor time is charged to the account (`live::DUTY`),
+    // but what a client asked for: waking and the bookkeeping too.
+    let mut mark = thread_time();
+    loop {
+        let command = match w.pending.pop() {
+            Some(c) => Some(c),
+            None => match w.deadline() {
+                None => match commands.recv() {
+                    Ok(c) => Some(c),
+                    Err(_) => break,
+                },
+                Some(at) => {
+                    match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                        Ok(c) => Some(c),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            },
+        };
+        w.done.wakes += 1;
+        let mut asked = std::time::Duration::ZERO;
+        if let Some(command) = command {
+            let by_client = command.asked();
+            let start = thread_time();
+            if !w.answer(commands, command) {
+                break;
+            }
+            if by_client {
+                asked = thread_time().saturating_sub(start);
+            }
+        }
+        // Heard without pause, the deadline would never pass.
+        w.on_time();
+        let end = thread_time();
+        w.gather.turned(
+            end.saturating_sub(mark).saturating_sub(asked),
+            Instant::now(),
+        );
+        mark = end;
+    }
+}
+
 pub fn writer(
     config: &Config,
     shared: &Shared,
@@ -563,34 +623,7 @@ pub fn writer(
     };
     w.hear_whole(since, &built);
     w.apply_scopes();
-    loop {
-        let command = match w.pending.pop() {
-            Some(c) => c,
-            None => match w.deadline() {
-                None => match commands.recv() {
-                    Ok(c) => c,
-                    Err(_) => break,
-                },
-                Some(at) => {
-                    match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
-                        Ok(c) => c,
-                        Err(RecvTimeoutError::Timeout) => {
-                            w.done.wakes += 1;
-                            w.on_time();
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            },
-        };
-        w.done.wakes += 1;
-        if !w.answer(commands, command) {
-            break;
-        }
-        // Heard without pause, the deadline would never pass.
-        w.on_time();
-    }
+    turns(&mut w, commands);
     w.flush_all();
     for keeper in w.keepers.iter_mut().flatten() {
         if keeper.save().is_err() {

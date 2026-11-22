@@ -1327,6 +1327,18 @@ committed once the gate holds.
    now, the next thing to make cheaper. To be measured again on a quiet
    machine.
 
+   **On a quiet machine**, at `2d5571b` (load 0.6 to 3.8): the first
+   build's budget is set (3 s per million entries; 2.26 measured);
+   read-back, queries, memory and processor time idle (0.6%) met. Not
+   met, the change answered (1.39 s at the median, 10.0 s at most) and
+   the sync (0.19 s): the account, at 0.5%, was below what the writer's
+   work costs on a quiet desktop. Now one account at 1.5% for all of it,
+   large folders included, each of the writer's turns charged whole
+   (DESIGN 8): in the trial, the writer at 1.5%, a quiet folder's change
+   in 309 to 399 ms. To be measured again. Found meanwhile: a user's
+   engine's warm sync takes 1.16 s where phase 1 measured 0.43 s, its
+   cause not found yet.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

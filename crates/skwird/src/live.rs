@@ -35,17 +35,22 @@ const BACKOFF: Duration = Duration::from_secs(2);
 const BACKOFF_MOST: Duration = Duration::from_secs(60);
 /// An overflow this long after the last check starts the wait afresh.
 const CALM: Duration = Duration::from_secs(300);
-/// What the writer does for what is heard (finding each folder, applying,
-/// saving) takes at most one part in this many of the time, whatever the
-/// folders do: half the budget (DESIGN 10), for reading the events, which
-/// cannot wait without being lost, keeps the rest. Half of it goes to the
-/// folders whose reads their share limits, which divide it
-/// ([`Gather::applied`]); half to all the rest, through an account
-/// ([`Gather::spent`]).
+/// A folder's own pace: applied alone again and again, it takes at most one
+/// part in this many of the time (1%). Folders whose reads their share
+/// limits so divide one part in `2 * DUTY` (0.5%) between them
+/// ([`Gather::applied`]).
 const DUTY: u32 = 100;
+/// All the writer does for what is heard (finding each folder, applying,
+/// saving, a check after an overflow) goes through one account, which
+/// fills at this many parts in `2 * DUTY` of the time (1.5%), whatever the
+/// folders do ([`Gather::spent`]): three quarters of the budget (DESIGN
+/// 10), reading the events, which cannot wait without being lost, keeping
+/// the rest. The folders a share limits take a third of it at most, so
+/// that the others keep two.
+const ACCOUNT: u32 = 3;
 /// What the account lets through at once after a quiet time, and the most
-/// it is owed: one part in `2 * DUTY` of its window ([`window`]).
-const BURST: Duration = Duration::from_millis(50);
+/// it is owed: what it fills in its window ([`window`]).
+const BURST: Duration = Duration::from_millis(150);
 /// The most folders whose last cost is kept: past them, every one is let
 /// go of, and taken to cost what a folder typically does.
 const COSTS_KEPT: usize = 4096;
@@ -54,9 +59,14 @@ const COSTS_KEPT: usize = 4096;
 /// waits, so that each busy one takes its turn.
 const USE_DECAY: Duration = Duration::from_secs(60);
 
-/// The account's window: what it fills in, from empty to [`BURST`].
+/// The time the account takes to fill with `work`.
+fn at_share(work: Duration) -> Duration {
+    work * (2 * DUTY) / ACCOUNT
+}
+
+/// The account's window: what it takes to fill, from empty to [`BURST`].
 fn window() -> Duration {
-    BURST * (2 * DUTY)
+    at_share(BURST)
 }
 
 /// What the writer listens to: a user's engine's watcher (inotify), or
@@ -186,8 +196,8 @@ struct Gathered {
 }
 
 /// Until when a folder applied is not applied again, and whether its
-/// share holds it longer than a gathering's most: such folders divide
-/// half the share between them, and are not charged to the account.
+/// share holds it longer than a gathering's most: such folders divide one
+/// part in `2 * DUTY` between them.
 #[derive(Clone, Copy)]
 struct Hold {
     until: Instant,
@@ -212,14 +222,15 @@ pub struct Gather {
     holds: HashMap<(usize, FolderId), Hold>,
     /// What finding each folder due took, until it is applied.
     owed: HashMap<(usize, FolderId), Duration>,
-    /// Until when the writer's work for what is heard, but the limited
-    /// folders', takes its share: nothing due is applied before, but one
-    /// due for longer than a window.
+    /// Until when the writer's work for what is heard takes its share:
+    /// nothing due is applied before, but one due for longer than a window.
     account: Option<Instant>,
     /// When a folder was last taken while the account was owed.
     forced: Option<Instant>,
-    /// What each folder applied lately was charged, the limited ones
-    /// nothing: what it is taken to cost next. At most [`COSTS_KEPT`].
+    /// What [`Gather::spent`] charged since the writer's last turn.
+    charged: Duration,
+    /// What each folder applied lately was charged: what it is taken to
+    /// cost next. At most [`COSTS_KEPT`].
     costs: HashMap<(usize, FolderId), Duration>,
     /// The mean of what the last application charged a folder.
     typical: Option<Duration>,
@@ -275,15 +286,29 @@ impl Gather {
     }
 
     /// The writer spent `took` of processor time on what was heard: finding
-    /// folders, applying those their share does not limit, saving, a check
-    /// after an overflow. Charged to the account, which fills at one part
-    /// in `2 * DUTY` of the time. It lets [`BURST`] through at once after a
+    /// folders, applying them, saving, a check after an overflow. Charged
+    /// to the account, which fills at [`ACCOUNT`] parts in `2 * DUTY` of
+    /// the time. It lets [`BURST`] through at once after a
     /// quiet time, and is owed at most as much, so that no burst holds what
     /// follows for longer than its window.
     pub fn spent(&mut self, took: Duration, now: Instant) {
+        self.charge(took, now);
+        self.charged += took;
+    }
+
+    /// The writer's turn took `whole` of its processor time, but what a
+    /// client asked for: what [`Gather::spent`] was not told of (waking,
+    /// the deadline, the bookkeeping) is charged too, since a share counts
+    /// all the work it bounds.
+    pub fn turned(&mut self, whole: Duration, now: Instant) {
+        let rest = whole.saturating_sub(std::mem::take(&mut self.charged));
+        self.charge(rest, now);
+    }
+
+    fn charge(&mut self, took: Duration, now: Instant) {
         let floor = now.checked_sub(window()).unwrap_or(now);
         let from = self.account.map_or(floor, |at| at.max(floor));
-        self.account = Some((from + took * (2 * DUTY)).min(now + window()));
+        self.account = Some((from + at_share(took)).min(now + window()));
     }
 
     /// Whether the account lets what is due be applied at `now`.
@@ -327,7 +352,7 @@ impl Gather {
         if self.open(now) {
             // What the account holds now, as work: [`BURST`] at most.
             let holds = self.account.map_or(BURST, |owed| {
-                (now.saturating_duration_since(owed) / (2 * DUTY)).min(BURST)
+                (now.saturating_duration_since(owed) * ACCOUNT / (2 * DUTY)).min(BURST)
             });
             let mut fits = Duration::ZERO;
             for &(_, _, key) in ready.iter().filter(|(_, _, key)| key.0 == root) {
@@ -382,11 +407,11 @@ impl Gather {
     /// finding it took, [`DUTY`] - 1 times over: a large folder heard
     /// without pause waits for itself, and a small one read with it does
     /// not. A folder held longer than a gathering's most is limited by the
-    /// share; such folders divide half of it, each held as many times
-    /// longer as there are others, so that together they take one part in
-    /// `2 * DUTY` however many are busy, and are not charged to the
-    /// account. The others' share of `took` is ([`Gather::spent`]). Their
-    /// answers lag then, live still; a sync applies them at once.
+    /// share; such folders divide one part in `2 * DUTY`, each held as many
+    /// times longer as there are others, however many are busy: a third of
+    /// the account at most, which all of `took` is charged to
+    /// ([`Gather::spent`]). Their answers lag then, live still; a sync
+    /// applies them at once.
     pub fn applied(
         &mut self,
         root: usize,
@@ -408,8 +433,6 @@ impl Gather {
         self.holds.retain(|_, hold| now < hold.until);
         let limited = self.holds.values().filter(|hold| hold.limited).count();
         let sharing = u32::try_from(limited + 1).unwrap_or(u32::MAX);
-        let mut charged = Duration::ZERO;
-        let mut unlimited = 0u32;
         for (&(folder, n), owed) in read.iter().zip(owed) {
             let applying = took.mul_f64((n + 1) as f64 / total as f64);
             let share = applying + owed;
@@ -418,15 +441,12 @@ impl Gather {
             let wait = if limits {
                 share * (2 * DUTY).saturating_mul(sharing).saturating_sub(1)
             } else {
-                charged += applying;
-                unlimited += 1;
                 alone
             };
             if self.costs.len() >= COSTS_KEPT {
                 self.costs.clear();
             }
-            let next = if limits { Duration::ZERO } else { applying };
-            self.costs.insert((root, folder), next);
+            self.costs.insert((root, folder), applying);
             if self.used.len() >= COSTS_KEPT {
                 self.used.clear();
             }
@@ -442,10 +462,9 @@ impl Gather {
                 );
             }
         }
-        if unlimited > 0 {
-            self.typical = Some(charged / unlimited);
-        }
-        self.spent(charged, now);
+        let count = u32::try_from(read.len()).unwrap_or(u32::MAX);
+        self.typical = Some(took / count);
+        self.spent(took, now);
     }
 
     /// Every folder of `root` heard, done gathering or not: a sync takes
@@ -668,7 +687,7 @@ mod tests {
 
     /// Folders limited by the share divide half of it: each held while the
     /// others are is held as many times longer, so that together they take
-    /// one part in `2 * DUTY`, and they are not charged to the account. A
+    /// one part in `2 * DUTY`, all charged to the account. A
     /// small folder is never limited, so never waits on a large one.
     #[test]
     fn folders_the_share_limits_divide_it() {
@@ -685,11 +704,9 @@ mod tests {
         assert_eq!(until(&g, 1), t + took * (2 * DUTY - 1), "alone");
         assert_eq!(until(&g, 2), t + took * (4 * DUTY - 1), "while 1 is held");
         assert!(until(&g, 3) < t + MOST, "a small one is not limited");
-        assert_eq!(
-            g.account,
-            Some(t.checked_sub(window()).unwrap() + Duration::from_micros(100) * (2 * DUTY)),
-            "the small one alone charged"
-        );
+        let floor = t.checked_sub(window()).unwrap();
+        let charged = at_share(took) + at_share(took) + at_share(Duration::from_micros(100));
+        assert_eq!(g.account, Some(floor + charged), "all charged");
         assert_eq!(g.due(t + MOST), Some((0, vec![(3, None)])));
     }
 
@@ -736,7 +753,7 @@ mod tests {
         assert!(g.open(t), "a quiet time lets a burst through");
         g.spent(BURST, t);
         assert!(!g.open(t), "past the burst");
-        let paid = t + BURST / 2 * (2 * DUTY);
+        let paid = t + at_share(BURST / 2);
         assert_eq!(g.account, Some(paid), "what is owed, paid at its share");
         for f in 0..100 {
             g.note(0, f, t);
@@ -753,7 +770,7 @@ mod tests {
             "the longest due first"
         );
         g.applied(0, &[(0, 3_000)], Duration::from_millis(1), paid);
-        let next = paid + Duration::from_millis(1) * (2 * DUTY);
+        let next = paid + at_share(Duration::from_millis(1));
         assert!(g.due(paid).is_none(), "charged before the next is taken");
         assert_eq!(g.deadline(), Some(next));
         assert_eq!(g.due(next), Some((0, vec![(1, None)])));
