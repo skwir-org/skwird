@@ -408,6 +408,13 @@ impl Names {
     }
 }
 
+/// The folder open as `fd`, opened again: listed from it, a folder lists
+/// what it held once it was opened again, as a folder opened after a
+/// change lists it (`opendir`, POSIX).
+fn opened_again(fd: impl AsFd) -> rustix::io::Result<OwnedFd> {
+    rustix::fs::openat(fd, ".", dir_flags(), Mode::empty())
+}
+
 /// The names of the folder open as `fd`, read from its start in place
 /// (`getdents64` through [`RawDir`]): none allocated for each entry. A
 /// listing that fails part-way gives its error alone.
@@ -484,6 +491,18 @@ fn read(
     if let Some(watcher) = &opts.watcher {
         *watch = watcher.watch(fd.as_fd(), &root.path.join(rel));
     }
+    // Watched, listed through the folder opened again: a listing may leave
+    // out what was made after its folder was opened (POSIX; btrfs does,
+    // since its fix for endless reads), and what was made between the open
+    // and the watch would be neither listed nor heard.
+    let fd = if matches!(watch, Watch::Watched(_)) {
+        match opened_again(&fd) {
+            Ok(again) => again,
+            Err(e) => return not_covered(Some(stat), Why::Failed(e.raw_os_error())),
+        }
+    } else {
+        fd
+    };
     // Read in place, no name allocated for each entry; a listing that
     // fails part-way gives its error alone: what was read of it is not
     // kept.

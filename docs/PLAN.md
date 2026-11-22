@@ -1432,6 +1432,26 @@ committed once the gate holds.
    In the root tests' machine, a storm outside the root costs a sixth of
    what finding it took. To be measured again.
 
+   **Measured at `39f5d2e`**, at a load of 8.6 to 14.6: a change
+   answered in 143 ms at the median, one of ten not within 10 s; the
+   sync 2.27 s; the query as the user 2.05 s against 1.06 as root. Of
+   the folders events named, most were found as before; those in no
+   index were taken as known so (1,428 of 1,440 in one interval). The
+   sync's applications had been counted as finding and charged: now
+   served apart (DESIGN 8, "A sync is served apart from what is heard").
+   A test holds that a folder's ACL stays answered through applications
+   and saves and follows its own change. Not known: why the query as
+   the user grew against root's, 1.09 to 1.43 to 1.93 times over three
+   runs; and how much of the sync's time is the disk's, the service's
+   I/O idle (`IOSchedulingClass=idle`) under the load.
+   Found under that load: the crawl listed a watched folder from the
+   folder opened before its watch, which btrfs lists without what was made
+   since; what was made between was missed by the user's engine. Now
+   listed through the folder opened again after its watch (DESIGN 8, "A
+   folder watched is listed through a folder opened after its watch").
+   The two tests of the watches that failed under load are made to hold
+   there.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

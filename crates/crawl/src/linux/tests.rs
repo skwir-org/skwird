@@ -618,3 +618,34 @@ fn a_cancelled_crawl_says_so() {
         Err(Error::Cancelled)
     ));
 }
+
+/// A folder lists what was made after it was opened only once opened
+/// again (or rewound): btrfs leaves it out since its fix for endless
+/// reads, as POSIX allows. A watched folder is listed through the folder
+/// opened again after its watch (`read`), so that what is made between
+/// its open and its watch is listed; before, it was neither listed nor
+/// heard, and the user's engine missed it on btrfs.
+#[test]
+fn a_folder_opened_again_lists_what_was_made_after_its_open() {
+    let s = Scratch::new("opened-again");
+    s.file("d/first");
+    let fd = rustix::fs::open(s.join("d"), dir_flags(), Mode::empty()).unwrap();
+    s.file("d/made after the open");
+    let names = |fd: &OwnedFd| -> Vec<Vec<u8>> {
+        let mut names: Vec<Vec<u8>> = names_of(fd)
+            .unwrap()
+            .iter()
+            .map(|(n, ..)| n.to_vec())
+            .collect();
+        names.sort();
+        names
+    };
+    let again = opened_again(&fd).unwrap();
+    assert_eq!(
+        names(&again),
+        [b"first".to_vec(), b"made after the open".to_vec()]
+    );
+    // What the folder opened first lists depends on its filesystem.
+    let first = names(&fd);
+    assert!(first.contains(&b"first".to_vec()), "{first:?}");
+}

@@ -79,6 +79,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   index twice until its old parent is read again. What is found in no
   index is kept only while no index changes its shape (`tree::shapes`):
   a folder comes into one only by a change that moves it.
+- **Watch, then open, then list.** A listing may leave out what was made
+  after its folder was opened (POSIX; btrfs does): a folder is watched,
+  then opened again for its listing, so that what is made meanwhile is
+  listed or heard, never neither. A check watches before its stat.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

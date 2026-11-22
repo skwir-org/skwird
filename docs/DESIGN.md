@@ -1009,6 +1009,36 @@ line says now how each folder an event named was found (as before,
 again, in no index, known so before) and how many folders were
 crawled.
 
+**A sync is served apart from what is heard** (the same day, the
+user's run at `39f5d2e`, at a load of 8.6 to 14.6: the sync of the
+home took 2.27 s, and in its save interval finding took 526 ms for 291
+events, of which 30 folders were found again or in no index). A sync is
+answered when its cookie is heard: what was gathered of its root is
+applied then, at once. That was done while the event was handled, so
+its time was counted as finding and charged to the account, though a
+sync is not charged (above). Now the syncs whose cookie is heard are
+served once what was heard is found, their time left out of the turn's
+charge as any client's ask, and so is a sync served by the check when
+its cookie comes late. The save line says it apart (serving syncs).
+
+**A folder watched is listed through a folder opened after its watch**
+(the same day, found by a test of the watches that failed under load,
+the user's machine at a load of 8 to 12). The crawl opened a folder,
+watched it, then listed it. A listing may leave out what was made after
+its folder was opened (POSIX: an entry added after `opendir` may or may
+not be listed), and btrfs does, since its fix for endless reads: listed
+from the folder opened first, a file made after the open is not there;
+rewound or opened again, it is. A file made between the open and the
+watch was so neither listed nor heard: the user's engine missed it on
+btrfs until the folder changed again or was checked. The system service
+was not concerned, its marks set before any crawl. Now a folder watched
+is opened again after its watch and listed from that: what was made
+before the watch is listed, what after is heard. The check already
+watched before its stat. A test holds that a folder opened again lists
+what was made after its first open; in the test of the watches, under
+16 busy processes, the coverage failure came back once in 20 runs
+without it, and never in 80 with it.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

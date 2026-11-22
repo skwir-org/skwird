@@ -570,6 +570,7 @@ fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
         // Derived again from the syncs waiting, after every turn.
         w.shared.readers.set_awaited(!w.waiting.is_empty());
         let end = thread_time();
+        asked += std::mem::take(&mut w.for_clients);
         w.gather.turned(
             end.saturating_sub(mark).saturating_sub(asked),
             Instant::now(),
@@ -642,6 +643,8 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
+        served: Vec::new(),
+        for_clients: std::time::Duration::ZERO,
         done: Done {
             since: thread_time(),
             ..Done::default()
@@ -774,6 +777,13 @@ struct Writing<'a> {
     next_cookie: u64,
     /// Syncs waiting for their cookie.
     waiting: Vec<Waiting>,
+    /// Syncs whose cookie was heard, to be served once what was heard is
+    /// found ([`Writing::serve_heard`]): a client's ask, not charged.
+    served: Vec<Waiting>,
+    /// The processor time spent serving clients inside a turn that was not
+    /// theirs (a sync served when its cookie is heard): left out of what
+    /// the turn is charged (`turns`).
+    for_clients: std::time::Duration,
     /// What was done for what was heard, since the last save.
     done: Done,
     /// Commands taken while gathering syncs, to answer next.
@@ -916,11 +926,13 @@ impl Writing<'_> {
                 let start = thread_time();
                 self.heard(generation, heard);
                 self.noticing(start);
+                self.serve_heard();
             }
             Command::Marks { generation, heard } => {
                 let start = thread_time();
                 self.noticed(generation, heard);
                 self.noticing(start);
+                self.serve_heard();
             }
             Command::Mounts => self.mounts_changed(),
         }
@@ -1033,8 +1045,13 @@ impl Writing<'_> {
             .partition(|w| now >= w.until);
         self.waiting = waiting;
         for w in late {
+            // A client's ask too, served by the check: not charged.
+            let start = thread_time();
             self.forget_cookie(w.cookie);
             self.check_now(w.root, w.replies);
+            let took = thread_time().saturating_sub(start);
+            self.done.syncing += took;
+            self.for_clients += took;
         }
         // A batch at a time, each charged before the next is taken. Timed by
         // this thread's own processor clock, so that applying what is heard
@@ -1369,7 +1386,19 @@ impl Writing<'_> {
             .into_iter()
             .partition(|w| w.cookie <= n);
         self.waiting = waiting;
-        for w in served {
+        self.served.extend(served);
+    }
+
+    /// The syncs whose cookie was heard, served: what was gathered of their
+    /// root applied at once, then answered. Served after what was heard is
+    /// found, outside the time charged to finding it: a client asked, and
+    /// a sync is not charged (DESIGN 8). Counted apart, in the save line.
+    fn serve_heard(&mut self) {
+        if self.served.is_empty() {
+            return;
+        }
+        let start = thread_time();
+        for w in std::mem::take(&mut self.served) {
             self.forget_cookie(w.cookie);
             let heard = self.gather.take(w.root);
             self.apply_heard(w.root, &heard);
@@ -1377,6 +1406,9 @@ impl Writing<'_> {
                 let _ = reply.send(());
             }
         }
+        let took = thread_time().saturating_sub(start);
+        self.done.syncing += took;
+        self.for_clients += took;
     }
 
     /// A sync served by the check: what was heard applied first, then
@@ -1549,6 +1581,7 @@ impl Writing<'_> {
         }
         self.publish(root);
         self.replay_held();
+        self.serve_heard();
         if self.registered != opening.registered {
             self.exclusions_held();
         }
@@ -1901,6 +1934,9 @@ struct Done {
     applying: std::time::Duration,
     saving: std::time::Duration,
     giving_back: std::time::Duration,
+    /// Serving syncs: what was gathered of their root applied at once, or
+    /// the check serving one whose cookie came late. Not charged.
+    syncing: std::time::Duration,
     /// Of the folders events named, each batch's: those found before, and
     /// those found again (the system service, `Writing::find_heard`);
     /// those found in no index, and of them those known so before.
@@ -1965,7 +2001,7 @@ impl Done {
              entries stat-ed, the largest folder {} entries, the busiest read {} times, a read {} µs \
              at the median, {} µs at most; of the folders events named, {} as found before, {} \
              found again, {} in no index, {} known so before; processor time: {} ms \
-             finding, {} ms applying, {} ms saving, {} ms giving memory back, of {} ms the \
+             finding, {} ms applying, {} ms saving, {} ms giving memory back, {} ms serving syncs, of {} ms the \
              writer took, woken {} times",
             done.events,
             done.overflows,
@@ -1990,6 +2026,7 @@ impl Done {
             done.applying.as_millis(),
             done.saving.as_millis(),
             done.giving_back.as_millis(),
+            done.syncing.as_millis(),
             whole.as_millis(),
             done.wakes
         ));

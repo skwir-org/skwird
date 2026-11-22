@@ -513,6 +513,64 @@ fn a_folder_with_an_acl_is_kept_like_any() {
     }
 }
 
+/// A folder's ACL stays answered while other folders are applied and the
+/// index saved, and follows its own change, heard as the system service
+/// hears it (fanotify says a folder's own change of the folder itself):
+/// the ACLs are read again only for the folders a read's records name,
+/// and published again only where one changed (DESIGN 8, "An application
+/// costs what it changed").
+#[test]
+fn a_folders_acl_is_kept_through_applications_and_saves() {
+    let s = Scratch::new("keeper-acl-kept");
+    s.file("shared/inside.txt");
+    s.file("plain/other.txt");
+    let facl = |args: &[&str]| {
+        std::process::Command::new("setfacl")
+            .args(args)
+            .arg(s.join("shared"))
+            .status()
+            .is_ok_and(|st| st.success())
+    };
+    if !facl(&["-m", "u:65534:rx"]) {
+        eprintln!("skipped: no setfacl, or no ACLs on this filesystem");
+        return;
+    }
+    let acls = Options {
+        acls: true,
+        ..opts()
+    };
+    let root = Root::open(s.path(), Exclusions::none()).unwrap();
+    let cancel = Cancel::default();
+    let (mut k, _) = Keeper::open(&s.join("index"), root, acls, limits(), &cancel).unwrap();
+    // As a query sees it: in the snapshot published.
+    let has = |k: &Keeper| {
+        let index = k.snapshot();
+        let shared = index.folder_at(Path::new("shared")).unwrap();
+        let facts = index.facts_of(shared).unwrap();
+        (
+            facts.mode & skwird_crawl::ACL != 0,
+            index.acl_of(facts.id).is_some(),
+        )
+    };
+    assert_eq!(has(&k), (true, true), "read once built");
+    let plain = k.index().folder_at(Path::new("plain")).unwrap();
+    for (i, save) in [(0, false), (1, true), (2, false)] {
+        s.file(format!("plain/more-{i}.txt"));
+        k.heard_named(&[(plain, None)], &cancel).unwrap();
+        if save {
+            k.save().unwrap();
+        }
+        assert_eq!(has(&k), (true, true), "round {i}, saved: {save}");
+    }
+    let shared = k.index().folder_at(Path::new("shared")).unwrap();
+    assert!(facl(&["-b"]));
+    k.heard_named(&[(shared, None)], &cancel).unwrap();
+    assert_eq!(has(&k), (false, false), "its ACL taken away");
+    assert!(facl(&["-m", "u:65534:rx"]));
+    k.heard_named(&[(shared, None)], &cancel).unwrap();
+    assert_eq!(has(&k), (true, true), "its ACL given again");
+}
+
 /// A file written to, heard by its name, is patched into its chunk, not
 /// cut again (DESIGN 8): its new size is answered, a query on size
 /// finding it by its zone, and it is saved and read back so, under its

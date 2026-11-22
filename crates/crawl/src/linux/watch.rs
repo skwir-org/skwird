@@ -322,6 +322,21 @@ mod tests {
         heard
     }
 
+    /// What `w` heard, read again until `done` holds of it or 5 s pass: the
+    /// kernel queues a watch's end once its folder is let go of, which a
+    /// loaded machine does a little after the removal returns.
+    fn heard_until(w: &Watcher, done: impl Fn(&[Heard]) -> bool) -> Vec<Heard> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got = Vec::new();
+        loop {
+            w.read(&mut got).unwrap();
+            if done(&got) || std::time::Instant::now() >= deadline {
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// A change in a watched folder is heard, named by its folder alone; a
     /// folder removed says its watch is gone.
     #[test]
@@ -347,7 +362,7 @@ mod tests {
             "named by its entry"
         );
         s.remove("b/c");
-        let got = heard(&w);
+        let got = heard_until(&w, |got| got.contains(&Heard::Gone(wc)));
         assert!(named(&got).contains(&wb), "{got:?}");
         assert!(got.contains(&Heard::Gone(wc)), "{got:?}");
         assert!(!named(&got).contains(&wa), "{got:?}");
@@ -360,6 +375,9 @@ mod tests {
     /// Files made in every folder while the crawl reads and watches them:
     /// each folder whose files differ from its listing was heard changed,
     /// since it was watched before it was read.
+    /// The writer makes no more than the kernel's queue holds: past it, the
+    /// overflow is said instead ([`an_overflow_is_said`]), which a loaded
+    /// machine, its crawl slower, reached.
     #[test]
     fn a_change_made_while_the_watches_are_installed_is_not_missed() {
         let s = Scratch::new("watch-install");
@@ -370,21 +388,39 @@ mod tests {
         let w = Arc::new(Watcher::new(1, 1000).unwrap());
         let dirs: Vec<PathBuf> = folders.iter().map(|f| s.join(f)).collect();
         let stop = AtomicBool::new(false);
+        // At most three events a file made (made, written, closed).
+        let queue: usize = std::fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")
+            .ok()
+            .and_then(|q| q.trim().parse().ok())
+            .unwrap_or(16_384);
+        let rounds = queue / (3 * folders.len()) - 1;
+        // Crawled once the writer has begun: on a loaded machine, it may not
+        // have before the crawl ends, and nothing is proved.
+        let begun = AtomicBool::new(false);
         let crawl = std::thread::scope(|scope| {
             scope.spawn(|| {
                 let mut n = 0;
-                while !stop.load(Ordering::Relaxed) {
+                while n < rounds && !stop.load(Ordering::Relaxed) {
                     for dir in &dirs {
                         let _ = std::fs::write(dir.join(format!("late {n}")), b"");
+                        begun.store(true, Ordering::Relaxed);
                     }
                     n += 1;
                 }
             });
+            while !begun.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
             let crawl = crawled(&s, &w, &[""], &[]);
             stop.store(true, Ordering::Relaxed);
             crawl
         });
-        let got = named(&heard(&w));
+        let got = heard(&w);
+        assert!(
+            !got.contains(&Heard::Overflow),
+            "the writer made more than the queue holds"
+        );
+        let got = named(&got);
         let mut differed = 0;
         for folder in crawl
             .folders
