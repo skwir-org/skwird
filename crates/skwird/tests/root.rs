@@ -472,3 +472,28 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
     );
     assert_eq!(found(&mut c), paths(&["one/not theirs", "two/kept"]));
 }
+
+/// A query of the system service gives at most 100,000 results, and says
+/// there were more: any local user may ask it.
+#[test]
+fn a_query_gives_at_most_so_many_results() {
+    let Some(m) = machine() else { return };
+    // On btrfs, whose inodes are made as needed: the ext4 holds 65,536.
+    let place = Place::new(&m.btrfs, "many");
+    for i in 0..100_050 {
+        std::fs::File::create(place.join(&format!("f{i}"))).unwrap();
+    }
+    let dirs = Place::new(&m.ext4, "many-dirs");
+    let service = Service::start(&dirs.0, &[&place.0]);
+    let mut c = service.client(&place.0);
+    wait_for(60, "live", || live(&mut c, &place.0));
+    let mut count = 0;
+    let done = c
+        .query(&named(&place.0, "f"), |batch| {
+            count += batch.len();
+            true
+        })
+        .unwrap();
+    assert_eq!(count, 100_000);
+    assert!(done.truncated);
+}

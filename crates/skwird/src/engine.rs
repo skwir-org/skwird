@@ -63,6 +63,8 @@ pub struct Shared {
     /// first, as they were when it started: an asker must search them all
     /// to reach the root (DESIGN 4).
     pub above: Vec<Vec<Option<crate::asker::Owned>>>,
+    /// The queries each user runs now (`serve::Running`).
+    pub running: std::sync::Mutex<std::collections::HashMap<u32, usize>>,
     pub published: RwLock<Vec<Published>>,
 }
 
@@ -86,6 +88,7 @@ impl Shared {
             roots,
             system,
             above,
+            running: std::sync::Mutex::default(),
             published: RwLock::new(vec![Published::Opening; n]),
         }
     }

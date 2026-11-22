@@ -442,9 +442,12 @@ proved as root in the test machine on Linux 6.18.58):
 - **Whether a folder exists is said only to who could list its
   parent:** a coverage or a query at a folder the asker may not list,
   or at a path below one, is answered not covered (denied) alike.
-- Not yet: the answers kept per asker across queries, the limits per
-  asker, and the journal and registrations for other users than root,
-  which are refused for now (step 6).
+- **Limits per asker** (2026-11-22): a query of the system service
+  gives at most 100,000 results, past which its `done` says there were
+  more, and a user runs at most four queries at once; a fifth is
+  refused, busy. Not yet: a time limit, the answers kept per asker
+  across queries, and the journal for other users than root, which is
+  refused for now.
 
 ### 5. Private folders are never indexed
 

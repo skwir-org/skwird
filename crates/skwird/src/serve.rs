@@ -26,6 +26,11 @@ use crate::engine::{Command, Config, Published, Shared, log, writer};
 /// Results sent at a time.
 const BATCH: usize = 512;
 
+/// At the system service, which answers any local user (DESIGN 4): the
+/// most results a query gives, and the most queries a user runs at once.
+const MOST_RESULTS: u64 = 100_000;
+const MOST_QUERIES: usize = 4;
+
 /// How many clients are connected, and since when none is.
 struct Live {
     state: Mutex<(usize, Instant)>,
@@ -335,6 +340,48 @@ fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -
     }
 }
 
+/// A query a user runs, counted while it runs: at the system service, a
+/// user runs at most [`MOST_QUERIES`] at once. Given back when dropped.
+struct Running {
+    shared: Arc<Shared>,
+    uid: u32,
+}
+
+impl Running {
+    /// A query of user `uid` counted, or none if they run the most already.
+    fn take(shared: &Arc<Shared>, uid: u32) -> Option<Running> {
+        let mut running = shared
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let n = running.entry(uid).or_insert(0);
+        if shared.system && *n >= MOST_QUERIES {
+            return None;
+        }
+        *n += 1;
+        Some(Running {
+            shared: Arc::clone(shared),
+            uid,
+        })
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut running = self
+            .shared
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(n) = running.get_mut(&self.uid) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                running.remove(&self.uid);
+            }
+        }
+    }
+}
+
 /// A query answered on a thread of its own, so that a `cancel` can reach
 /// it, its flag kept in `cancels` while it runs.
 fn spawn_query(
@@ -344,6 +391,7 @@ fn spawn_query(
     id: u64,
     query: wire::Query,
     who: &Asker,
+    running: Running,
 ) -> std::thread::JoinHandle<()> {
     let flag = Arc::new(AtomicBool::new(false));
     cancels
@@ -363,6 +411,7 @@ fn spawn_query(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id);
         send(&writer, id, answer);
+        drop(running);
     })
 }
 
@@ -397,7 +446,17 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
             },
             Ask::Sync { root } => sync(shared, commands, &root, who),
             Ask::Query(query) => {
-                queries.push(spawn_query(shared, &writer, &cancels, id, query, who));
+                let Some(running) = Running::take(shared, who.uid) else {
+                    send(
+                        &writer,
+                        id,
+                        failure("busy", "this user's queries at once are at the most"),
+                    );
+                    continue;
+                };
+                queries.push(spawn_query(
+                    shared, &writer, &cancels, id, query, who, running,
+                ));
                 continue;
             }
             Ask::Cancel { id: of } => {
@@ -568,6 +627,13 @@ fn answer_query(
     // Another user than root, asking the system service, is answered what
     // they could list (DESIGN 4).
     let seeing = seeing(shared, i, &index, who);
+    // The system service answers any local user: a query gives at most
+    // so many results, past which its `done` says there were more.
+    let most = match (query.limit, shared.system) {
+        (Some(l), true) => Some(l.min(MOST_RESULTS)),
+        (None, true) => Some(MOST_RESULTS),
+        (l, false) => l,
+    };
     if let Some(s) = &seeing
         && let Reached::Denied = reached(s, &rel, &mut HashMap::new())
     {
@@ -598,9 +664,7 @@ fn answer_query(
             .mtime
             .map(|[a, b]| convert::time_of(a)..=convert::time_of(b)),
         // One more than asked, to say whether there were more.
-        limit: query
-            .limit
-            .map(|l| usize::try_from(l).unwrap_or(usize::MAX).saturating_add(1)),
+        limit: most.map(|l| usize::try_from(l).unwrap_or(usize::MAX).saturating_add(1)),
     };
     let found = match &seeing {
         None => index.query(folder, &asked).map(|hits| (hits, Vec::new())),
@@ -625,9 +689,7 @@ fn answer_query(
             .holes
             .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
     }
-    let limit = query
-        .limit
-        .map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
+    let limit = most.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let truncated = hits.len() > limit;
     let root: &Path = &shared.roots[i];
     let mut sent = 0u64;
@@ -642,4 +704,29 @@ fn answer_query(
         sent += batch.len() as u64;
     }
     done(coverage, sent, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// At the system service, a user runs at most so many queries at once,
+    /// another user's not counted; one ended gives its place back. A user's
+    /// engine counts none.
+    #[test]
+    fn a_user_runs_so_many_queries_at_once() {
+        let shared = Arc::new(Shared::new(Vec::new(), true));
+        let held: Vec<Running> = (0..MOST_QUERIES)
+            .map(|_| Running::take(&shared, 1000).unwrap())
+            .collect();
+        assert!(Running::take(&shared, 1000).is_none(), "one more refused");
+        assert!(Running::take(&shared, 1001).is_some(), "another user's");
+        drop(held);
+        assert!(Running::take(&shared, 1000).is_some(), "given back");
+        let user = Arc::new(Shared::new(Vec::new(), false));
+        let many: Vec<Running> = (0..10)
+            .map(|_| Running::take(&user, 1000).unwrap())
+            .collect();
+        assert_eq!(many.len(), 10);
+    }
 }
