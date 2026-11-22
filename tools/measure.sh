@@ -351,16 +351,22 @@ live_answer() {
     done
     return 1
 }
-# Wait until the service has a line matching `$2` for every root it serves,
-# in its log from line `$1` on: each root built (or read back), or checked.
+# Wait until the service has a line matching `$2` for each root it served
+# at its start, by its number, in its log from line `$1` on: each root
+# built (or read back), or checked. A root mounted since is not counted.
 # Gives up after half an hour.
 every_root() {
-    local deadline=$((SECONDS + 1800)) log n opened
+    local deadline=$((SECONDS + 1800)) log n i missing
     while [ $SECONDS -lt $deadline ]; do
         log=$(tail -n +"$1" "$sys_dir/engine.log" 2>/dev/null)
         n=$(printf '%s\n' "$log" | sed -n 's/^skwird: serving \([0-9]*\) roots$/\1/p' | head -1)
-        opened=$(printf '%s\n' "$log" | grep -cE "^skwird: root [0-9]+ ($2)" || true)
-        if [ -n "$n" ] && [ "$opened" -ge "$n" ]; then return 0; fi
+        if [ -n "$n" ]; then
+            missing=
+            for i in $(seq 0 $((n - 1))); do
+                printf '%s\n' "$log" | grep -qE "^skwird: root $i ($2)" || missing=$i
+            done
+            [ -z "$missing" ] && return 0
+        fi
         sleep 0.2
     done
     return 1

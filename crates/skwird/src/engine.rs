@@ -707,11 +707,11 @@ fn open_one(
             let sizes = keeper.index().sizes();
             log(&format!(
                 "root {i} {} in {:.2?}: {} entries in {} folders",
-                match how {
+                match &how {
                     Opened::Loaded { replayed, .. } =>
                         format!("loaded, {replayed} records replayed"),
                     Opened::Built { because: None } => "built".to_owned(),
-                    Opened::Built { because: Some(_) } => "built again".to_owned(),
+                    Opened::Built { because: Some(why) } => format!("built again ({why})"),
                 },
                 start.elapsed(),
                 sizes.entries,

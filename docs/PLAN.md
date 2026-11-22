@@ -1381,6 +1381,21 @@ committed once the gate holds.
    service's log when a step fails, and says when the home is answered
    live and when every filesystem is built.
 
+   **With the disk mounted again** (the user's run at `52e2932`, at a
+   load of 31 to 45): the home was answered live in 21 s, the disk still
+   crawled, against more than 30 minutes before. Found:
+   - "every filesystem built" counted lines, and a filesystem mounted
+     during the run gave the last: the count is now by root number, and
+     the steps after it measured the disk's crawl still going (11.2 s of
+     processor time in 30 s, changes answered in 10 s);
+   - read back, the home's index was built again, the log not saying
+     why: it says now. Not reproduced: the keeper's kill test loaded 60
+     of 60, and a machine probe with mounts changing under a root and
+     the service killed loaded every time;
+   - under that load, the writer's account was overdrawn (up to 38,587
+     events in a save's 10 s, finding up to 1 s of them, a folder of
+     89,740 entries read whole in 1.8 s), so changes waited the window.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
