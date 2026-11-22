@@ -637,6 +637,7 @@ pub fn writer(
         table,
         marked,
         found: HashMap::new(),
+        unfound: HashMap::new(),
         gather: Gather::default(),
         cookies,
         next_cookie: 0,
@@ -759,6 +760,13 @@ struct Writing<'a> {
     /// would give the same ([`Keeper::holds`]): a busy folder is not found
     /// again for each event (DESIGN 8). At most [`FOUND_KEPT`].
     found: HashMap<fanotify::Folder, Found>,
+    /// Each folder heard found in no index, with the shapes of this
+    /// process then ([`skwird_index::tree::shapes`]): kept while they stay,
+    /// so that a busy folder kept out (the engine's own, the Nix store) is
+    /// not found again for each batch of its events. Let go of whenever a
+    /// root comes or goes, and the registrations or the mounts change. At
+    /// most [`FOUND_KEPT`].
+    unfound: HashMap<fanotify::Folder, u64>,
     /// What was heard and not applied yet, and what is due.
     gather: Gather,
     /// The folder cookies are made in, once watched.
@@ -897,6 +905,7 @@ impl Writing<'_> {
                 if changed(&mut self.kept_live, &client, None, &add, &remove) {
                     save_registered(&self.config.dirs, WATCHED, &self.kept_live);
                     self.registered += 1;
+                    self.unfound.clear();
                     self.apply_scopes();
                 }
                 let _ = reply.send(theirs(&self.kept_live, &client, None));
@@ -1204,6 +1213,7 @@ impl Writing<'_> {
         // open, which holds the index to what is kept.
         save_registered(&self.config.dirs, EXCLUDED, &self.registrations);
         self.registered += 1;
+        self.unfound.clear();
         self.exclusions_held();
     }
 
@@ -1388,6 +1398,7 @@ impl Writing<'_> {
     /// The mount table changed: each root reads it again, and the folders
     /// at mount points made or taken below it are read again at once.
     fn mounts_changed(&mut self) {
+        self.unfound.clear();
         self.marks_followed();
         self.roots_followed();
         for root in 0..self.keepers.len() {
@@ -1521,6 +1532,8 @@ impl Writing<'_> {
             return;
         }
         self.keepers[root] = keeper.map(|k| *k);
+        // What was found in no index may be in this one.
+        self.unfound.clear();
         if built {
             crate::memory::give_back();
         }
@@ -1591,6 +1604,7 @@ impl Writing<'_> {
         if !self.config.system || !self.config.discovered {
             return;
         }
+        self.unfound.clear();
         if self.group.is_none()
             && let Ok(table) = Table::read()
         {
@@ -1639,9 +1653,13 @@ impl Writing<'_> {
     /// on; and what finding each took. One found before is taken while its
     /// root's index has the shape it had then, no folder made, moved or let
     /// go of since, and holds it with the identity it was found with
-    /// ([`Keeper::holds`]); otherwise it is found again. What finding takes
-    /// is charged to the folder, as its application is (DESIGN 8). And the
-    /// folders in a root being opened, whose events are held until it is.
+    /// ([`Keeper::holds`]); otherwise it is found again. One found in no
+    /// index (outside every root, kept out, not read yet) is taken so while
+    /// no index has changed its shape since ([`skwird_index::tree::shapes`]):
+    /// a folder comes into an index only by one that changes. What finding
+    /// takes is charged to the folder, as its application is (DESIGN 8).
+    /// And the folders in a root being opened, whose events are held until
+    /// it is.
     #[allow(clippy::type_complexity)] // four results of one pass, used once
     fn find_heard(
         &mut self,
@@ -1658,6 +1676,9 @@ impl Writing<'_> {
         let mut charges = Vec::new();
         let mut held = std::collections::HashSet::new();
         let mut resolver = group.resolver(&self.table);
+        // Taken before any is found: a tree made meanwhile on an opening
+        // thread moves it, and what is found in none is found again.
+        let shapes = skwird_index::tree::shapes();
         for h in heard {
             let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h else {
                 continue;
@@ -1677,10 +1698,18 @@ impl Writing<'_> {
                     .and_then(Option::as_ref)
                     .is_some_and(|k| k.holds(f, id, shape))
             {
+                self.done.found_before += 1;
                 found.insert(folder.clone(), Some((root, f)));
                 continue;
             }
+            if self.unfound.get(folder) == Some(&shapes) {
+                self.done.nowhere_before += 1;
+                found.insert(folder.clone(), None);
+                continue;
+            }
             let start = thread_time();
+            // Whether it is in no index: none holds it, though it is there.
+            let mut nowhere = false;
             let at = match resolver.resolve(folder) {
                 Resolved::At(path, id) => match self.shared.locate(&path) {
                     // In a root being opened: held until it is.
@@ -1690,15 +1719,22 @@ impl Writing<'_> {
                         held.insert(folder.clone());
                         None
                     }
-                    Some((root, rel)) => self.keepers[root].as_ref().and_then(|keeper| {
-                        keeper.folder_of(&rel, id).map(|f| Found {
-                            root,
-                            folder: f,
-                            id,
-                            shape: keeper.shape(),
-                        })
-                    }),
-                    None => None,
+                    Some((root, rel)) => {
+                        let at = self.keepers[root].as_ref().and_then(|keeper| {
+                            keeper.folder_of(&rel, id).map(|f| Found {
+                                root,
+                                folder: f,
+                                id,
+                                shape: keeper.shape(),
+                            })
+                        });
+                        nowhere = at.is_none();
+                        at
+                    }
+                    None => {
+                        nowhere = true;
+                        None
+                    }
                 },
                 // Gone, its removal is heard in a parent; no mount reaches
                 // it, or no mark kept has it: no root holds it.
@@ -1713,7 +1749,14 @@ impl Writing<'_> {
                     self.found.clear();
                 }
                 self.found.insert(folder.clone(), at);
+                self.done.found_again += 1;
                 charges.push((at.root, at.folder, thread_time().saturating_sub(start)));
+            } else if nowhere {
+                if self.unfound.len() >= FOUND_KEPT {
+                    self.unfound.clear();
+                }
+                self.unfound.insert(folder.clone(), shapes);
+                self.done.nowhere += 1;
             }
             found.insert(folder.clone(), at.map(|at| (at.root, at.folder)));
         }
@@ -1845,6 +1888,8 @@ struct Done {
     patched: u64,
     spliced: u64,
     cut: u64,
+    /// Folders new since, crawled with those read again.
+    crawled: u64,
     entries: u64,
     largest: usize,
     /// How often each folder was read again.
@@ -1856,6 +1901,13 @@ struct Done {
     applying: std::time::Duration,
     saving: std::time::Duration,
     giving_back: std::time::Duration,
+    /// Of the folders events named, each batch's: those found before, and
+    /// those found again (the system service, `Writing::find_heard`);
+    /// those found in no index, and of them those known so before.
+    found_before: u64,
+    found_again: u64,
+    nowhere: u64,
+    nowhere_before: u64,
     /// How often the writer woke, and its whole processor time, since
     /// the last save: what the kinds above leave out is its own.
     wakes: u64,
@@ -1886,6 +1938,7 @@ impl Done {
         self.patched += done.patched as u64;
         self.spliced += done.spliced as u64;
         self.cut += done.cut as u64;
+        self.crawled += done.crawled as u64;
         self.entries += done.entries as u64;
         self.largest = self.largest.max(done.largest);
         for &(folder, _) in &done.folders {
@@ -1908,8 +1961,10 @@ impl Done {
         let read = |at: Option<&std::time::Duration>| at.map_or(0, std::time::Duration::as_micros);
         log(&format!(
             "since the last save: {} events heard, {} overflows; {} folders read again \
-             ({} distinct; {} as they were, {} patched, {} spliced, {} cut again), {} entries stat-ed, the largest folder {} entries, the busiest \
-             read {} times, a read {} µs at the median, {} µs at most; processor time: {} ms \
+             ({} distinct; {} as they were, {} patched, {} spliced, {} cut again), {} folders crawled, {} \
+             entries stat-ed, the largest folder {} entries, the busiest read {} times, a read {} µs \
+             at the median, {} µs at most; of the folders events named, {} as found before, {} \
+             found again, {} in no index, {} known so before; processor time: {} ms \
              finding, {} ms applying, {} ms saving, {} ms giving memory back, of {} ms the \
              writer took, woken {} times",
             done.events,
@@ -1921,11 +1976,16 @@ impl Done {
             done.patched,
             done.spliced,
             done.cut,
+            done.crawled,
             done.entries,
             done.largest,
             busiest,
             read(reads.get(reads.len() / 2)),
             read(reads.last()),
+            done.found_before,
+            done.found_again,
+            done.nowhere,
+            done.nowhere_before,
             done.noticing.as_millis(),
             done.applying.as_millis(),
             done.saving.as_millis(),

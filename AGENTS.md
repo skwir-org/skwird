@@ -76,7 +76,9 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - **What is found in an index is kept only while the index keeps its
   shape** (`Tree::shape`: no folder made, moved or let go of). An
   identity does not say where a folder is: a folder moved is in the
-  index twice until its old parent is read again.
+  index twice until its old parent is read again. What is found in no
+  index is kept only while no index changes its shape (`tree::shapes`):
+  a folder comes into one only by a change that moves it.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

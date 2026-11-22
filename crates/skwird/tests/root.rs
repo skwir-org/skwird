@@ -758,6 +758,55 @@ fn a_folder_found_then_moved_is_heard_at_its_new_place() {
     );
 }
 
+/// A folder heard in no index is kept as such only while no index changes
+/// its shape (DESIGN 8): moved into a root, it is crawled at its new
+/// place, and what is heard in it after is applied there, never taken as
+/// in no index still. Its first events, outside every root, are found in
+/// none; those after, before the move, are taken so.
+#[test]
+fn a_folder_heard_in_no_index_then_moved_into_one_is_heard_there() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.btrfs, "unfound");
+    let root = place.join("indexed");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(place.join("outside/inner")).unwrap();
+    let dirs = Place::new(&m.ext4, "unfound-dirs");
+    let service = Service::start(&dirs.0, &[&root]);
+    let mut c = service.client(&root);
+    wait_for(60, "live", || live(&mut c, &root));
+    let at = |c: &mut Client, name: &str| answered(c, &named(&root, name));
+    // Heard outside every root, then a file in the root: the writer takes
+    // events in order, so once the file is answered, the folder outside
+    // was found in no index, and kept so (a file made changes no shape).
+    for (outside, probe) in [("one.txt", "probe-1.txt"), ("two.txt", "probe-2.txt")] {
+        std::fs::write(place.join("outside/inner").join(outside), b"x").unwrap();
+        std::fs::write(root.join(probe), b"x").unwrap();
+        wait_for(15, "a file in the root", || !at(&mut c, probe).is_empty());
+    }
+    assert!(at(&mut c, "one.txt").is_empty(), "nothing outside the root");
+    std::fs::rename(place.join("outside/inner"), root.join("inner")).unwrap();
+    wait_for(15, "the folder in the root", || {
+        at(&mut c, "one.txt") == [root.join("inner/one.txt")].into()
+    });
+    std::fs::write(root.join("inner/three.txt"), b"x").unwrap();
+    wait_for(15, "a file made in it", || {
+        at(&mut c, "three.txt") == [root.join("inner/three.txt")].into()
+    });
+    let synced = c.sync(&root).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{:?}", synced.names);
+    assert_eq!(
+        at(&mut c, ".txt"),
+        [
+            root.join("inner/one.txt"),
+            root.join("inner/three.txt"),
+            root.join("inner/two.txt"),
+            root.join("probe-1.txt"),
+            root.join("probe-2.txt"),
+        ]
+        .into()
+    );
+}
+
 /// A root on a slow disk delays itself alone (AGENTS.md, "Blocking"): each
 /// root is opened on a thread of its own, so another is live, its changes
 /// answered and its syncs served, while the slow one is still crawled. A

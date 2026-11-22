@@ -1419,6 +1419,19 @@ committed once the gate holds.
    folder removed found its watch gone in a second read, under load, a
    test sensitive to timing.
 
+   **Measured at `520c664`**, at a load of 2.3 to 5.4: every one of the
+   ten changes waited past the measurement's 10 s, the account owed for
+   good. Builds took 23 to 24 s: across this day's runs, they took 7 to
+   92 s by the machine's load, 7 s alone at a load of 0.5. By the save
+   lines, what owed the account was finding (371 ms for 3,345 events
+   that made 2 folders read, both as they were; 655 ms for 272), and a
+   few large reads (323 ms for two folders, the larger of 8,192
+   entries). Each event in a folder no index holds (the service's own,
+   the Nix store, outside every root) was found again at each batch. Now such a folder is kept as found in none while no index
+   changes its shape (DESIGN 8, "What no index holds is found once").
+   In the root tests' machine, a storm outside the root costs a sixth of
+   what finding it took. To be measured again.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

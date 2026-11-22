@@ -84,6 +84,14 @@ fn next_shape() -> u64 {
     SHAPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The shapes given so far, in this process: a number that moves whenever
+/// a tree is made or any tree's shape changes ([`Tree::shape`]). While it
+/// stays, no tree of this process holds a folder it did not hold, or
+/// holds one elsewhere: what is found in none of them stays so.
+pub fn shapes() -> u64 {
+    SHAPES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Tree {
     /// A tree of `blocks`, given in pre-order, each with its folder's
     /// number already given.

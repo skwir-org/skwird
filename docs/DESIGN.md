@@ -975,6 +975,40 @@ in 646 µs against 1.3 ms, its ACLs costing 45 µs against 310; one of 8
 entries in 160 µs, mostly the log's `fdatasync` (118 µs of processor
 time on the user's btrfs).
 
+**What no index holds is found once** (the same day, the user's run at
+`520c664`: each of the ten changes measured waited past the
+measurement's 10 s, the account owed for good). The system service
+marks whole filesystems, and hears what it keeps out: its own folders
+(its log, made durable at each application), the Nix store, every
+folder outside its roots. A folder found in an index was kept as found;
+one found in none was found again at each batch of its events, every
+10 ms under load. In one of the run's save intervals, 3,345 events made
+2 folders read again, both as they were, and finding took 371 ms; in
+another, 655 ms for 272 events.
+
+Now a folder found in no index (outside every root, kept out, not read
+yet) is kept so with the shapes of the process then: a number that
+moves whenever any index is made or changes its shape
+(`tree::shapes`). A folder comes into an index only by a change that
+moves it: moved into a root, it is crawled at its new place, the shape
+of that index changes, and what is heard in it after is found again.
+What was so kept is also let go of whenever a root comes or goes, and
+the registrations or the mounts change. A root test proves it: a
+folder heard outside the root twice, then moved into it, has the file
+made in it after answered. With the shapes left out of the check, the
+test fails there.
+
+In the root tests' machine, built optimised, 50 folders outside the
+root each written every 10 ms for 20 s (67,000 to 75,000 events): of
+the folders the events named, 50 were found, and 67,351 taken as known
+so before. Finding took 157 ms against 916, the writer 524 ms against
+1,140, the service 4.5% of a core against 6.9%, and a change made just
+after was answered in 4.9 s against 10.0. It still waits: the storm
+owes the account, and the budget comes before the lag (above). The save
+line says now how each folder an event named was found (as before,
+again, in no index, known so before) and how many folders were
+crawled.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three
