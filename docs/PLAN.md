@@ -1517,6 +1517,14 @@ committed once the gate holds.
    in 4.9 s against 0.6 s at a lower load. Still to see: what an event
    costs, read and found, profiled in the root tests' machine.
 
+   **The storm's events profiled** (the user's choice: make each event
+   cheaper). In the root tests' machine, the writer 60% of the service's
+   time, the reader 40%, mostly the kernel giving each event. The writer
+   now looks each event's folder up once, not twice, and copies no
+   handle: 2 to 4% less of its time (DESIGN 8, "An event costs one
+   look"). Not enough for the idle budget through a storm; what remains
+   is the kernel's part, the wakes and the allocations.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

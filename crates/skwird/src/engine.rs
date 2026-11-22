@@ -330,6 +330,17 @@ struct Found {
     shape: u64,
 }
 
+/// Where the folder an event names was found ([`Writing::find_heard`]).
+#[derive(Clone, Copy)]
+enum Where {
+    /// In this root's index, as this folder.
+    At(usize, FolderId),
+    /// In a root being opened: what is heard in it is held.
+    Held,
+    /// In none, or not found.
+    Nowhere,
+}
+
 /// What finding a folder heard gave, but a folder of an index: kept while
 /// it holds, so that a folder heard again is not found again for each batch
 /// of its events (`Writing::find_heard`).
@@ -1710,30 +1721,37 @@ impl Writing<'_> {
     /// takes is charged to the folder, as its application is (DESIGN 8).
     /// And the folders in a root being opened, whose events are held until
     /// it is.
-    #[allow(clippy::type_complexity)] // four results of one pass, used once
+    #[allow(clippy::type_complexity)] // three results of one pass, used once
     fn find_heard(
         &mut self,
         group: &Group,
         heard: &[fanotify::Heard],
     ) -> (
-        HashMap<fanotify::Folder, Option<(usize, FolderId)>>,
+        Vec<Where>,
         BTreeSet<u64>,
         Vec<(usize, FolderId, std::time::Duration)>,
-        std::collections::HashSet<fanotify::Folder>,
     ) {
-        let mut found: HashMap<fanotify::Folder, Option<(usize, FolderId)>> = HashMap::new();
+        // Each folder of the batch found once, by its handle as the batch
+        // holds it, not copied: what each event costs is one look in it
+        // (DESIGN 8, "An event costs one look").
+        let mut found: HashMap<&fanotify::Folder, Where> = HashMap::new();
+        let mut wheres = Vec::with_capacity(heard.len());
         let mut failed: BTreeSet<u64> = BTreeSet::new();
         let mut charges = Vec::new();
-        let mut held = std::collections::HashSet::new();
-        let mut resolver = group.resolver(&self.table);
+        // Out of the writer for the batch, that the resolver may hold it as
+        // what is found is noted: put back after.
+        let table = std::mem::take(&mut self.table);
+        let mut resolver = group.resolver(&table);
         // Taken before any is found: a tree made meanwhile on an opening
         // thread moves it, and what is found in none is found again.
         let shapes = skwird_index::tree::shapes();
         for h in heard {
             let (fanotify::Heard::Entry(folder, _) | fanotify::Heard::Changed(folder)) = h else {
+                wheres.push(Where::Nowhere);
                 continue;
             };
-            if found.contains_key(folder) {
+            if let Some(&at) = found.get(folder) {
+                wheres.push(at);
                 continue;
             }
             if let Some(&Found {
@@ -1749,88 +1767,111 @@ impl Writing<'_> {
                     .is_some_and(|k| k.holds(f, id, shape))
             {
                 self.done.found_before += 1;
-                found.insert(folder.clone(), Some((root, f)));
+                found.insert(folder, Where::At(root, f));
+                wheres.push(Where::At(root, f));
                 continue;
             }
             if let Some(is_held) = self.known_unfound(folder, shapes) {
                 self.done.known_before += 1;
-                if is_held {
-                    held.insert(folder.clone());
-                }
-                found.insert(folder.clone(), None);
+                let at = if is_held { Where::Held } else { Where::Nowhere };
+                found.insert(folder, at);
+                wheres.push(at);
                 continue;
             }
             let start = thread_time();
-            // What is kept of it found in no index, if anything.
-            let mut kept = None;
-            let at = match resolver.resolve(folder) {
-                Resolved::At(path, id) => match self.shared.locate(&path) {
-                    // In a root being opened: held until it is.
-                    Some((root, _)) if self.opening_root(root) => {
-                        held.insert(folder.clone());
-                        self.done.held += 1;
-                        kept = Some(Unfound::Held(root));
-                        None
-                    }
-                    Some((root, rel)) => {
-                        let at = self.keepers[root].as_ref().and_then(|keeper| {
-                            keeper.folder_of(&rel, id).map(|f| Found {
-                                root,
-                                folder: f,
-                                id,
-                                shape: keeper.shape(),
-                            })
-                        });
-                        if at.is_none() {
-                            self.done.nowhere += 1;
-                            kept = Some(Unfound::Nowhere(shapes));
-                        }
-                        at
-                    }
-                    None => {
-                        self.done.nowhere += 1;
-                        kept = Some(Unfound::Nowhere(shapes));
-                        None
-                    }
-                },
-                // Gone, its removal is heard in a parent: its handle never
-                // opens again.
-                Resolved::Gone => {
-                    self.done.gone += 1;
-                    kept = Some(Unfound::Gone);
-                    None
-                }
-                // No mount reaches it, or no mark kept has it: no root holds
-                // it, until a mount or an index changes (a folder renamed as
-                // it was opened is reached by none, and changes its index).
-                Resolved::Unreachable(_) | Resolved::Unmarked => {
-                    self.done.unreached += 1;
-                    kept = Some(Unfound::Nowhere(shapes));
-                    None
-                }
-                // Not kept: it lowers the coverage of its filesystem.
-                Resolved::Failed(_) => {
-                    self.done.failed += 1;
-                    failed.insert(folder.fsid);
-                    None
-                }
-            };
-            if let Some(at) = at {
+            let opened = resolver.resolve(folder);
+            let (at, kept) = self.placed(opened, folder.fsid, shapes, &mut failed);
+            let at = if let Some(at) = at {
                 if self.found.len() >= FOUND_KEPT {
                     self.found.clear();
                 }
                 self.found.insert(folder.clone(), at);
                 self.done.found_again += 1;
                 charges.push((at.root, at.folder, thread_time().saturating_sub(start)));
-            } else if let Some(kept) = kept {
-                if self.unfound.len() >= FOUND_KEPT {
-                    self.unfound.clear();
+                Where::At(at.root, at.folder)
+            } else {
+                let held = matches!(kept, Some(Unfound::Held(_)));
+                if let Some(kept) = kept {
+                    if self.unfound.len() >= FOUND_KEPT {
+                        self.unfound.clear();
+                    }
+                    self.unfound.insert(folder.clone(), kept);
                 }
-                self.unfound.insert(folder.clone(), kept);
-            }
-            found.insert(folder.clone(), at.map(|at| (at.root, at.folder)));
+                if held { Where::Held } else { Where::Nowhere }
+            };
+            found.insert(folder, at);
+            wheres.push(at);
         }
-        (found, failed, charges, held)
+        drop(resolver);
+        self.table = table;
+        (wheres, failed, charges)
+    }
+
+    /// Where the folder whose handle opened to `resolved` is in an index,
+    /// if it is, and what is kept of it found in none
+    /// ([`Writing::find_heard`]). One whose handle failed to open lowers its
+    /// filesystem's coverage, its id put in `failed`.
+    fn placed(
+        &mut self,
+        resolved: Resolved,
+        fsid: u64,
+        shapes: u64,
+        failed: &mut BTreeSet<u64>,
+    ) -> (Option<Found>, Option<Unfound>) {
+        // What is kept of it found in no index, if anything.
+        let mut kept = None;
+        let at = match resolved {
+            Resolved::At(path, id) => match self.shared.locate(&path) {
+                // In a root being opened: held until it is.
+                Some((root, _)) if self.opening_root(root) => {
+                    self.done.held += 1;
+                    kept = Some(Unfound::Held(root));
+                    None
+                }
+                Some((root, rel)) => {
+                    let at = self.keepers[root].as_ref().and_then(|keeper| {
+                        keeper.folder_of(&rel, id).map(|f| Found {
+                            root,
+                            folder: f,
+                            id,
+                            shape: keeper.shape(),
+                        })
+                    });
+                    if at.is_none() {
+                        self.done.nowhere += 1;
+                        kept = Some(Unfound::Nowhere(shapes));
+                    }
+                    at
+                }
+                None => {
+                    self.done.nowhere += 1;
+                    kept = Some(Unfound::Nowhere(shapes));
+                    None
+                }
+            },
+            // Gone, its removal is heard in a parent: its handle never
+            // opens again.
+            Resolved::Gone => {
+                self.done.gone += 1;
+                kept = Some(Unfound::Gone);
+                None
+            }
+            // No mount reaches it, or no mark kept has it: no root holds
+            // it, until a mount or an index changes (a folder renamed as
+            // it was opened is reached by none, and changes its index).
+            Resolved::Unreachable(_) | Resolved::Unmarked => {
+                self.done.unreached += 1;
+                kept = Some(Unfound::Nowhere(shapes));
+                None
+            }
+            // Not kept: it lowers the coverage of its filesystem.
+            Resolved::Failed(_) => {
+                self.done.failed += 1;
+                failed.insert(fsid);
+                None
+            }
+        };
+        (at, kept)
     }
 
     /// Whether root `root` is being opened, its events held.
@@ -1860,37 +1901,28 @@ impl Writing<'_> {
         };
         let now = Instant::now();
         self.done.events += heard.len() as u64;
-        let (found, failed, charges, held) = self.find_heard(&group, &heard);
+        let (wheres, failed, charges) = self.find_heard(&group, &heard);
         let mut lowered = BTreeSet::new();
-        for h in heard {
-            match h {
-                fanotify::Heard::Entry(folder, name) => {
-                    if held.contains(&folder) {
-                        self.hold(HeldEvent::Marks(
-                            generation,
-                            fanotify::Heard::Entry(folder, name),
-                        ));
-                    } else if let Some(&Some((root, f))) = found.get(&folder) {
-                        self.gather.note_entry(root, f, name, now);
-                    }
+        // Each event with where its folder was found, in step.
+        for (h, at) in heard.into_iter().zip(wheres) {
+            match (h, at) {
+                (h @ (fanotify::Heard::Entry(..) | fanotify::Heard::Changed(_)), Where::Held) => {
+                    self.hold(HeldEvent::Marks(generation, h));
                 }
-                fanotify::Heard::Changed(folder) => {
-                    if held.contains(&folder) {
-                        self.hold(HeldEvent::Marks(
-                            generation,
-                            fanotify::Heard::Changed(folder),
-                        ));
-                    } else if let Some(&Some((root, f))) = found.get(&folder) {
-                        self.gather.note(root, f, now);
-                    }
+                (fanotify::Heard::Entry(_, name), Where::At(root, f)) => {
+                    self.gather.note_entry(root, f, name, now);
                 }
+                (fanotify::Heard::Changed(_), Where::At(root, f)) => {
+                    self.gather.note(root, f, now);
+                }
+                (fanotify::Heard::Entry(..) | fanotify::Heard::Changed(_), Where::Nowhere) => {}
                 // Only the current group's cookie proves its queue read.
-                fanotify::Heard::Cookie(n) => {
+                (fanotify::Heard::Cookie(n), _) => {
                     if group.generation() == generation {
                         self.cookie_heard(n);
                     }
                 }
-                fanotify::Heard::Overflow => {
+                (fanotify::Heard::Overflow, _) => {
                     self.done.overflows += 1;
                     self.opening_overflowed();
                     for (i, keeper) in self.keepers.iter_mut().enumerate() {

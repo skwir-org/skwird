@@ -1122,6 +1122,38 @@ What a wake costs beside its bookkeeping, the thread woken on a loaded
 machine, is to be measured; and the reader's 0.6% against the half
 point the account leaves it.
 
+**An event costs one look** (the same day, the user's run at
+`4360662`: idle 3.3% through a storm of 67,303 events in one save
+interval, most in folders no index holds; finding them some 5.5 µs an
+event, reading them some 3.6 µs, at a load of 12.5 to 29). The service
+marks whole filesystems: it reads and finds every event on them,
+whatever folder it names, and the account does not bound finding, which
+cannot wait. A profile of the service in the root tests' machine,
+through a storm like the user's (40 folders outside the root and 10 in
+it written every 10 ms, a folder made and removed each round), had the
+writer at 60% of the service's time and the reader at 40%:
+- **the reader,** mostly the kernel giving each event (its copy out, the
+  queue's lock), and two allocations an event of its own (its folder's
+  handle, its name);
+- **the writer,** flat: hashing each event's handle (about 6% of its
+  time), allocating and freeing (6%), its turn, the clock.
+The test machine boots with `clocksource=acpi_pm` (NixOS's test
+framework sets it): every clock read is then a slow port read, a
+quarter of the writer's time in a first profile. A trial of what events
+cost sets `clocksource=kvm-clock`, as fast as the user's `tsc`.
+
+The writer looked each event's handle up twice (once finding it, once
+noting what it heard), copied each folder's handle into the batch's
+map, and looked each folder up three times as it gathered it. Now the
+batch's map holds the handles as the batch does, and gives an answer an
+event, taken in step with the events; a folder is gathered with one
+look. Measured against the build before, alternately in one machine
+(the host's load then 13 to 20, so each trial is taken against the
+reader's time, the same code in both): the writer's time to the
+reader's went from 1.62 to 1.66 to 1.55 to 1.63, 2 to 4% less. What an
+event costs is not its looks: the kernel's part, the wakes and the
+allocations remain.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

@@ -300,14 +300,13 @@ impl Gather {
     /// A change heard in `folder` of root `root`, of the folder itself:
     /// it is to be read whole.
     pub fn note(&mut self, root: usize, folder: FolderId, now: Instant) {
-        self.gathered(root, folder, now).names = None;
+        self.gathered(root, folder, now).0.names = None;
     }
 
     /// A change heard in the entry `name` of `folder`: of what the folder
     /// held, that entry alone is to be stat-ed again.
     pub fn note_entry(&mut self, root: usize, folder: FolderId, name: Box<[u8]>, now: Instant) {
-        let fresh = !self.heard.contains_key(&(root, folder));
-        let g = self.gathered(root, folder, now);
+        let (g, fresh) = self.gathered(root, folder, now);
         if fresh {
             g.names = Some(HashSet::new());
         }
@@ -319,25 +318,33 @@ impl Gather {
         }
     }
 
-    fn gathered(&mut self, root: usize, folder: FolderId, now: Instant) -> &mut Gathered {
+    /// `folder` of `root` heard at `now`, and whether it is new: one look
+    /// for each event.
+    fn gathered(&mut self, root: usize, folder: FolderId, now: Instant) -> (&mut Gathered, bool) {
         // The check after an overflow waits for the queue to be quiet.
         if let Some(at) = self.recheck.as_mut() {
             *at = (*at).max(now + self.backoff);
         }
-        if !self.heard.contains_key(&(root, folder)) {
-            let at = now + QUIET;
-            self.soonest = Some(self.soonest.map_or(at, |s| s.min(at)));
-            let forced = at + window();
-            self.forced_at = Some(self.forced_at.map_or(forced, |f| f.min(forced)));
+        match self.heard.entry((root, folder)) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let g = e.into_mut();
+                g.last = now;
+                (g, false)
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let at = now + QUIET;
+                self.soonest = Some(self.soonest.map_or(at, |s| s.min(at)));
+                let forced = at + window();
+                self.forced_at = Some(self.forced_at.map_or(forced, |f| f.min(forced)));
+                let g = v.insert(Gathered {
+                    first: now,
+                    last: now,
+                    names: None,
+                    owed: Duration::ZERO,
+                });
+                (g, true)
+            }
         }
-        let g = self.heard.entry((root, folder)).or_insert(Gathered {
-            first: now,
-            last: now,
-            names: None,
-            owed: Duration::ZERO,
-        });
-        g.last = now;
-        g
     }
 
     /// Finding `folder` of root `root`, heard, took `took` of the writer's
