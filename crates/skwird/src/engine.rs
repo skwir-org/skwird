@@ -67,6 +67,9 @@ pub struct Shared {
     pub running: Arc<std::sync::Mutex<std::collections::HashMap<u32, usize>>>,
     /// The connections each user holds open now.
     pub connections: Arc<std::sync::Mutex<std::collections::HashMap<u32, usize>>>,
+    /// When each user last asked the writer for work (a sync, a
+    /// registration, the journal), at the system service.
+    pub asked: std::sync::Mutex<std::collections::HashMap<u32, Instant>>,
     pub published: RwLock<Vec<Published>>,
 }
 
@@ -92,6 +95,7 @@ impl Shared {
             above,
             running: Arc::default(),
             connections: Arc::default(),
+            asked: std::sync::Mutex::default(),
             published: RwLock::new(vec![Published::Opening; n]),
         }
     }

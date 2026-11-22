@@ -479,6 +479,31 @@ impl Running {
     }
 }
 
+/// How often a user other than root asks the system service's writer for
+/// work: a sync, a registration, the journal.
+const ASK_EVERY: Duration = Duration::from_secs(1);
+
+/// Whether `who` asks the writer too soon after their last ask, which is
+/// then refused; otherwise this ask is noted.
+fn too_soon(shared: &Shared, who: &Asker) -> bool {
+    if !shared.system || who.is_root() {
+        return false;
+    }
+    let mut asked = shared
+        .asked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if asked
+        .get(&who.uid)
+        .is_some_and(|&last| now.duration_since(last) < ASK_EVERY)
+    {
+        return true;
+    }
+    asked.insert(who.uid, now);
+    false
+}
+
 /// A query answered on a thread of its own, so that a `cancel` can reach
 /// it, its flag kept in `cancels` while it runs.
 fn spawn_query(
@@ -541,6 +566,13 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 Ok(c) => Answer::Coverage(c),
                 Err(a) => a,
             },
+            // The writer is the whole service's: at the system service, a
+            // user other than root asks it for work at most once a second.
+            Ask::Sync { .. } | Ask::Exclude { .. } | Ask::Changes { .. }
+                if too_soon(shared, who) =>
+            {
+                failure("busy", "the system service takes this once a second a user")
+            }
             Ask::Sync { root } => sync(shared, commands, &root, who),
             Ask::Query(query) => {
                 let Some(running) = Running::query(shared, who.uid) else {
@@ -875,6 +907,28 @@ fn answer_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At the system service, a user other than root asks the writer for
+    /// work once a second at most; root, and a user's engine, at will.
+    #[test]
+    fn a_user_asks_the_writer_once_a_second() {
+        let shared = Shared::new(Vec::new(), true);
+        let someone = Asker {
+            uid: 1000,
+            gid: 1000,
+            groups: Vec::new(),
+        };
+        let root = Asker {
+            uid: 0,
+            gid: 0,
+            groups: Vec::new(),
+        };
+        assert!(!too_soon(&shared, &someone));
+        assert!(too_soon(&shared, &someone), "again at once");
+        assert!(!too_soon(&shared, &root) && !too_soon(&shared, &root));
+        let user = Shared::new(Vec::new(), false);
+        assert!(!too_soon(&user, &someone) && !too_soon(&user, &someone));
+    }
 
     /// At the system service, a user runs at most so many queries at once,
     /// another user's not counted; one ended gives its place back. A user's

@@ -480,6 +480,8 @@ fn each_users_own_exclusions_hold_for_their_own_folders() {
         &[],
         Some(&one.join("projects")),
     );
+    // A user asks the service for such work once a second at most.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     as_user_with(
         &service.socket,
         &place.0,

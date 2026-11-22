@@ -1262,8 +1262,10 @@ committed once the gate holds.
    - a folder whose ACL was read was still a hole, and a hole for one
      not read came only when a name matched.
 
-   Left, as the review found them: the writer's load each user can ask
-   for (a sync derives every exclusion again and may check a whole
+   The writer's load each user can ask for is held to once a second a
+   user (a sync, a registration, the journal). Left, as the review found
+   them: what one such ask costs
+   (a sync derives every exclusion again and may check a whole
    root, registering and withdrawing a folder refreshes its root,
    reading the journal reads the log) and no time limit on a query. The
    folders above a root, taken as they were at the start, are judged

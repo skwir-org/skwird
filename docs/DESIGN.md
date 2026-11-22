@@ -455,7 +455,9 @@ proved as root in the test machine on Linux 6.18.58):
   gives at most 100,000 results, past which its `done` says there were
   more; a user runs at most four queries at once, a fifth refused, busy,
   and holds at most 64 connections open, each a thread of the service's,
-  the next closed. Each request is a line of bounded length. Not yet: a
+  the next closed; a user other than root asks the writer for work (a
+  sync, a registration, the journal) once a second at most, the next
+  refused, busy. Each request is a line of bounded length. Not yet: a
   time limit, and the answers kept per asker
   across queries. The journal is filtered for each asker (Protocol,
   `changes`).
