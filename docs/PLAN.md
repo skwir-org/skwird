@@ -1092,6 +1092,30 @@ committed once the gate holds.
    filesystem, btrfs through the detached top-level mount, events
    resolved to their folders by handle; an overflow, a mark refused and
    a handle that does not open lower coverage, for what they concern.
+
+   **Done on 2026-11-22.** `skwird_crawl::fanotify`: a group, its marks,
+   its events read as folders by handle and names, and a resolver that
+   opens a handle to the folder's device and inode (DESIGN 3, "As
+   built"). Ten root tests prove, in the machine, on ext4 and on btrfs:
+   - a change heard by its folder's handle, which opens to it: names
+     with a space and an accent, made, moved and removed, and the
+     folders made, each in its parent;
+   - btrfs marked through its top level once for all its subvolumes,
+     the mount made for it gone, and heard in each;
+   - an overflow;
+   - a folder removed: its handle gone, its removal heard in its parent
+     after;
+   - a folder moved, heard in both parents; a folder's mode changed,
+     heard as the folder itself;
+   - a cookie after a change on another filesystem: one queue (open
+     question 1);
+   - a mount over the filesystem's folder not taken for it;
+   - a filesystem without handles (ramfs) refused.
+
+   Root tests run one at a time in the machine: they mark and mount on
+   the machine's shared filesystems. Not done here: the engine that
+   uses it (step 4), and a test of two filesystems with one id, which
+   needs two filesystems made alike.
 4. **The system engine** (`skwird serve --system`): its roots (DESIGN
    1), its socket (`/run/skwird/socket`), its index readable by it
    alone, every folder's owner, group, mode and ACL, live from fanotify

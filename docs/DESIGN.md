@@ -300,6 +300,39 @@ prove live coverage. A mount, a mark or a handle that fails lowers
 coverage, and phase 3 tests an overflow, a mount or subvolume appearing,
 and a handle that does not open.
 
+**As built** (phase 3, step 3, 2026-11-22: `skwird_crawl::fanotify`,
+proved as root in the test machine on Linux 6.18.58):
+- **One mark a filesystem,** known by the device the mount table gives
+  it, which every subvolume of one btrfs shares: a btrfs mounted
+  through a subvolume was marked through its top level once, and a
+  change made in each of three subvolumes was heard.
+- **The mount made for the mark is let go of at once.** The mark is the
+  superblock's and outlives it: the changes above were made after it
+  was gone.
+- **Nothing of a filesystem is held open.** A descriptor kept on a mount
+  would make its user's `umount` fail, and then a `cryptsetup close`
+  run after it. Handles are opened through a mount of the filesystem,
+  found in the mount table when they are read, and known to be that
+  mount by its mount id: a mount put over its point since is not taken
+  for it, and the handle fails to open rather than open to another
+  folder.
+- **An event names its folder by handle;** opened and stat-ed, the
+  handle gives the folder's device and inode, as the index keeps them.
+  Each handle heard opened to its folder, in its own subvolume.
+- **A handle that no longer opens (`ESTALE`) is a folder gone,** and
+  proves nothing lost. A folder is emptied before it is removed, and
+  the removal of the topmost folder removed is heard in its parent,
+  which is still there, after what was heard in the folder. Any other
+  failure to open a handle proves nothing heard on that filesystem.
+- **A folder's own attributes changed** (a `chmod`) are heard as that
+  folder changed, by its own handle, and a folder moved in both its
+  parents.
+- **Two filesystems with one id** are not both marked: their events
+  could not be told apart. A filesystem that cannot give handles
+  (`ramfs`) refuses the mark, and says so.
+- **The queue holds 16,384 events:** more, unread, are heard as an
+  overflow.
+
 ### 4. A system service answers only what the asker could list
 
 - **Who asks** comes from the transport: `SO_PEERCRED` and
@@ -804,8 +837,11 @@ it at once.
 1. **Cookies:** answered for inotify on 2026-11-21 (phase 2, step 4). A
    user's engine has one inotify instance, so one queue: its cookies go in
    a folder of its own in its runtime folder, whatever filesystem the
-   folders it watches are on. Open for fanotify, whose one queue holds
-   every mark's events, and for the change journal. FSEvents flushes
+   folders it watches are on. Answered for fanotify on 2026-11-22 (phase
+   3, step 3): a group has one queue for all its marks, so a cookie made
+   on any filesystem marked comes after every event queued before it, on
+   any other; a cookie on ext4 came after a change made just before on
+   a btrfs. Open for the change journal. FSEvents flushes
    instead (`FSEventStreamFlushSync`).
 2. **Engines and watches:**
    - how a user's engine and the system service share work;

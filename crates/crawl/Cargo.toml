@@ -8,7 +8,11 @@ publish = false
 description = "skwird's crawl: every folder under a root read, and the check that proves the names current"
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["mount"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# fanotify and file handles, which rustix has no binding for.
+libc.workspace = true
 
 [dev-dependencies]
 skwird-testkit.workspace = true

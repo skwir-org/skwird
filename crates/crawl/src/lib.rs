@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub mod exclude;
+pub mod fanotify;
 pub mod mounts;
 
 #[cfg(target_os = "linux")]

@@ -65,6 +65,6 @@ in
       assert tests, "no test binaries in ${dir}"
       for test in tests:
           with subtest(test):
-              print(machine.succeed(f"cd /root && SKWIRD_TEST_MACHINE=1 ${dir}/{test} 2>&1"))
+              print(machine.succeed(f"cd /root && SKWIRD_TEST_MACHINE=1 ${dir}/{test} --test-threads=1 2>&1"))
     '';
   }
