@@ -376,6 +376,38 @@ system_log() {
     echo "the service's log (counts and times):"
     sed 's/^/  /' "$sys_dir/engine.log"
 }
+# What the service's threads did while one operation ran, its time apart
+# from the machine's: their time on a processor, and their time waiting
+# for one (the kernel's schedstat, each thread's run and run delay, in
+# ns). A query's threads end with it, and a thread's counts with the
+# thread: each is sampled every 20 ms, as root, so that one that ends
+# loses its last 20 ms at most. Counts alone.
+threads_begin() {
+    threads_at=$(mktemp -d "$cache/threads.XXXXXX")
+    # The pass is root's shell's to expand (SC2016), and what it says is
+    # written to the user's own files, as meant (SC2024).
+    # shellcheck disable=SC2016
+    local pass='for t in /proc/$1/task/*; do read -r run wait _ 2>/dev/null <"$t/schedstat" && echo "${t##*/} $run $wait"; done'
+    # shellcheck disable=SC2024
+    sudo -n sh -c "$pass" sh "$sys_pid" >"$threads_at/before"
+    # shellcheck disable=SC2024
+    sudo -n sh -c "while [ ! -e \"\$2\" ] && [ -d \"/proc/\$1\" ]; do $pass; sleep 0.02; done; $pass" \
+        sh "$sys_pid" "$threads_at/stop" >"$threads_at/during" &
+    threads_sampler=$!
+}
+threads_end() {
+    : >"$threads_at/stop"
+    wait "$threads_sampler" 2>/dev/null || true
+    awk 'NR == FNR { run0[$1] = $2; wait0[$1] = $3; next }
+        { run[$1] = $2; wait[$1] = $3 }
+        END {
+            for (t in run) { r += run[t] - run0[t]; w += wait[t] - wait0[t] }
+            printf "%.2f s on a processor, %.2f s waiting for one", r / 1e9, w / 1e9
+        }' "$threads_at/before" "$threads_at/during"
+    rm -rf "$threads_at"
+}
+# The processor time `time` said of a client ("%3U %3S", in $1).
+client_time() { awk '{ printf "%.2f s on a processor", $1 + $2 }' "$1"; }
 measure_system() {
     if [ -S /run/skwird/socket ]; then
         echo "(a system service runs here: not measured, so as not to meet it)"
@@ -419,16 +451,28 @@ measure_system() {
     done
     # One not answered in 10 s is counted at 10 s, and said.
     printf '%s\n' "${times[@]}" | sort -n | awk -v late="$late" '{ a[NR] = $1 } END { printf "a change to its answer, live (%d files made): median %d ms, most %d ms", NR, a[int((NR + 1) / 2)], a[NR]; if (late > 0) printf " (%d not answered within 10 s, counted at 10 s)", late; printf "\n" }'
+    # Each said with what the service's threads did meanwhile, and what
+    # the client did: whether its time is the work, or waiting for a
+    # processor at its niceness, or neither (the disk, a lock).
+    local TIMEFORMAT='%3U %3S' client took
+    client=$(mktemp "$cache/client.XXXXXX")
+    threads_begin
     start=$(now)
-    sysw sync "$HOME" >/dev/null
-    echo "a sync of your home (the barrier): $(since "$start") s"
-    start=$(now)
+    { time sysw sync "$HOME" >/dev/null 2>&1; } 2>"$client"
+    took=$(since "$start")
+    echo "a sync of your home (the barrier): $took s; the service meanwhile: $(threads_end); the client: $(client_time "$client")"
     local n
-    n=$(sysw find e --in "$HOME" --limit 100000 2>/dev/null | wc -l)
-    echo "a query of your home as you, filtered for you: $(since "$start") s, $n results"
+    threads_begin
     start=$(now)
-    n=$(sudo -n env XDG_RUNTIME_DIR="$sys_dir/run" SKWIRD_NO_START=1 "$engine" find e --in "$HOME" --limit 100000 2>/dev/null | wc -l)
-    echo "the same as root, not filtered: $(since "$start") s, $n results"
+    n=$({ time sysw find e --in "$HOME" --limit 100000 2>/dev/null | wc -l; } 2>"$client")
+    took=$(since "$start")
+    echo "a query of your home as you, filtered for you: $took s, $n results; the service meanwhile: $(threads_end); the client: $(client_time "$client")"
+    threads_begin
+    start=$(now)
+    n=$({ time sudo -n env XDG_RUNTIME_DIR="$sys_dir/run" SKWIRD_NO_START=1 "$engine" find e --in "$HOME" --limit 100000 2>/dev/null | wc -l; } 2>"$client")
+    took=$(since "$start")
+    echo "the same as root, not filtered: $took s, $n results; the service meanwhile: $(threads_end); the client: $(client_time "$client")"
+    rm -f "$client"
     local before
     before=$(sudo -n awk '{ print $14 + $15 }' "/proc/$sys_pid/stat")
     sleep 30

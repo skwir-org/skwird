@@ -1452,6 +1452,17 @@ committed once the gate holds.
    The two tests of the watches that failed under load are made to hold
    there.
 
+   **Measured at `f19f5ea`**, at a load of 6.7 to 13.7: a change
+   answered in 264 ms at the median and 9.67 s at most; the sync 0.13 s;
+   the query as the user 1.09 s against 1.17 as root (0.93 times: its
+   growth over the three runs before was the load's); read back 1.12 s;
+   idle 1.3%. A filesystem unmounted while it ran was let go of. The I/O
+   class cannot be what held the sync: the home's disk takes no I/O
+   scheduler, which leaves the classes unread. The measurement now says,
+   for the sync and the queries, what the service's threads did
+   meanwhile (on a processor, waiting for one) and the client's time:
+   whether the service's niceness holds them.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
