@@ -85,8 +85,8 @@ configured:
 - network mounts (2);
 - removable volumes, until open question 8 is answered: not covered,
   removable;
-- btrfs snapshots (read-only subvolumes) below a root: left out, as
-  excluded, their names kept (open question 10).
+- btrfs snapshots (read-only subvolumes) below a root: left out, not
+  covered (snapshot), their names kept (open question 10).
 
 A configuration file names other exclusions, as a user's does (5).
 
@@ -159,7 +159,8 @@ says one of:
 - **Not covered**, and why: outside the engine's roots, excluded,
   private (a `.private` file), permission denied, a read that failed or
   was cut short, gone or replaced since its parent was read, a mount
-  below the root, a network mount, not read yet, a watch limit reached.
+  below the root, a network mount, a btrfs snapshot (a copy of what it
+  was taken of, not private), not read yet, a watch limit reached.
 
 The kinds of fact are:
 - **names** (and kinds: file, folder, link, other);
@@ -1042,6 +1043,10 @@ A warm run sets it. The index on disk was 294 MB.
     whole, a copy of the system each. Answered on 2026-11-22, the
     user's choice: a snapshot below a root, a read-only subvolume (its
     top folder inode 256, btrfs saying read-only), is left out, its name
-    kept, not covered as excluded (no reason of its own: a client of the
-    crates vendored now would not read one); a root named as a snapshot
+    kept, not covered: snapshot, a reason of its own. Excluded says a
+    rule kept a folder out, and a client walks it when its user searches
+    there; a snapshot is a copy, which a client that walks what is not
+    covered (skwir's ADR-026) passes over below the folder searched, as
+    too costly, as skwir's own list keeps tool stores from searches
+    (its ADR-125), and walks when searched in. A root named as a snapshot
     is read. A root test proves both, beside a writable subvolume read.

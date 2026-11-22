@@ -121,6 +121,7 @@ pub(crate) fn state_code(state: State) -> (u64, u64) {
             Why::Replaced => (8, 0),
             Why::Mount => (9, 0),
             Why::NetworkMount => (10, 0),
+            Why::Snapshot => (12, 0),
             Why::Unread => (11, 0),
         },
     }
@@ -141,6 +142,7 @@ pub(crate) fn state_of(code: u64, errno: u64) -> Option<State> {
         9 => State::NotCovered(Why::Mount),
         10 => State::NotCovered(Why::NetworkMount),
         11 => State::NotCovered(Why::Unread),
+        12 => State::NotCovered(Why::Snapshot),
         _ => return None,
     })
 }

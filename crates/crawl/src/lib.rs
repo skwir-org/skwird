@@ -235,6 +235,9 @@ pub enum Why {
     Mount,
     /// A network mount starts there: never crawled (decision 2).
     NetworkMount,
+    /// A btrfs snapshot below the root, a read-only subvolume: left out,
+    /// each another copy of what it was taken of (open question 10).
+    Snapshot,
     /// Found, not read yet: a folder made since its parent was read,
     /// waiting for its crawl.
     Unread,

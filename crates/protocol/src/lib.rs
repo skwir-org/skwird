@@ -129,6 +129,11 @@ pub enum Why {
     Mount,
     /// A network mount starts there: never crawled.
     NetworkMount,
+    /// A btrfs snapshot below the root, a read-only subvolume: left out,
+    /// each another copy of what it was taken of. Not private: a client
+    /// that walks what is not covered may pass it over below the folder
+    /// searched, as too costly, and walk it when searched in.
+    Snapshot,
     /// Found, not read yet.
     Unread,
     /// The watches it needs passed the system's limit.

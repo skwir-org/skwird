@@ -8,7 +8,7 @@
 # How far answers below a root can be trusted: names checked, attributes
 # as of the last whole crawl, and a subtree not covered.
 > {"id":2,"coverage":{"root":"/home/user/Documents"}}
-< {"id":2,"coverage":{"names":{"checked":{"sec":1795000000,"nsec":0}},"attrs":{"as_of":{"sec":1794990000,"nsec":0}},"holes":[{"path":"/home/user/Documents/shut","why":"denied"},{"path":"/home/user/Documents/broken","why":{"failed":5}}]}}
+< {"id":2,"coverage":{"names":{"checked":{"sec":1795000000,"nsec":0}},"attrs":{"as_of":{"sec":1794990000,"nsec":0}},"holes":[{"path":"/home/user/Documents/shut","why":"denied"},{"path":"/home/user/Documents/broken","why":{"failed":5}},{"path":"/home/user/Documents/as of monday","why":"snapshot"}]}}
 # Sync: the check run now, the coverage as of a time after the request.
 > {"id":3,"sync":{"root":"/home/user/Documents"}}
 < {"id":3,"coverage":{"names":{"checked":{"sec":1795000100,"nsec":5}},"attrs":{"as_of":{"sec":1794990000,"nsec":0}}}}

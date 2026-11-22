@@ -433,7 +433,7 @@ fn read(
         && root.fs == "btrfs"
         && btrfs::read_only_subvolume(fd.as_fd())
     {
-        return not_covered(Some(stat), Why::Excluded);
+        return not_covered(Some(stat), Why::Snapshot);
     }
     if stat.mount != root.stat.mount {
         return not_covered(Some(stat), Why::Mount);

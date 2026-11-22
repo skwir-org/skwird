@@ -49,6 +49,7 @@ pub fn why(w: Why) -> wire::Why {
         Why::Replaced => wire::Why::Replaced,
         Why::Mount => wire::Why::Mount,
         Why::NetworkMount => wire::Why::NetworkMount,
+        Why::Snapshot => wire::Why::Snapshot,
         Why::Unread => wire::Why::Unread,
     }
 }

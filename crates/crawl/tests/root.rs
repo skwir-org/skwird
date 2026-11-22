@@ -112,7 +112,7 @@ fn a_snapshot_below_a_root_is_left_out() {
         c.folders
             .iter()
             .find(|f| f.rel == std::path::Path::new(rel))
-            .map(|f| matches!(f.outcome, Outcome::NotCovered(Why::Excluded)))
+            .map(|f| matches!(f.outcome, Outcome::NotCovered(Why::Snapshot)))
     };
     let below = crawl(&place.0);
     assert_eq!(outcome(&below, "snapshot"), Some(true), "left out");
