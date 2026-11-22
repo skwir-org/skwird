@@ -474,6 +474,20 @@ The default exclusions hold in every home the user database names.
 What the user's clients register with the service itself is kept for
 them by the service.
 
+**As built** (phase 3, step 6, 2026-11-22): the users are the user
+database's entries (`/etc/passwd`) and each folder in `/home` by its
+owner. A user's two files are opened through their home's handle,
+following no link and staying beneath it (`openat2`), and taken only if
+they are files the user or root owns that no other user may write
+(group and others' write bits clear); a mebibyte at most. Each folder
+they name, and each a user registers with the service (kept with their
+user id), is resolved, then kept only if the folder it resolves to is
+still that folder (its identity) and the user owns it, or, where none is
+there yet, if it is in a home the user owns; root owns every folder.
+They are derived again with every other exclusion: at the service's
+start, at each sync and at each registration. A user whose files are
+not at the default places has what their clients register.
+
 An exclusion, like a root, is resolved once to the folder it names, and
 compared as that folder (its identity, or its range in the index),
 never as the spelling of a path. In fsearch, an exclusion written with a

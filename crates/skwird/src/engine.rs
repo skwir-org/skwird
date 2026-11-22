@@ -137,6 +137,8 @@ pub enum Command {
     /// A client's registrations: folders it keeps out of the index.
     Exclude {
         client: String,
+        /// At the system service, the user asking.
+        uid: Option<u32>,
         add: Vec<PathBuf>,
         remove: Vec<PathBuf>,
         reply: Sender<Vec<PathBuf>>,
@@ -167,6 +169,11 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Registration {
     client: String,
+    /// At the system service, the user it is for: it applies only to
+    /// folders they own (DESIGN 5). None at a user's engine, whose user
+    /// it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
     path: WirePath,
 }
 
@@ -232,17 +239,60 @@ fn exclusions(config: &Config, registrations: &[Registration]) -> (Exclusions, u
         .iter()
         .flat_map(|home| skwird_crawl::exclude::defaults(home))
         .chain(configured(dirs))
-        .chain(registrations.iter().map(|r| r.path.to_path()))
+        .chain(
+            registrations
+                .iter()
+                .filter(|r| r.uid.is_none())
+                .map(|r| r.path.to_path()),
+        )
         .chain(own)
         .chain(store);
-    let (exclusions, refused) = Exclusions::resolve(paths);
-    (exclusions, refused.len())
+    let (mut exclusions, refused) = Exclusions::resolve(paths);
+    let mut refused = refused.len();
+    if config.system {
+        refused += users_own(&mut exclusions, registrations);
+    }
+    (exclusions, refused)
+}
+
+/// Each user's own exclusions, for the system service (DESIGN 5): their
+/// file, what their engine's clients registered, and what their clients
+/// registered with the service, each kept only if they own the folder it
+/// resolves to. Gives how many were refused, theirs or not resolvable.
+fn users_own(exclusions: &mut Exclusions, registrations: &[Registration]) -> usize {
+    let users = crate::system::users();
+    let mut refused = 0;
+    let mut keep = |uid: u32, home: &Path, path: &Path| {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        let kept = exclusions.insert_if(path, |resolved, id| {
+            crate::system::owned(uid, &home, resolved, id)
+        });
+        if !matches!(kept, Ok(true)) {
+            refused += 1;
+        }
+    };
+    for (uid, home) in &users {
+        for path in crate::system::own_exclusions(home, *uid) {
+            keep(*uid, home, &path);
+        }
+    }
+    for r in registrations {
+        let Some(uid) = r.uid else { continue };
+        // A user the database does not name owns no home to keep a folder
+        // not made yet in: theirs only where they own one there now.
+        let home = users
+            .iter()
+            .find(|(u, _)| *u == uid)
+            .map_or_else(PathBuf::new, |(_, h)| h.clone());
+        keep(uid, &home, &r.path.to_path());
+    }
+    refused
 }
 
 fn log_refused(refused: usize) {
     if refused > 0 {
         log(&format!(
-            "{refused} exclusions refused: empty, relative or unresolvable"
+            "{refused} exclusions refused: empty, relative, unresolvable, or a user's for a folder not theirs"
         ));
     }
 }
@@ -529,12 +579,13 @@ impl Writing<'_> {
             }
             Command::Exclude {
                 client,
+                uid,
                 add,
                 remove,
                 reply,
             } => {
-                self.register(&client, &add, &remove);
-                let _ = reply.send(theirs(&self.registrations, &client));
+                self.register(&client, uid, &add, &remove);
+                let _ = reply.send(theirs(&self.registrations, &client, uid));
             }
             Command::Watch {
                 client,
@@ -542,11 +593,11 @@ impl Writing<'_> {
                 remove,
                 reply,
             } => {
-                if changed(&mut self.kept_live, &client, &add, &remove) {
+                if changed(&mut self.kept_live, &client, None, &add, &remove) {
                     save_registered(&self.config.dirs, WATCHED, &self.kept_live);
                     self.apply_scopes();
                 }
-                let _ = reply.send(theirs(&self.kept_live, &client));
+                let _ = reply.send(theirs(&self.kept_live, &client, None));
             }
             Command::Heard { generation, heard } => self.heard(generation, heard),
             Command::Marks { generation, heard } => self.noticed(generation, heard),
@@ -773,8 +824,8 @@ impl Writing<'_> {
 
     /// Take a client's registrations: what it adds is purged at once, what
     /// it takes back is read again. A client takes back only what it added.
-    fn register(&mut self, client: &str, add: &[PathBuf], remove: &[PathBuf]) {
-        if !changed(&mut self.registrations, client, add, remove) {
+    fn register(&mut self, client: &str, uid: Option<u32>, add: &[PathBuf], remove: &[PathBuf]) {
+        if !changed(&mut self.registrations, client, uid, add, remove) {
             return;
         }
         // Kept first: a kill before the purge's save leaves it to the next
@@ -792,11 +843,18 @@ impl Writing<'_> {
 
 /// A client's registrations changed: `add` taken, `remove` let go of if it
 /// was the client's. Says whether any changed.
-fn changed(all: &mut Vec<Registration>, client: &str, add: &[PathBuf], remove: &[PathBuf]) -> bool {
+fn changed(
+    all: &mut Vec<Registration>,
+    client: &str,
+    uid: Option<u32>,
+    add: &[PathBuf],
+    remove: &[PathBuf],
+) -> bool {
     let mut changed = false;
     for path in add.iter().filter(|p| p.is_absolute()) {
         let r = Registration {
             client: client.to_owned(),
+            uid,
             path: WirePath::of(path),
         };
         if !all.contains(&r) {
@@ -805,14 +863,16 @@ fn changed(all: &mut Vec<Registration>, client: &str, add: &[PathBuf], remove: &
         }
     }
     let before = all.len();
-    all.retain(|r| !(r.client == client && remove.iter().any(|p| WirePath::of(p) == r.path)));
+    all.retain(|r| {
+        !(r.client == client && r.uid == uid && remove.iter().any(|p| WirePath::of(p) == r.path))
+    });
     changed | (all.len() != before)
 }
 
-/// What `client` registered.
-fn theirs(all: &[Registration], client: &str) -> Vec<PathBuf> {
+/// What `client` registered, for user `uid` at the system service.
+fn theirs(all: &[Registration], client: &str, uid: Option<u32>) -> Vec<PathBuf> {
     all.iter()
-        .filter(|r| r.client == client)
+        .filter(|r| r.client == client && r.uid == uid)
         .map(|r| r.path.to_path())
         .collect()
 }

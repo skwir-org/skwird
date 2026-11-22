@@ -79,6 +79,27 @@ impl Exclusions {
         (exclusions, refused)
     }
 
+    /// Exclude `path` too, resolved as [`Exclusions::resolve`] resolves
+    /// it, if `keep` says so of the folder it resolves to: its resolved
+    /// path, and its identity if a folder is there. Says whether it was
+    /// kept. The system service keeps a user's exclusions so, each only
+    /// if that user owns the folder (DESIGN 5).
+    pub fn insert_if(
+        &mut self,
+        path: &Path,
+        keep: impl FnOnce(&Path, Option<FileId>) -> bool,
+    ) -> Result<bool, Refused> {
+        let (resolved, id) = resolve_one(path)?;
+        if !keep(&resolved, id) {
+            return Ok(false);
+        }
+        self.by_path.insert(resolved);
+        if let Some(id) = id {
+            self.by_id.insert(id);
+        }
+        Ok(true)
+    }
+
     /// Whether the folder with this identity, at this resolved path, is
     /// excluded.
     pub fn holds(&self, id: Option<FileId>, path: &Path) -> bool {

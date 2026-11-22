@@ -9,6 +9,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeSet;
+use std::fmt::Write;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -168,6 +169,18 @@ fn folder(place: &Place, rel: &str, owner: u32, group: u32, mode: u32) -> PathBu
 /// below `root`, and the folders said not covered, each prefixed so. Run
 /// as that user, by the test binary run again through `setpriv`.
 fn as_user(socket: &Path, root: &Path, uid: u32, gid: u32, groups: &[u32]) -> BTreeSet<String> {
+    as_user_with(socket, root, uid, gid, groups, None)
+}
+
+/// [`as_user`], the user keeping `exclude` out of the index first.
+fn as_user_with(
+    socket: &Path,
+    root: &Path,
+    uid: u32,
+    gid: u32,
+    groups: &[u32],
+    exclude: Option<&Path>,
+) -> BTreeSet<String> {
     let groups: Vec<String> = groups.iter().map(u32::to_string).collect();
     let mut c = Command::new("setpriv");
     c.args([
@@ -183,6 +196,9 @@ fn as_user(socket: &Path, root: &Path, uid: u32, gid: u32, groups: &[u32]) -> BT
     .args(["--exact", "an_asker", "--nocapture", "--test-threads=1"])
     .env("SKWIRD_TEST_PEER", socket)
     .env("SKWIRD_TEST_ROOT", root);
+    if let Some(folder) = exclude {
+        c.env("SKWIRD_TEST_EXCLUDE", folder);
+    }
     let out = c.output().unwrap();
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -210,6 +226,10 @@ fn an_asker() {
     };
     let root = PathBuf::from(root);
     let mut c = Client::at(Path::new(&socket), "an-asker").unwrap();
+    // A folder this user keeps out of the index, if the test asks.
+    if let Some(folder) = std::env::var_os("SKWIRD_TEST_EXCLUDE") {
+        c.exclude(&[Path::new(&folder)], &[]).unwrap();
+    }
     let everything = Query {
         name: None,
         ..named(&root, "")
@@ -307,4 +327,137 @@ fn each_user_is_answered_what_they_could_list() {
     assert!(all.contains("found acl/granted by an acl.txt"), "{all:?}");
     assert!(all.contains("found passage/inner"), "{all:?}");
     assert!(!all.iter().any(|s| s.starts_with("hole")), "{all:?}");
+}
+
+/// Two users the machine's user database names for the test, their homes
+/// in its place: added to `/etc/passwd`, which is put back as it was when
+/// dropped.
+struct Users {
+    before: String,
+}
+
+impl Users {
+    fn add(entries: &[(u32, &Path)]) -> Users {
+        let before = std::fs::read_to_string("/etc/passwd").unwrap();
+        let mut text = before.clone();
+        for (uid, home) in entries {
+            let _ = writeln!(text, "user{uid}:x:{uid}:{uid}::{}:/bin/sh", home.display());
+        }
+        std::fs::write("/etc/passwd", text).unwrap();
+        Users { before }
+    }
+}
+
+impl Drop for Users {
+    fn drop(&mut self) {
+        let _ = std::fs::write("/etc/passwd", &self.before);
+    }
+}
+
+/// A file below `place`, made with this owner and mode.
+fn owned_file(place: &Place, rel: &str, owner: u32, mode: u32, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = place.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    std::os::unix::fs::chown(&path, Some(owner), Some(owner)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Each user's own exclusions hold at the system service, for folders they
+/// own alone (DESIGN 5): their file and what their engine's clients
+/// registered, read from their home before any client of theirs connects;
+/// a file others may write is not theirs; what they register with the
+/// service, at once; another's folder, never.
+#[test]
+fn each_users_own_exclusions_hold_for_their_own_folders() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.ext4, "homes");
+    let one = folder(&place, "one", 1000, 1000, 0o755);
+    let two = folder(&place, "two", 1001, 1001, 0o755);
+    for (rel, owner) in [
+        ("one/projects", 1000),
+        ("one/hidden by their file", 1000),
+        ("one/hidden by their engine", 1000),
+        ("one/not theirs", 1001),
+        ("two/kept", 1001),
+    ] {
+        folder(&place, rel, owner, owner, 0o755);
+        owned_file(&place, &format!("{rel}/inside.txt"), owner, 0o644, "x");
+    }
+    for dir in [
+        "one/.config",
+        "one/.config/skwird",
+        "one/.local",
+        "one/.local/state",
+        "one/.local/state/skwird",
+        "two/.config",
+        "two/.config/skwird",
+    ] {
+        let owner = if dir.starts_with("one") { 1000 } else { 1001 };
+        folder(&place, dir, owner, owner, 0o755);
+    }
+    owned_file(
+        &place,
+        "one/.config/skwird/exclude",
+        1000,
+        0o644,
+        "# theirs\n~/hidden by their file\n~/not theirs\n",
+    );
+    owned_file(
+        &place,
+        "one/.local/state/skwird/registered",
+        1000,
+        0o600,
+        &format!(
+            "[{{\"client\":\"skwir\",\"path\":\"{}\"}}]",
+            one.join("hidden by their engine").display()
+        ),
+    );
+    // Others may write it: not theirs to say.
+    owned_file(
+        &place,
+        "two/.config/skwird/exclude",
+        1001,
+        0o666,
+        "~/kept\n",
+    );
+    let _users = Users::add(&[(1000, &one), (1001, &two)]);
+    let dirs = Place::new(&m.ext4, "homes-dirs");
+    let service = Service::start(&dirs.0, &[&place.0]);
+    let mut c = service.client(&place.0);
+    wait_for(20, "live", || live(&mut c, &place.0));
+    let found = |c: &mut Client| -> BTreeSet<PathBuf> {
+        answered(c, &named(&place.0, "inside"))
+            .into_iter()
+            .map(|p| p.strip_prefix(&place.0).unwrap().to_path_buf())
+            .collect()
+    };
+    let paths = |rels: &[&str]| -> BTreeSet<PathBuf> {
+        rels.iter()
+            .map(|r| PathBuf::from(r).join("inside.txt"))
+            .collect()
+    };
+    assert_eq!(
+        found(&mut c),
+        paths(&["one/projects", "one/not theirs", "two/kept"])
+    );
+    // Registered with the service: theirs at once; another's, never.
+    as_user_with(
+        &service.socket,
+        &place.0,
+        1000,
+        1000,
+        &[],
+        Some(&one.join("projects")),
+    );
+    as_user_with(
+        &service.socket,
+        &place.0,
+        1000,
+        1000,
+        &[],
+        Some(&two.join("kept")),
+    );
+    assert_eq!(found(&mut c), paths(&["one/not theirs", "two/kept"]));
 }

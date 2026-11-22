@@ -413,22 +413,21 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 continue;
             }
             // The system service's journal is not filtered for each asker
-            // yet, nor are registrations kept for each user (phase 3, step
-            // 6): another user is told so, and walks.
-            Ask::Changes { .. } | Ask::Exclude { .. } | Ask::Watch { .. }
-                if shared.system && !who.is_root() =>
-            {
-                failure(
-                    "unsupported",
-                    "the system service answers this for root alone so far",
-                )
-            }
+            // yet: another user than root is told so, and walks.
+            Ask::Changes { .. } if shared.system && !who.is_root() => failure(
+                "unsupported",
+                "the system service answers this for root alone so far",
+            ),
+            // The system service hears every folder already: nothing to
+            // keep, and the folders asked are said kept.
+            Ask::Watch { add, .. } if shared.system => Answer::Watching { folders: add },
             Ask::Changes { root, since } => changes(shared, commands, &root, since),
             Ask::Exclude { add, remove } => {
                 let (reply, answer) = channel();
                 let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
                 let asked = commands.send(Command::Exclude {
                     client: client.clone(),
+                    uid: shared.system.then_some(who.uid),
                     add: to_path(add),
                     remove: to_path(remove),
                     reply,

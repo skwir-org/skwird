@@ -4,6 +4,8 @@
 //! ones, network mounts, nor removable volumes (open question 8); and in
 //! every home, the default exclusions (decision 5).
 
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::path::PathBuf;
 
 use skwird_crawl::mounts::{Mount, Table};
@@ -116,6 +118,135 @@ fn passwd_homes(text: &str) -> Vec<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .collect()
+}
+
+/// The users the system service keeps exclusions for (DESIGN 5): each
+/// user database entry's id and home, and each folder in `/home` by its
+/// owner, for a home only another source of the user database names.
+#[cfg(target_os = "linux")]
+pub fn users() -> Vec<(u32, PathBuf)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut users: Vec<(u32, PathBuf)> = std::fs::read_to_string("/etc/passwd")
+        .map(|text| passwd_users(&text))
+        .unwrap_or_default();
+    if let Ok(entries) = std::fs::read_dir("/home") {
+        for e in entries.flatten() {
+            let path = e.path();
+            if let Ok(meta) = std::fs::symlink_metadata(&path)
+                && meta.is_dir()
+                && !users.iter().any(|(_, h)| *h == path)
+            {
+                users.push((meta.uid(), path));
+            }
+        }
+    }
+    users.retain(|(_, home)| home.as_os_str() != "/" && home.is_absolute());
+    users
+}
+
+/// Each entry's id and home, of a user database's text.
+#[cfg(target_os = "linux")]
+fn passwd_users(text: &str) -> Vec<(u32, PathBuf)> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            let uid = fields.get(2)?.parse().ok()?;
+            let home = fields.get(5).filter(|h| !h.is_empty())?;
+            Some((uid, PathBuf::from(home)))
+        })
+        .collect()
+}
+
+/// A file of a user's own, at `rel` in their home, read for the system
+/// service: opened through the home's handle, following no link and
+/// staying beneath it, and taken only if it is a file the user or root
+/// owns and no one else may write, as sshd reads a user's keys. At most a
+/// mebibyte.
+#[cfg(target_os = "linux")]
+pub fn read_own(home: &Path, uid: u32, rel: &str) -> Option<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags};
+    use std::io::Read;
+    let home_fd = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let fd = rustix::fs::openat2(
+        &home_fd,
+        rel,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .ok()?;
+    let st = rustix::fs::fstat(&fd).ok()?;
+    let file = rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::RegularFile;
+    if !file || (st.st_uid != uid && st.st_uid != 0) || st.st_mode & 0o022 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(1 << 20)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+/// A folder a user's engine's clients registered, as the file keeps it.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct Registered {
+    path: skwird_protocol::WirePath,
+}
+
+/// What a user keeps out of the index, read from their home: their
+/// exclusions (`~/.config/skwird/exclude`, one path a line, `~/` their
+/// home, `#` a comment) and what their engine's clients registered
+/// (`~/.local/state/skwird/registered`), at the default places, since the
+/// service knows no user's environment.
+#[cfg(target_os = "linux")]
+pub fn own_exclusions(home: &Path, uid: u32) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(text) = read_own(home, uid, ".config/skwird/exclude") {
+        let text = String::from_utf8_lossy(&text);
+        paths.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| match l.strip_prefix("~/") {
+                    Some(rest) => home.join(rest),
+                    None => PathBuf::from(l),
+                }),
+        );
+    }
+    if let Some(bytes) = read_own(home, uid, ".local/state/skwird/registered")
+        && let Ok(all) = serde_json::from_slice::<Vec<Registered>>(&bytes)
+    {
+        paths.extend(all.into_iter().map(|r| r.path.to_path()));
+    }
+    paths
+}
+
+/// Whether user `uid`, of home `home`, owns the folder an exclusion of
+/// theirs resolved to: at `resolved`, of identity `id` if one is there.
+/// Root owns every folder. A folder there is theirs if it is still that
+/// folder and they own it; a path where none is there yet, if it is in
+/// their home and they own that.
+#[cfg(target_os = "linux")]
+pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::FileId>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if uid == 0 {
+        return true;
+    }
+    match id {
+        Some(id) => std::fs::symlink_metadata(resolved)
+            .is_ok_and(|m| m.dev() == id.dev && m.ino() == id.ino && m.uid() == uid),
+        None => {
+            resolved.starts_with(home)
+                && std::fs::symlink_metadata(home).is_ok_and(|m| m.uid() == uid)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1177,6 +1177,18 @@ committed once the gate holds.
 6. **Each user's exclusions** (DESIGN 5): the default ones in every
    home, each user's files read, registrations kept per user, each
    applying to folders that user owns.
+
+   **Done on 2026-11-22** (DESIGN 5, "As built"). A root test adds two
+   users to the machine's user database, their homes in the test's
+   place, and starts the service: one user's file and their engine's
+   registrations keep their folders out, read before any client of
+   theirs connects; a folder their file names that another user owns
+   stays; the other user's file, which others may write, is ignored;
+   what the first registers with the service holds at once, and their
+   registering the other's folder does nothing. Registrations at the
+   service are kept with their user's id. The journal is still refused
+   to users other than root; a `watch` at the service is answered with
+   the folders asked, every folder being heard already.
 7. **The sandboxed unit,** the module's `services.skwird.system`, and a
    machine proving the service whole with two users.
 8. **Budgets,** measured by the user on their machine, as root.
