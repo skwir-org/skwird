@@ -1524,6 +1524,11 @@ committed once the gate holds.
    handle: 2 to 4% less of its time (DESIGN 8, "An event costs one
    look"). Not enough for the idle budget through a storm; what remains
    is the kernel's part, the wakes and the allocations.
+   Then the reader's wait after a read that gave events, 10 ms to 50:
+   through the storm, the writer and the reader take three times less,
+   about 2.9 µs an event against 9, and a change in a quiet folder 40 ms
+   more, 150 ms at the median (DESIGN 8, "A wake for many events"). To
+   be measured on the user's machine.
 
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files

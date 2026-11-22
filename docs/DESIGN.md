@@ -1150,9 +1150,30 @@ event, taken in step with the events; a folder is gathered with one
 look. Measured against the build before, alternately in one machine
 (the host's load then 13 to 20, so each trial is taken against the
 reader's time, the same code in both): the writer's time to the
-reader's went from 1.62 to 1.66 to 1.55 to 1.63, 2 to 4% less. What an
+reader's went from 1.62-1.66 to 1.55-1.63, 2 to 4% less. What an
 event costs is not its looks: the kernel's part, the wakes and the
 allocations remain.
+
+**A wake for many events** (the same night, the user's choice: the
+reader waits longer between reads through a storm, before accepting
+the idle budget as a quiet machine's). The reader waited 10 ms after a
+read that gave events, a tenth of a gathering's quiet: through a storm,
+the writer was woken every 10 ms, for some 50 events, and each wake,
+read and turn cost what their fixed part does (the switch, the clock,
+the read's own work). Now it waits 50 ms, half of a gathering's quiet,
+which so ends no gathering later than that; a sync's cookie wakes it at
+once, as before. What comes meanwhile waits in the kernel's queue, of
+16,384 events: filled in 50 ms only past 330,000 events a second, fifty
+times the user's storm.
+
+Measured against the build before, alternately in the root tests'
+machine, four times each, through the storm above (about 52 events a
+round): the writer took 118 to 121 µs a round against 296 to 341, the
+reader 30 to 35 against 113 to 130, the two 150 to 155 against 409 to
+471, three times less: about 2.9 µs an event against 9. A change in a
+quiet folder meanwhile was answered in 150 to 152 ms at the median
+against 109 to 111, the 40 ms the longer wait adds; the budget is
+250 ms.
 
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a

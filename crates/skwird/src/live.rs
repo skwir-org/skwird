@@ -22,10 +22,12 @@ const QUIET: Duration = Duration::from_millis(100);
 const MOST: Duration = Duration::from_secs(1);
 /// After a read that gave events, the reader waits this long before the
 /// next. Woken for each event, the writer spent more on waking than on
-/// what it was woken for (DESIGN 8). A tenth of [`QUIET`], it ends no
-/// gathering later than that; a sync's cookie waits as much at most. Idle,
-/// the reader waits for the next event, as before.
-const READ_EVERY: Duration = Duration::from_millis(10);
+/// what it was woken for; woken every 10 ms through a storm, each wake
+/// still cost what its fixed part does (DESIGN 8, "A wake for many
+/// events"). Half of [`QUIET`], it ends no gathering later than that; a
+/// sync's cookie wakes it at once. Idle, the reader waits for the next
+/// event, as before.
+const READ_EVERY: Duration = Duration::from_millis(50);
 /// What was heard is saved this long after the first change unsaved: the
 /// log keeps it durable meanwhile.
 const SAVE: Duration = Duration::from_secs(10);
