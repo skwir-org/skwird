@@ -1505,6 +1505,18 @@ committed once the gate holds.
    not what waits"). Still to see: what a wake costs beside, and the
    reader's 0.6%.
 
+   **Measured at `4360662`**, at a load of 12.5 to 29, the heaviest of
+   the day: a change answered in 148 ms at the median and 437 ms at
+   most, all ten; the sync 0.32 s (0.24 s on a processor); the query as
+   the user as root's. The writer's time a wake beside its work, 30 to
+   80 µs against 160. Idle 1.00 s in 30 s (3.3%): the writer 0.75 s, the
+   reader 0.24 s, through a storm of 67,303 events in one save interval,
+   most in folders no index holds; finding them took 372 ms, some 5.5 µs
+   an event, and reading them some 3.6 µs. The account does not bound
+   finding, which cannot wait. Read back 10.1 s, the home's index loaded
+   in 4.9 s against 0.6 s at a lower load. Still to see: what an event
+   costs, read and found, profiled in the root tests' machine.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
