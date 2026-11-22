@@ -431,6 +431,45 @@ fn the_users_exclusions_hold_from_a_sync_of_a_live_folder() {
     assert!(answered(&mut c, &report).is_empty(), "its names gone");
 }
 
+/// A client starts the journal from now (`since` empty: no event, a
+/// token), then is told what changed since it: a file made and one
+/// removed, after a sync. A token it never had is too old.
+#[test]
+fn the_journal_starts_from_now_and_says_what_changed() {
+    let mut env = Env::new("engine-journal");
+    tree(&env);
+    let home = env.home();
+    env.engine(30);
+    let mut c = env.client("a test");
+    let start = c.changes(&home, "").unwrap().expect("a token from now");
+    assert_eq!(start.events, Vec::new());
+    env.s.write(home.join("docs/made since.txt"), b"x");
+    std::fs::remove_file(home.join("docs/d03/report 3.txt")).unwrap();
+    c.sync(&home).unwrap();
+    let since = c
+        .changes(&home, &start.token)
+        .unwrap()
+        .expect("not too old");
+    let said: BTreeSet<(String, PathBuf)> = since
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            skwird_protocol::Event::Added(e) => Some(("added".to_owned(), e.path.to_path())),
+            skwird_protocol::Event::Removed(e) => Some(("removed".to_owned(), e.path.to_path())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.contains(&("added".to_owned(), home.join("docs/made since.txt"))),
+        "{said:?}"
+    );
+    assert!(
+        said.contains(&("removed".to_owned(), home.join("docs/d03/report 3.txt"))),
+        "{said:?}"
+    );
+    assert!(c.changes(&home, "0000000000000001.3").unwrap().is_none());
+}
+
 /// An engine goes once its last client has been gone its idle time.
 #[test]
 fn an_engine_goes_once_idle() {

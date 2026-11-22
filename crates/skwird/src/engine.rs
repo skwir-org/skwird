@@ -577,7 +577,12 @@ impl Writing<'_> {
                 since,
                 reply,
             } => {
+                // Since nothing: from now, no event, and the token to go on
+                // from, which a client takes before it walks.
                 let answer = match (self.keepers[root].as_ref(), Token::parse(&since)) {
+                    (Some(keeper), _) if since.is_empty() => {
+                        keeper.token().map(|t| (Vec::new(), t)).ok_or(TooOld)
+                    }
                     (Some(keeper), Some(token)) => keeper.changes(&rel, token),
                     _ => Err(TooOld),
                 };

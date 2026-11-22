@@ -471,16 +471,10 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 // cancelled.
                 continue;
             }
-            // The system service's journal is not filtered for each asker
-            // yet: another user than root is told so, and walks.
-            Ask::Changes { .. } if shared.system && !who.is_root() => failure(
-                "unsupported",
-                "the system service answers this for root alone so far",
-            ),
             // The system service hears every folder already: nothing to
             // keep, and the folders asked are said kept.
             Ask::Watch { add, .. } if shared.system => Answer::Watching { folders: add },
-            Ask::Changes { root, since } => changes(shared, commands, &root, since),
+            Ask::Changes { root, since } => changes(shared, commands, &root, since, who),
             Ask::Exclude { add, remove } => {
                 let (reply, answer) = channel();
                 let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
@@ -546,7 +540,13 @@ fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath, asker: &As
     }
 }
 
-fn changes(shared: &Shared, commands: &Sender<Command>, root: &WirePath, since: String) -> Answer {
+fn changes(
+    shared: &Shared,
+    commands: &Sender<Command>,
+    root: &WirePath,
+    since: String,
+    who: &Asker,
+) -> Answer {
     let Some((i, rel)) = shared.locate(&root.to_path()) else {
         return Answer::TooOld {};
     };
@@ -564,8 +564,30 @@ fn changes(shared: &Shared, commands: &Sender<Command>, root: &WirePath, since: 
         return Answer::TooOld {};
     };
     let base = &shared.roots[i];
+    // Another user than root, asking the system service, is told what
+    // changed in folders they may list now (DESIGN 4): an event is theirs
+    // if they may list the folder holding what it names. A removal in a
+    // folder removed since is told by the topmost removal, in a folder
+    // still there.
+    let index = match shared.snapshot(i) {
+        Published::Ready(index) => Some(index),
+        _ => None,
+    };
+    let seen = |path: &Path| -> bool {
+        let Some(index) = &index else {
+            return !shared.system || who.is_root();
+        };
+        let Some(s) = seeing(shared, i, index, who) else {
+            return true;
+        };
+        let parent = path.parent().unwrap_or(Path::new(""));
+        matches!(reached(&s, parent, &mut HashMap::new()), Reached::Listed(_))
+    };
     let events = events
         .iter()
+        .filter(|e| match e {
+            Event::Entry { path, .. } | Event::NotCovered { path, .. } => seen(path),
+        })
         .map(|e| match e {
             Event::Entry { path, op, entry } => {
                 let entry = convert::entry(&base.join(path), entry);

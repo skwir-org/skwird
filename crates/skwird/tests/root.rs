@@ -497,3 +497,89 @@ fn a_query_gives_at_most_so_many_results() {
     assert_eq!(count, 100_000);
     assert!(done.truncated);
 }
+
+/// Run by the test below as another user: says what the journal tells
+/// them since a token.
+#[test]
+fn a_journal_reader() {
+    let (Some(socket), Some(root), Some(since)) = (
+        std::env::var_os("SKWIRD_TEST_PEER"),
+        std::env::var_os("SKWIRD_TEST_ROOT"),
+        std::env::var("SKWIRD_TEST_SINCE").ok(),
+    ) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let mut c = Client::at(Path::new(&socket), "a-journal-reader").unwrap();
+    let changes = c.changes(&root, &since).unwrap().expect("not too old");
+    for e in changes.events {
+        let (what, path) = match e {
+            skwird_protocol::Event::Added(e) => ("added", e.path.to_path()),
+            skwird_protocol::Event::Removed(e) => ("removed", e.path.to_path()),
+            skwird_protocol::Event::Changed(e) => ("changed", e.path.to_path()),
+            skwird_protocol::Event::NotCovered { path, .. } => ("not covered", path.to_path()),
+        };
+        println!(
+            "seen: {what} {}",
+            path.strip_prefix(&root).unwrap().display()
+        );
+    }
+}
+
+/// The journal of the system service tells each user what changed in
+/// folders they may list, and nothing of the others'.
+#[test]
+fn the_journal_tells_each_user_what_they_could_list() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.ext4, "journal");
+    folder(&place, "", 0, 0, 0o755);
+    folder(&place, "theirs", 1000, 1000, 0o700);
+    folder(&place, "open", 0, 0, 0o755);
+    let dirs = Place::new(&m.ext4, "journal-dirs");
+    let service = Service::start(&dirs.0, &[&place.0]);
+    let mut c = service.client(&place.0);
+    wait_for(20, "live", || live(&mut c, &place.0));
+    let start = c.changes(&place.0, "").unwrap().expect("a token from now");
+    owned_file(&place, "theirs/made in theirs.txt", 1000, 0o600, "x");
+    owned_file(&place, "open/made in the open.txt", 0, 0o644, "x");
+    c.sync(&place.0).unwrap();
+    let read = |uid: u32| -> BTreeSet<String> {
+        let out = Command::new("setpriv")
+            .args([
+                format!("--reuid={uid}"),
+                format!("--regid={uid}"),
+                "--clear-groups".into(),
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_journal_reader",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SKWIRD_TEST_PEER", &service.socket)
+            .env("SKWIRD_TEST_ROOT", &place.0)
+            .env("SKWIRD_TEST_SINCE", &start.token)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        said.lines()
+            .filter_map(|l| l.split_once("seen: ").map(|(_, rest)| rest.to_owned()))
+            .filter(|l| l.starts_with("added"))
+            .collect()
+    };
+    let both: BTreeSet<String> = [
+        "added theirs/made in theirs.txt",
+        "added open/made in the open.txt",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    assert_eq!(read(1000), both);
+    assert_eq!(
+        read(1001),
+        ["added open/made in the open.txt".to_owned()].into()
+    );
+    assert_eq!(read(0), both);
+}

@@ -445,9 +445,9 @@ proved as root in the test machine on Linux 6.18.58):
 - **Limits per asker** (2026-11-22): a query of the system service
   gives at most 100,000 results, past which its `done` says there were
   more, and a user runs at most four queries at once; a fifth is
-  refused, busy. Not yet: a time limit, the answers kept per asker
-  across queries, and the journal for other users than root, which is
-  refused for now.
+  refused, busy. Not yet: a time limit, and the answers kept per asker
+  across queries. The journal is filtered for each asker (Protocol,
+  `changes`).
 
 ### 5. Private folders are never indexed
 
@@ -873,7 +873,12 @@ it at once.
   - `cancel {id}`;
   - `changes {root, since}`: what changed since a token, with each
     entry's identity and kind, then the token to resume from; or "too
-    old" (8). A journal for clients that keep state of their own;
+    old" (8). A journal for clients that keep state of their own. Since
+    nothing (`since` empty): from now, no event and the token to go on
+    from, which a client takes before it walks, first or after "too
+    old", so that nothing is lost between (found missing on 2026-11-22:
+    no client could start the journal). At the system service, an event
+    is given only to who may list the folder holding what it names;
   - `exclude {add, remove}`: folders the client keeps out of the index
     (5). A client removes only what it added.
   - `watch {add, remove}` (phase 2): folders the client wants live,
