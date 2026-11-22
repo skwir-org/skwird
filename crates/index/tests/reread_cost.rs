@@ -82,6 +82,8 @@ fn reading_a_folder_again_for_one_file() {
         .and_then(|r| r.parse().ok())
         .unwrap_or(30);
     let only = std::env::var("ONLY").ok();
+    // READS_ALONE times the reads for a file written alone, for a profile.
+    let reads_alone = std::env::var_os("READS_ALONE").is_some();
     for (label, rel) in [
         ("tiny", "t050/0500"),
         ("medium", "medium-07"),
@@ -91,7 +93,7 @@ fn reading_a_folder_again_for_one_file() {
             continue;
         }
         let folder = index.folder_at(Path::new(rel)).unwrap();
-        {
+        if !reads_alone {
             let loc = index.tree().loc(folder).unwrap();
             let chunk = index.tree().chunk(loc.chunk);
             let view = chunk.view();
@@ -152,7 +154,7 @@ fn reading_a_folder_again_for_one_file() {
         }
         // A file made, then removed: its folder's entries change.
         let mut shaped = Vec::with_capacity(2 * rounds);
-        for i in 0..rounds {
+        for i in (0..rounds).filter(|_| !reads_alone) {
             let made = format!("made-{i:04}");
             for make in [true, false] {
                 let path = base.join(rel).join(&made);
@@ -169,11 +171,11 @@ fn reading_a_folder_again_for_one_file() {
             }
         }
         shaped.sort_unstable();
-        println!(
-            "{label:6}: an entry made or removed {:?} at the median, {:?} at least",
-            shaped[shaped.len() / 2],
-            shaped[0]
-        );
+        if let (Some(median), Some(least)) = (shaped.get(shaped.len() / 2), shaped.first()) {
+            println!(
+                "{label:6}: an entry made or removed {median:?} at the median, {least:?} at least"
+            );
+        }
         reads.sort_unstable();
         snapshots.sort_unstable();
         println!(

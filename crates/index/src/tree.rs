@@ -285,9 +285,9 @@ impl Tree {
     /// Put `block`, of the same shape as its folder's block
     /// ([`Chunk::patched`]), in place of it: its chunk patched, not decoded
     /// and cut again, so that a file written to costs what changed. The
-    /// chunk takes a number of its own, as any chunk changed does, so that
-    /// no file a saved manifest names is written over; its blocks keep
-    /// their places in it, and the shape is the same. Whether it was:
+    /// chunk keeps its number, its blocks their places, and the shape is
+    /// the same; the next save gives it another ([`Tree::renumber`]), so
+    /// that no file a saved manifest names is written over. Whether it was:
     /// false, and nothing done, where its shape is not the same.
     /// `old` is the folder's block as the tree holds it now.
     pub fn patch(&mut self, old: &Block, block: &Block) -> bool {
@@ -297,7 +297,7 @@ impl Tree {
         let Some(chunk) = self.chunks[&loc.chunk].patched(loc.block as usize, old, block) else {
             return false;
         };
-        self.renumbered(loc.chunk, chunk);
+        self.chunks.insert(loc.chunk, Arc::new(chunk));
         true
     }
 
@@ -334,20 +334,23 @@ impl Tree {
         let Some(chunk) = chunk.spliced(loc.block as usize, old, block) else {
             return false;
         };
-        self.renumbered(loc.chunk, chunk);
+        self.chunks.insert(loc.chunk, Arc::new(chunk));
         true
     }
 
-    /// `chunk` in place of chunk `was`, the same blocks in the same order,
-    /// under a number of its own, as any chunk changed takes, so that no
-    /// file a saved manifest names is written over; each block's place
-    /// follows it.
-    fn renumbered(&mut self, was: ChunkId, chunk: Chunk) {
+    /// Chunk `was` under a number of its own, its blocks' places following
+    /// it: what a save does to a chunk changed in memory whose number a
+    /// file has, so that no file a saved manifest names is written over.
+    /// Gives the new number.
+    pub fn renumber(&mut self, was: ChunkId) -> ChunkId {
         let id = self.next_chunk;
         self.next_chunk += 1;
         let at = self.position(was);
         self.order[at] = id;
-        self.chunks.remove(&was);
+        let chunk = self
+            .chunks
+            .remove(&was)
+            .expect("a chunk renumbered is in the tree");
         {
             let view = chunk.view();
             for b in 0..chunk.len() {
@@ -360,7 +363,8 @@ impl Tree {
                 );
             }
         }
-        self.chunks.insert(id, Arc::new(chunk));
+        self.chunks.insert(id, chunk);
+        id
     }
 
     /// Insert `blocks`, folders' subtrees in pre-order, right after the

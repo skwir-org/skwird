@@ -211,6 +211,12 @@ impl Listing {
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &Entry)> {
         (0..self.len()).map(|i| (self.name(i), self.entry(i)))
     }
+
+    /// Whether its names are in the order of their bytes, as a crawl's read
+    /// pushes them.
+    pub fn is_sorted(&self) -> bool {
+        (1..self.len()).all(|i| self.name(i - 1) < self.name(i))
+    }
 }
 
 /// Why a folder's entries are not covered.

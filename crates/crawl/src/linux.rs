@@ -3,7 +3,7 @@
 //! followed and no mount crossed.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,7 +11,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, Statx, StatxFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir, ResolveFlags, Statx, StatxFlags};
 use rustix::io::Errno;
 
 mod btrfs;
@@ -363,18 +363,61 @@ fn why_not_opened(e: Errno) -> Why {
     }
 }
 
-/// A name of a listing, with what the listing says of it.
-type Named = (CString, FileType, u64);
+/// A listing's names, `.` and `..` left out, in one buffer, each kept
+/// with its terminator and with what the listing says of it: no
+/// allocation for each name, a large folder's read again being mostly
+/// its entries (DESIGN 8).
+#[derive(Default)]
+struct Names {
+    bytes: Vec<u8>,
+    /// Each name's range in `bytes`, its terminator included, its kind and
+    /// its inode.
+    at: Vec<(u32, u32, FileType, u64)>,
+}
 
-/// Every name of a listing, `.` and `..` left out. A listing that fails
-/// part-way gives its error alone: what was read of it is not kept.
-fn names_of(entries: impl Iterator<Item = rustix::io::Result<Named>>) -> Result<Vec<Named>, i32> {
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(Errno::raw_os_error)?;
-        if !matches!(entry.0.to_bytes(), b"." | b"..") {
-            names.push(entry);
+impl Names {
+    fn push(&mut self, name: &CStr, kind: FileType, ino: u64) {
+        if matches!(name.to_bytes(), b"." | b"..") {
+            return;
         }
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(name.to_bytes_with_nul());
+        // A folder's names fit in 4 GiB: a name is at most 255 bytes.
+        #[allow(clippy::cast_possible_truncation)]
+        self.at
+            .push((start as u32, self.bytes.len() as u32, kind, ino));
+    }
+
+    /// In the order of the names' bytes: the terminator, the least byte,
+    /// orders a name before the longer ones it starts.
+    fn sort(&mut self) {
+        let bytes = &self.bytes;
+        self.at.sort_unstable_by(|a, b| {
+            bytes[a.0 as usize..a.1 as usize].cmp(&bytes[b.0 as usize..b.1 as usize])
+        });
+    }
+
+    /// Each name's bytes, its terminator kept beside them for a stat (a
+    /// name made a C string only where one is stat-ed: checking each for
+    /// the one terminator costs a scan of it), its kind and its inode.
+    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], FileType, u64)> {
+        self.at.iter().map(|&(start, end, kind, ino)| {
+            let with_nul = &self.bytes[start as usize..end as usize];
+            (&with_nul[..with_nul.len() - 1], with_nul, kind, ino)
+        })
+    }
+}
+
+/// The names of the folder open as `fd`, read from its start in place
+/// (`getdents64` through [`RawDir`]): none allocated for each entry. A
+/// listing that fails part-way gives its error alone.
+fn names_of(fd: impl AsFd) -> Result<Names, i32> {
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let mut raw = RawDir::new(fd, buf.spare_capacity_mut());
+    let mut names = Names::default();
+    while let Some(entry) = raw.next() {
+        let entry = entry.map_err(Errno::raw_os_error)?;
+        names.push(entry.file_name(), entry.file_type(), entry.ino());
     }
     Ok(names)
 }
@@ -441,36 +484,30 @@ fn read(
     if let Some(watcher) = &opts.watcher {
         *watch = watcher.watch(fd.as_fd(), &root.path.join(rel));
     }
-    let mut dir = match Dir::new(fd) {
-        Ok(dir) => dir,
-        Err(e) => return not_covered(Some(stat), Why::Failed(e.raw_os_error())),
-    };
-    let listed = std::iter::from_fn(|| {
-        dir.read()
-            .map(|entry| entry.map(|e| (e.file_name().to_owned(), e.file_type(), e.ino())))
-    });
-    let names = match names_of(listed) {
+    // Read in place, no name allocated for each entry; a listing that
+    // fails part-way gives its error alone: what was read of it is not
+    // kept.
+    let names = match names_of(&fd) {
         Ok(names) => names,
         Err(errno) => return not_covered(Some(stat), Why::CutShort(errno)),
     };
-    if names
-        .iter()
-        .any(|(name, ..)| name.to_bytes() == b".private")
-    {
+    if names.iter().any(|(name, ..)| name == b".private") {
         return not_covered(Some(stat), Why::Private);
     }
-    let Ok(fd) = dir.fd() else {
-        return not_covered(Some(stat), Why::Failed(Errno::BADF.raw_os_error()));
-    };
+    let fd = fd.as_fd();
     // Read within a tick of its last change, or with a change time ahead
     // of the clock: a second change may have left that time as it was.
     let again = read_at < stat.ctime.plus(opts.tick);
+    // Stat-ed or reused in the order of their names: `reuse` is asked so,
+    // and the listing is so.
+    let mut names = names;
+    names.sort();
     let mut listing = Listing::new(stat, read_at, again);
-    for (name, file_type, ino) in names {
+    for (name, with_nul, file_type, ino) in names.iter() {
         // Taken as it was: no event named it, and the listing gives it the
         // same inode and kind.
-        if let Some(entry) = reuse.and_then(|r| r(name.to_bytes(), ino, kind_of(file_type))) {
-            listing.push(name.to_bytes(), entry);
+        if let Some(entry) = reuse.and_then(|r| r(name, ino, kind_of(file_type))) {
+            listing.push(name, entry);
             continue;
         }
         let fallback = Entry {
@@ -482,14 +519,15 @@ fn read(
             attrs: None,
         };
         let entry = if !root.below.is_empty()
-            && root
-                .mount_at(&rel.join(OsStr::from_bytes(name.to_bytes())))
-                .is_some()
+            && root.mount_at(&rel.join(OsStr::from_bytes(name))).is_some()
         {
             // A mount point: never stat-ed (it may be a dead server's).
             fallback
         } else if opts.attrs || matches!(file_type, FileType::Directory | FileType::Unknown) {
-            match statx_at(fd, &name) {
+            let Ok(name) = CStr::from_bytes_with_nul(with_nul) else {
+                continue;
+            };
+            match statx_at(fd, name) {
                 Ok(st) => Entry {
                     kind: kind_of_mode(st.stx_mode),
                     id: id_of(&st),
@@ -503,7 +541,7 @@ fn read(
         } else {
             fallback
         };
-        listing.push(name.to_bytes(), entry);
+        listing.push(name, entry);
     }
     (Some(stat), Outcome::Listed(listing))
 }

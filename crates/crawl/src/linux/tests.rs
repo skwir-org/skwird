@@ -317,15 +317,33 @@ fn a_denied_folder_is_not_covered_then_read_at_the_next_check() {
     assert_eq!(listing.name(0), b"b");
 }
 
-/// A listing that fails part-way is not taken for complete: what was
-/// read of it is not kept.
+/// A listing's names, read in place: `.` and `..` left out, each with its
+/// kind, sorted by their bytes, a name before the longer ones it starts.
 #[test]
-fn a_listing_cut_short_gives_its_error_alone() {
-    let named = |name: &str| Ok((CString::new(name).unwrap(), FileType::RegularFile, 1));
-    let whole = names_of([named("."), named("a"), named("b")].into_iter()).unwrap();
-    assert_eq!(whole.len(), 2);
-    let cut = names_of([named("a"), Err(Errno::IO), named("b")].into_iter());
-    assert_eq!(cut, Err(Errno::IO.raw_os_error()));
+fn a_listing_s_names_are_read_in_place_and_sorted() {
+    let s = Scratch::new("crawl-names-sorted");
+    for name in ["b", "ab", "a b", "a"] {
+        s.file(name);
+    }
+    s.dir("c");
+    let fd = rustix::fs::open(s.path(), dir_flags(), Mode::empty()).unwrap();
+    let mut names = names_of(&fd).unwrap();
+    names.sort();
+    let seen: Vec<(Vec<u8>, FileType)> = names
+        .iter()
+        .map(|(name, _, kind, _)| (name.to_vec(), kind))
+        .collect();
+    let want: Vec<(Vec<u8>, FileType)> = [
+        ("a", FileType::RegularFile),
+        ("a b", FileType::RegularFile),
+        ("ab", FileType::RegularFile),
+        ("b", FileType::RegularFile),
+        ("c", FileType::Directory),
+    ]
+    .into_iter()
+    .map(|(n, k)| (n.as_bytes().to_vec(), k))
+    .collect();
+    assert_eq!(seen, want);
 }
 
 /// The check finds what changed, and nothing else: a name added, a

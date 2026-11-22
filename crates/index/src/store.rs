@@ -239,6 +239,20 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
         segments.push(next_segment);
         next_segment += 1;
     }
+    // A chunk changed in memory under a number a file already has (patched
+    // or spliced since it was saved) takes another first: no file a saved
+    // manifest names is written over, and a kill before the manifest is
+    // switched leaves it whole. Renumbered here, once a save, not at each
+    // change (DESIGN 8).
+    let stale: Vec<ChunkId> = index
+        .tree()
+        .chunks()
+        .filter(|(id, chunk)| !chunk.is_mapped() && dir.join(chunk_file(*id)).is_file())
+        .map(|(id, _)| id)
+        .collect();
+    for id in stale {
+        index.tree_mut().renumber(id);
+    }
     let mut written = Vec::new();
     for (id, chunk) in index.tree().chunks() {
         // A chunk read from this folder's file is there already.

@@ -927,6 +927,32 @@ takes 481 µs for 8 entries, and a file written to 51 µs: what is left is
 the chunk's columns packed again, which packing only from the rows
 changed on would halve.
 
+**A large folder's read costs its listing** (the same day, from the
+user's quiet run: a sync of the home 0.13 s, a change answered in 279 ms
+at the median, both over, the user's busy folder of 65,868 entries read
+in 52 to 63 ms). Profiled, a read of a folder of 60,000 entries for one
+file written was mostly allocation and hashing: each name allocated as
+it was listed, again for the merge, and a map of every entry the index
+knew built to look each up once. The listing itself was under 4%. Now:
+- **a listing is read in place** (`getdents64` through `RawDir`), its
+  names in one buffer, and sorted by their bytes before any is stat-ed
+  or reused;
+- **what is reused is found by walking,** the listing and the old
+  entries both in name order, no map made; one asked out of order is
+  found nowhere and stat-ed, never taken wrongly;
+- **the merge takes the listing as it is,** checked to be in order,
+  copying no name; one out of order is sorted as before;
+- **a chunk changed keeps its number until the next save,** which gives
+  it another before writing it, so that no file a saved manifest names
+  is written over. Renumbering set every block's place again, a
+  copy of each page a snapshot shared, at each patch: a folder of 8
+  entries read again cost 83 µs with it, 53 without. A kill test of 60
+  rounds still loads every time.
+
+On the host, built optimised: a folder of 60,000 entries read again for
+a file written in 18.5 ms, against 26 to 31; of 3,000, 0.73 ms against
+1.2 to 1.4; of 8, 53 µs.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three
@@ -1157,6 +1183,29 @@ limited to 4 or 2, held 6.0 MB against 2.1 in the root tests' machine
 after building four roots of 200,000 entries in 201 folders, but 3.2
 against 2.7 and 2.4 with 100,000 folders of 8 entries, the shape of
 the user's trees, so they are left as they are.
+
+**Measured quiet** (2026-11-22, at `00067fa`, a load of 0.5 to 4, the
+spinning disk unmounted; eight roots, 8.30 million entries):
+
+| What | Budget | Measured | |
+|---|---|---|---|
+| Every filesystem built | 3 s per million entries | 7.42 s (0.89 s per million), the home answered live at 6.92 s | met |
+| A change to its answer, no sync | 0.25 s at the median, 1 s at most | 279 ms, 306 ms at most | not met |
+| A sync of a live folder | 0.1 s | 0.13 s | not met |
+| Read back and every root checked | 0.3 s per million | 1.11 s (0.13 per million) | met |
+| A query answered to a user, against root's | 1.25 times | 0.57 s against 0.52 (1.10) | met |
+| Memory at rest, its own | 10 MB per million | 28 MB (3.4 per million) | met |
+| Memory at rest, its files mapped | no more than its index on disk | 195 to 206 MB of 354 | met |
+| Processor time, no client asking | 2% of a core | 0.57 s in 30 s (1.9%) | met |
+
+The roots were built at once, each on its own thread: in 7.4 s, where
+they took 11.6 to 19 s in turn. The home's index was read back, not
+built again. Both budgets not met seem to share a cost: the user's busy
+folder of 65,868 entries, read again in 52 to 63 ms each time. A sync
+applies what is gathered first; a change heard while the writer reads
+it waits for it. The account was owed now and then, the writer taking
+1.1 to 2.1% of a core between saves. What is left of a large folder's
+read is its own entries (8, "A file written to costs what changed").
 
 ## Protocol (a sketch; experimental until declared stable)
 

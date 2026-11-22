@@ -553,14 +553,18 @@ fn a_file_written_to_is_patched_saved_and_read_back() {
         "patched, not cut again"
     );
     assert_eq!(sized(k.index()), vec![PathBuf::from("a/entry-07")]);
+    assert_eq!(
+        k.index().tree().chunk_ids(),
+        before.as_slice(),
+        "no chunk cut again, none renumbered before the save"
+    );
+    k.save().unwrap();
     let after = k.index().tree().chunk_ids().to_vec();
-    assert_eq!(after.len(), before.len(), "no chunk cut again");
     assert_eq!(
         after.iter().filter(|id| !before.contains(id)).count(),
         1,
-        "the folder's chunk under a number of its own"
+        "the folder's chunk saved under a number of its own"
     );
-    k.save().unwrap();
     drop(k);
     let (k, opened) = keeper(&s);
     assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");

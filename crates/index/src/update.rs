@@ -16,7 +16,7 @@
 //! kept, and a mount's names are not the folder's.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use std::path::{Path, PathBuf};
 
@@ -36,21 +36,68 @@ use crate::packed::Malformed;
 /// crawl's listing, or rebuilt from a record of the log.
 #[derive(Clone, Debug)]
 pub enum Seen {
-    Listed {
-        again: bool,
-        entries: Vec<(Vec<u8>, Entry)>,
-    },
+    Listed { again: bool, entries: Entries },
     NotCovered(Why),
 }
 
 impl Seen {
-    pub fn of(outcome: &Outcome) -> Seen {
+    /// What a crawl's read found, its listing taken as it is: no name
+    /// copied (DESIGN 8).
+    pub fn of(outcome: Outcome) -> Seen {
         match outcome {
             Outcome::Listed(listing) => Seen::Listed {
                 again: listing.again,
-                entries: listing.iter().map(|(n, e)| (n.to_vec(), *e)).collect(),
+                entries: Entries::Listing(listing),
             },
-            Outcome::NotCovered(why) => Seen::NotCovered(*why),
+            Outcome::NotCovered(why) => Seen::NotCovered(why),
+        }
+    }
+}
+
+/// A folder's entries read, for a merge: a crawl's listing as it is, its
+/// names in one buffer, or entries one by one, as a record replayed gives
+/// them.
+#[derive(Clone, Debug)]
+pub enum Entries {
+    Listing(skwird_crawl::Listing),
+    Each(Vec<(Vec<u8>, Entry)>),
+}
+
+impl Entries {
+    pub fn len(&self) -> usize {
+        match self {
+            Entries::Listing(listing) => listing.len(),
+            Entries::Each(each) => each.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// In the order of the names' bytes, as a merge walks them: a listing
+    /// a crawl sorted as it is, once checked to be; any other sorted here.
+    fn in_order(self) -> Entries {
+        let by_name = |a: &(Vec<u8>, Entry), b: &(Vec<u8>, Entry)| a.0.cmp(&b.0);
+        match self {
+            Entries::Listing(listing) if listing.is_sorted() => Entries::Listing(listing),
+            Entries::Listing(listing) => {
+                let mut each: Vec<_> = listing.iter().map(|(n, e)| (n.to_vec(), *e)).collect();
+                each.sort_unstable_by(by_name);
+                Entries::Each(each)
+            }
+            Entries::Each(mut each) => {
+                each.sort_unstable_by(by_name);
+                Entries::Each(each)
+            }
+        }
+    }
+
+    /// Each entry with its name, in the order it holds them.
+    fn by_name(&self) -> Box<dyn Iterator<Item = (&[u8], &Entry)> + '_> {
+        match self {
+            Entries::Listing(listing) => Box::new(listing.iter()),
+            Entries::Each(each) => Box::new(each.iter().map(|(n, e)| (n.as_slice(), e))),
         }
     }
 }
@@ -330,15 +377,14 @@ impl Index {
         &mut self,
         folder: FolderId,
         old: &Block,
-        mut entries: Vec<(Vec<u8>, Entry)>,
+        entries: Entries,
         m: &mut Merged,
     ) -> Vec<Item> {
         let dev = old.facts.map_or(0, |f| f.id.dev);
-        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let entries = entries.in_order();
         let mut items = Vec::with_capacity(entries.len());
         let mut o = 0;
-        for (name, entry) in &entries {
-            let name = name.as_slice();
+        for (name, entry) in entries.by_name() {
             // Old entries before this name are m.gone.
             while o < old.items.len() && self.names().get(old.items[o].name) < name {
                 let item = old.items[o];
@@ -429,20 +475,6 @@ impl Index {
         items
     }
 
-    /// The entries of `block` as it was read, by name, but those of
-    /// `touched`: what a read that stats the entries heard alone keeps.
-    pub fn known_entries(&self, block: &Block, touched: &HashSet<Box<[u8]>>) -> Known<'_> {
-        let dev = block.facts.map_or(0, |f| f.id.dev);
-        let mut known = Known::with_capacity(block.items.len());
-        for item in &block.items {
-            let name = self.names().get(item.name);
-            if !touched.contains(name) {
-                known.insert(name, self.entry_of(item, dev));
-            }
-        }
-        known
-    }
-
     /// An entry of a block, as the log and the journal give it: a folder's
     /// device is its own block's.
     fn entry_of(&self, item: &Item, dev: u64) -> Entry {
@@ -488,7 +520,7 @@ impl Index {
                 }
                 Seen::Listed {
                     again,
-                    entries: entries.into_iter().collect(),
+                    entries: Entries::Each(entries.into_iter().collect()),
                 }
             }
             State::NotCovered(why) => Seen::NotCovered(why),
@@ -682,9 +714,6 @@ pub fn reread_folders(
     reread_named(index, root, opts, cancel, &whole)
 }
 
-/// A folder's entries by name ([`Index::known_entries`]).
-pub type Known<'a> = HashMap<&'a [u8], Entry>;
-
 /// A folder heard, and the names its events gave: none to read it whole.
 pub type HeardFolder = (FolderId, Option<HashSet<Box<[u8]>>>);
 
@@ -770,14 +799,7 @@ fn apply(
                 let kept = Cell::new(0);
                 let (found, outcome, watch) = match named.get(i).copied().flatten() {
                     Some(touched) => {
-                        let known = index.known_entries(&old, touched);
-                        read_folder_reusing(root, stored.rel(i), opts, &|name, ino, kind| {
-                            let entry = known.get(name).filter(|e| {
-                                e.id.ino == ino && (kind == Kind::Other || e.kind == kind)
-                            });
-                            kept.set(kept.get() + usize::from(entry.is_some()));
-                            entry.copied()
-                        })
+                        read_named(index, &old, root, stored.rel(i), opts, touched, &kept)
                     }
                     None => read_folder_watched(root, stored.rel(i), opts),
                 };
@@ -788,7 +810,7 @@ fn apply(
                     done.entries += listing.len() - kept.get();
                     done.largest = done.largest.max(listing.len());
                 }
-                (found, Seen::of(&outcome))
+                (found, Seen::of(outcome))
             }
         };
         let folder_facts = found.as_ref().map(facts);
@@ -835,4 +857,47 @@ fn apply(
         );
     }
     Ok(())
+}
+
+/// Folder `old` read again at `rel`, its events having named `touched`:
+/// those stat-ed, and what is new; every other entry taken as it was read
+/// where the listing gives it the same inode and kind, counted in `kept`.
+/// `reuse` is asked in the order of the names' bytes, as the crawl sorts
+/// its listing, as the old entries are: both are walked once, no map made
+/// of them. One asked out of order is found nowhere and stat-ed, never
+/// taken wrongly.
+fn read_named(
+    index: &Index,
+    old: &Block,
+    root: &Root,
+    rel: &Path,
+    opts: &Options,
+    touched: &HashSet<Box<[u8]>>,
+    kept: &Cell<usize>,
+) -> (Option<skwird_crawl::FolderStat>, Outcome, Watch) {
+    let mut heard: Vec<&[u8]> = touched.iter().map(|n| &n[..]).collect();
+    heard.sort_unstable();
+    let table = index.names();
+    let dev = old.facts.map_or(0, |f| f.id.dev);
+    let (at, at_heard) = (Cell::new(0), Cell::new(0));
+    read_folder_reusing(root, rel, opts, &|name, ino, kind| {
+        let mut h = at_heard.get();
+        while heard.get(h).is_some_and(|n| *n < name) {
+            h += 1;
+        }
+        at_heard.set(h);
+        if heard.get(h) == Some(&name) {
+            return None;
+        }
+        let mut a = at.get();
+        while old.items.get(a).is_some_and(|it| table.get(it.name) < name) {
+            a += 1;
+        }
+        at.set(a);
+        let item = old.items.get(a).filter(|it| table.get(it.name) == name)?;
+        let entry = index.entry_of(item, dev);
+        let same = entry.id.ino == ino && (kind == Kind::Other || entry.kind == kind);
+        kept.set(kept.get() + usize::from(same));
+        same.then_some(entry)
+    })
 }

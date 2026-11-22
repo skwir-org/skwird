@@ -1396,6 +1396,18 @@ committed once the gate holds.
      events in a save's 10 s, finding up to 1 s of them, a folder of
      89,740 entries read whole in 1.8 s), so changes waited the window.
 
+   **Measured quiet**, at `00067fa`, the disk unmounted (DESIGN 10): every
+   filesystem built in 7.4 s, the roots at once; read back, the home's
+   index loaded; met but for a change answered (279 ms at the median,
+   against 250) and the sync (0.13 s, against 0.1), which seem to share
+   the reads of the user's busy folder of 65,868 entries, 52 to 63 ms
+   each. Next: a large folder's read made cheaper.
+   Done (DESIGN 8, "A large folder's read costs its listing"): a listing
+   read in place and sorted, what is reused found by walking, the merge
+   taking the listing as it is, a changed chunk renumbered at the save.
+   A folder of 60,000 entries read again in 18.5 ms against 26 to 31.
+   To be measured again, quiet.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
