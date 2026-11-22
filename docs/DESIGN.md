@@ -875,6 +875,37 @@ page cache's to drop. A folder whose reads would take more than its
 share of a core lags by more than a second, live still; a sync applies
 it at once.
 
+**Budgets for the system service** (phase 3), set on 2026-11-22 from
+the system step of `tools/measure.sh` on the user's machine, at
+`50c540d`: seven roots on two filesystems (a btrfs, marked once through
+its top level, and another), 6.95 million entries in 830,581 folders, at
+a load of 4 to 5. Memory is per million entries, as phase 1's.
+
+| What | Budget | Measured | |
+|---|---|---|---|
+| A change to its answer, no sync | 0.25 s at the median, 1 s at most | 231 ms, 354 ms at most | met |
+| A sync of a live folder | 0.1 s | 0.09 s | met |
+| First live answer, read back and every root checked | 0.3 s per million entries | 1.35 s (0.19 s per million) | met |
+| A query answered to a user, filtered for them, against root's | 1.25 times root's | 0.63 s against 0.54 s for 100,000 results (1.17) | met |
+| Memory at rest | as a user's engine's, 26 MB per million entries | 168 to 187 MB (24 to 27 MB per million) | met |
+| Memory at the peak of a first build | 150 MB per million entries, as phase 1's | 584 MB (84 MB per million) | met |
+| Processor time, no client asking | 2% of a core | 0.85 s in 30 s (2.8%) | not met |
+
+Not met: the duty cycle (8) holds what applying what is heard costs,
+not what finding each event's folder does (a handle opened, its path
+read and checked, for each folder heard in each batch), nor the saves.
+The machine's own activity was heard meanwhile: 2,875 events while it
+built, then 100 to 160 in each 10 s, a cache folder of 58,919 entries
+read again up to 20 times in one. Next:
+the whole of what the writer does for what is heard held to the share.
+
+Not set: the first build. The run built every root in 28.9 s, the home
+in 27.6 s, three times phase 1's warm build of it; the step ran alone,
+nothing warming the home before, and a crawl stats every entry, so it
+was near cold. The flag of folders with an ACL (one `fgetxattr` each)
+cost 2.5 to 8% on a warm synthetic tree of 100,000 folders, not that.
+A warm run sets it. The index on disk was 294 MB.
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`

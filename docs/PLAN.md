@@ -13,7 +13,8 @@ the user's home and given budgets (DESIGN 10), the three of memory
 third measurements. Phase 2 is done, its seven steps: the engine as a
 user service, folders its clients register watched and answered live,
 a sync of them a barrier, the mount table followed, within budgets of
-its own (DESIGN 10). Phase 3 is built, but for its budgets (step 8):
+its own (DESIGN 10). Phase 3 is built and measured (step 8: one budget
+not met, idle processor time, and the build's not set):
 the system service, fanotify on whole filesystems, every user answered
 what they could list (ACLs evaluated), each user's exclusions kept, a
 sandboxed unit and a NixOS module, proven as root in virtual machines.
@@ -1235,7 +1236,8 @@ committed once the gate holds.
    folder, which the barrier serves: in both engines, since phase 2. It
    holds from every sync now, and a test of the user's engine proves it
    (it fails without the fix).
-8. **Budgets,** measured by the user on their machine, as root.
+8. **Budgets,** measured by the user on their machine, as root (done on
+   2026-11-22, but for one not met and one not set).
 
    **Ready, not run:** `tools/measure.sh --only system` (README,
    "Measuring"), never run unless named. It runs the system service as
@@ -1247,6 +1249,19 @@ committed once the gate holds.
    the user and the same as root, idle processor time and memory, then
    the first live answer read back. It could not be tried here: it needs
    sudo, which a session has not.
+
+   **Run on 2026-11-22** by the user, at `50c540d`, on their machine: it
+   ran as written. The budgets are set (DESIGN 10, "Budgets for the
+   system service"): six met, a change answered in 231 ms at the median,
+   the first live answer read back and checked in 1.35 s for 6.95
+   million entries, a user's query 1.17 times root's. Not met: 2.8% of a
+   core idle, over the 2% the duty cycle holds applying to, since finding
+   each event's folder and saving are outside it. Not set: the first
+   build, near cold in this run (28.9 s), three times phase 1's warm
+   build of the home; the ACL flag's call, timed on a synthetic tree,
+   costs a few percent, not that. A warm run sets it. At its first sync,
+   one root held to its exclusions afresh (one folder purged): what the
+   rule of deriving them again is for (DESIGN 5).
 
    **Reviewed on 2026-11-22**, by a reader not anchored on the work, for
    what a user other than root could learn or do. Fixed, each with a
