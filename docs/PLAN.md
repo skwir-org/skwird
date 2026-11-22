@@ -4,7 +4,7 @@ Each phase is useful alone, and ends with what was measured and what is
 left, honestly. The design is `docs/DESIGN.md`; a phase that changes a
 decision changes it there.
 
-## Where it stands (2026-11-22)
+## Where it stands (2026-11-22, morning)
 
 Phase 0 is done. Phase 1 is done, its eight steps: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
@@ -13,8 +13,11 @@ the user's home and given budgets (DESIGN 10), the three of memory
 third measurements. Phase 2 is done, its seven steps: the engine as a
 user service, folders its clients register watched and answered live,
 a sync of them a barrier, the mount table followed, within budgets of
-its own (DESIGN 10). Phase 3's first step is done: the virtual
-machines its tests need, the flake's checks. The
+its own (DESIGN 10). Phase 3 is built, but for its budgets (step 8):
+the system service, fanotify on whole filesystems, every user answered
+what they could list (ACLs evaluated), each user's exclusions kept, a
+sandboxed unit and a NixOS module, proven as root in virtual machines.
+The
 choices phase 1 waited on were made on 2026-11-11 (DESIGN 2, 5 and the
 Protocol): private folders a client registers, tool stores indexed,
 network mounts never crawled, no crate on crates.io. skwir released
@@ -1230,6 +1233,17 @@ committed once the gate holds.
    holds from every sync now, and a test of the user's engine proves it
    (it fails without the fix).
 8. **Budgets,** measured by the user on their machine, as root.
+
+   **Ready, not run:** `tools/measure.sh --only system` (README,
+   "Measuring"), never run unless named. It runs the system service as
+   root over the whole machine, its folders in the measurement's cache
+   and its socket where a user's client looks for its own, so that it
+   meets no engine of the user's; it refuses where a system service
+   already answers. Asked as the user, it times the first live answer, a
+   change answered, a sync of the home, a query of the home filtered for
+   the user and the same as root, idle processor time and memory, then
+   the first live answer read back. It could not be tried here: it needs
+   sudo, which a session has not.
 
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files

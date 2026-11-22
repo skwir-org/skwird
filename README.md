@@ -105,12 +105,16 @@ pass, which slows the machine for a while afterwards, and to try
 fanotify, which only root may use on a whole filesystem. In a btrfs
 subvolume, fanotify also mounts the filesystem's top-level subvolume,
 read-only and attached nowhere, for the seconds it listens. `--no-root`
-skips both, and `--only walk|check|fanotify|index|engine` runs one step.
+skips both, and `--only walk|check|fanotify|index|engine|live` runs one step.
 The `index` step builds skwird's index of the folder, saves it and
 reads it back, and times a few queries; the `engine` step runs a
 user's engine on it, with folders of its own in your cache, and times
 the first answer (built, then read back), a sync and 30 idle seconds,
-with the memory it holds. Both remove what they built. It builds the
+with the memory it holds. Both remove what they built. `--only system`,
+never run unless named, runs the system service as root over the whole
+machine, its folders in your cache, and asks it as you: its first live
+answer, a change answered, a sync, your queries filtered, idle and
+memory, then read back. It builds the
 tools first when cargo is at hand.
 
 The tool's commands, run by hand:

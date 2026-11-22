@@ -5,7 +5,10 @@
 #
 #   tools/measure.sh [--no-root] [--only STEP[,STEP]...] [FOLDER]
 #
-# STEP: walk, check, fanotify, index, engine, live. Every step by default.
+# STEP: walk, check, fanotify, index, engine, live, system. Every step by
+# default but system, which runs only when named: it runs the system
+# service (phase 3) as root over the whole machine, its folders in your
+# cache, and asks it as you, then removes what it built.
 #
 # It asks for your password once (sudo), to drop the caches before each
 # cold pass (the machine is slower for a while after) and to try
@@ -34,9 +37,9 @@ while [ $# -gt 0 ]; do
         # One step, or several with commas between: engine,live.
         for step in ${2//,/ }; do
             case $step in
-            walk | check | fanotify | index | engine | live) ;;
+            walk | check | fanotify | index | engine | live | system) ;;
             *)
-                echo "--only takes walk, check, fanotify, index, engine or live, or several with commas ($usage)" >&2
+                echo "--only takes walk, check, fanotify, index, engine, live or system, or several with commas ($usage)" >&2
                 exit 2
                 ;;
             esac
@@ -110,6 +113,8 @@ cleanup() {
     # cut short.
     if [ -n "$engine_pid" ]; then kill "$engine_pid" 2>/dev/null || true; fi
     rm -rf "$cache/index" "$cache/engine"
+    if [ -n "${sys_pid:-}" ]; then sudo -n kill "$sys_pid" 2>/dev/null || true; fi
+    if [ -d "${sys_dir:-}" ]; then sudo -n rm -rf "$sys_dir" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
@@ -287,6 +292,116 @@ measure_live() {
     rm -rf "$engine_dir"
 }
 
+# The system service (phase 3), as root: every local filesystem that
+# stores files marked whole and indexed, its folders in the measurement's
+# cache, its socket where a user's client looks for its own, so that it
+# never meets an engine of yours. Asked as you: the time to its first live
+# answer, a change answered, a sync, your queries filtered for you, idle,
+# memory; then read back. Never run unless named (--only system).
+sys_dir=$cache/system
+sys_pid=
+sys_sudo=
+sysw() {
+    env XDG_RUNTIME_DIR="$sys_dir/run" SKWIRD_NO_START=1 "$engine" "$@"
+}
+serve_system() {
+    sudo -n env RUNTIME_DIRECTORY="$sys_dir/run/skwird" CACHE_DIRECTORY="$sys_dir/cache" \
+        STATE_DIRECTORY="$sys_dir/state" CONFIGURATION_DIRECTORY="$sys_dir/config" \
+        "$engine" serve --system --forever 2>>"$sys_dir/engine.log" &
+    sys_sudo=$!
+    sys_pid=
+    # sudo's child, or, where sudo runs it through a pty, its grandchild.
+    local parents c
+    for _ in $(seq 1 100); do
+        parents=$sys_sudo
+        for _ in 1 2 3; do
+            for c in $(pgrep -P "$parents" 2>/dev/null || true); do
+                if [ "$(cat "/proc/$c/comm" 2>/dev/null)" = skwird ]; then sys_pid=$c; fi
+            done
+            [ -n "$sys_pid" ] && break 2
+            parents=$(pgrep -P "$parents" 2>/dev/null | paste -sd, || true)
+            [ -n "$parents" ] || break
+        done
+        sleep 0.05
+    done
+}
+stop_system() {
+    if [ -n "$sys_pid" ]; then sudo -n kill "$sys_pid" 2>/dev/null || true; fi
+    if [ -n "$sys_sudo" ]; then wait "$sys_sudo" 2>/dev/null || true; fi
+    sys_pid=
+    sys_sudo=
+}
+live_answer() {
+    local deadline=$((SECONDS + 1800))
+    while [ $SECONDS -lt $deadline ]; do
+        if sysw coverage "$HOME" 2>/dev/null | grep -q '^names: live since '; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+measure_system() {
+    if [ -S /run/skwird/socket ]; then
+        echo "(a system service runs here: not measured, so as not to meet it)"
+        return 0
+    fi
+    sudo -n rm -rf "$sys_dir"
+    mkdir -p "$sys_dir"
+    local start
+    start=$(now)
+    serve_system
+    if [ -z "$sys_pid" ] || ! live_answer; then
+        echo "(the service never answered live)"
+        stop_system
+        return 1
+    fi
+    echo "first live answer, every filesystem built: $(since "$start") s"
+    echo "memory once built: $(sudo -n cat "/proc/$sys_pid/status" | awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } END { printf "%.0f MB now, %.0f MB at most", now / 1000, most / 1000 }')"
+    local times=() i t0 name
+    for i in $(seq 1 10); do
+        name="skwird-system-probe-$i"
+        t0=$(now)
+        : >"$probe/$name"
+        until sysw find "$name" --in "$probe" 2>/dev/null | grep -q .; do
+            [ "$(since "$t0" | cut -d. -f1)" -lt 10 ] || break
+            sleep 0.005
+        done
+        times+=("$(since_ms "$t0")")
+        rm -f "$probe/$name"
+        sleep 0.3
+    done
+    printf '%s\n' "${times[@]}" | sort -n | awk '{ a[NR] = $1 } END { printf "a change to its answer, live (%d files made): median %d ms, most %d ms\n", NR, a[int((NR + 1) / 2)], a[NR] }'
+    start=$(now)
+    sysw sync "$HOME" >/dev/null
+    echo "a sync of your home (the barrier): $(since "$start") s"
+    start=$(now)
+    local n
+    n=$(sysw find e --in "$HOME" --limit 100000 2>/dev/null | wc -l)
+    echo "a query of your home as you, filtered for you: $(since "$start") s, $n results"
+    start=$(now)
+    n=$(sudo -n env XDG_RUNTIME_DIR="$sys_dir/run" SKWIRD_NO_START=1 "$engine" find e --in "$HOME" --limit 100000 2>/dev/null | wc -l)
+    echo "the same as root, not filtered: $(since "$start") s, $n results"
+    local before
+    before=$(sudo -n awk '{ print $14 + $15 }' "/proc/$sys_pid/stat")
+    sleep 30
+    echo "idle, 30 s without a client: $(sudo -n awk -v a="$before" -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15 - a) / hz }' "/proc/$sys_pid/stat") s of processor time"
+    echo "memory idle: $(sudo -n cat "/proc/$sys_pid/status" | awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } END { printf "%.0f MB now, %.0f MB at most", now / 1000, most / 1000 }')"
+    stop_system
+    start=$(now)
+    serve_system
+    if [ -n "$sys_pid" ] && live_answer; then
+        echo "first live answer, read back and checked: $(since "$start") s"
+    else
+        echo "(the service never answered live, read back)"
+    fi
+    stop_system
+    echo "the service's log (counts and times):"
+    sed 's/^/  /' "$sys_dir/engine.log"
+    echo "index on disk: $(sudo -n du -sb "$sys_dir/cache" | awk '{ printf "%.1f MB", $1 / 1e6 }')"
+    sudo -n rm -rf "$sys_dir"
+}
+
 section() { printf '\n== %s\n' "$1"; }
 
 # A step that fails says so, and the others still run.
@@ -382,6 +497,16 @@ disk() {
     if want live; then
         section "live: folders kept live (phase 2)"
         run measure_live
+    fi
+
+    # Named alone: it runs the system service as root over the machine.
+    if [[ ",$only," == *",system,"* ]]; then
+        section "system: the system service (phase 3), as root"
+        if [ "$use_root" = 1 ]; then
+            run measure_system
+        else
+            echo "not tried: it needs sudo"
+        fi
     fi
 
     echo
