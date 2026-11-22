@@ -49,3 +49,62 @@ pub fn coverage_at(index: &Index, root: &Path, rel: &Path) -> Option<wire::Cover
             .collect(),
     })
 }
+
+/// The weaker of two proofs, for an answer that holds both: not covered
+/// before a snapshot, a snapshot before a check, a check before live. Of
+/// two alike, the one that says least: the older snapshot or check, the
+/// later start of live.
+pub fn weaker(a: wire::Proof, b: wire::Proof) -> wire::Proof {
+    use wire::Proof::{AsOf, Checked, Live, NotCovered};
+    let rank = |p: &wire::Proof| match p {
+        NotCovered(_) => 0,
+        AsOf(_) => 1,
+        Checked(_) => 2,
+        Live(_) => 3,
+    };
+    match (a, b) {
+        (Live(x), Live(y)) => Live(x.max(y)),
+        (Checked(x), Checked(y)) => Checked(x.min(y)),
+        (AsOf(x), AsOf(y)) => AsOf(x.min(y)),
+        (a, b) if rank(&a) <= rank(&b) => a,
+        (_, b) => b,
+    }
+}
+
+/// `outer`, the coverage of a folder above another root, with that root's
+/// coverage, `inner`, at its place: the mount hole there gone, its own
+/// holes in, each proof the weaker of both.
+pub fn with_root_below(
+    mut outer: wire::Coverage,
+    at: &Path,
+    inner: wire::Coverage,
+) -> wire::Coverage {
+    let at = wire::WirePath::of(at);
+    outer.holes.retain(|h| h.path != at);
+    outer.holes.extend(inner.holes);
+    outer.names = weaker(outer.names, inner.names);
+    outer.attrs = weaker(outer.attrs, inner.attrs);
+    outer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(sec: i64) -> wire::Instant {
+        wire::Instant { sec, nsec: 0 }
+    }
+
+    #[test]
+    fn the_weaker_proof_says_least() {
+        use wire::Proof::{AsOf, Checked, Live, NotCovered};
+        assert_eq!(weaker(Live(at(5)), Live(at(9))), Live(at(9)));
+        assert_eq!(weaker(Checked(at(5)), Checked(at(9))), Checked(at(5)));
+        assert_eq!(weaker(AsOf(at(5)), Live(at(1))), AsOf(at(5)));
+        assert_eq!(weaker(Live(at(1)), Checked(at(9))), Checked(at(9)));
+        assert_eq!(
+            weaker(Checked(at(1)), NotCovered(wire::Why::Unread)),
+            NotCovered(wire::Why::Unread)
+        );
+    }
+}

@@ -583,3 +583,54 @@ fn the_journal_tells_each_user_what_they_could_list() {
     );
     assert_eq!(read(0), both);
 }
+
+/// A query of a folder above another root answers from both, and its
+/// coverage holds the other at its place: no mount hole there, live.
+#[test]
+fn a_query_above_another_root_answers_from_both() {
+    let Some(m) = machine() else { return };
+    let outer = Place::new(&m.ext4, "outer");
+    std::fs::write(outer.join("in the outer.txt"), b"x").unwrap();
+    std::fs::create_dir_all(outer.join("inner")).unwrap();
+    let source = Place::new(&m.btrfs.join("a"), "inner-source");
+    std::fs::write(source.join("in the inner.txt"), b"x").unwrap();
+    let mount = |args: &[&std::ffi::OsStr]| {
+        assert!(Command::new("mount").args(args).status().unwrap().success());
+    };
+    mount(&[
+        "--bind".as_ref(),
+        source.0.as_os_str(),
+        outer.join("inner").as_os_str(),
+    ]);
+    let dirs = Place::new(&m.ext4, "outer-dirs");
+    let service = Service::start(&dirs.0, &[&outer.0, &outer.join("inner")]);
+    let mut c = service.client(&outer.0);
+    wait_for(20, "live", || {
+        live(&mut c, &outer.0) && live(&mut c, &outer.join("inner"))
+    });
+    let found = answered(&mut c, &named(&outer.0, "in the"));
+    let coverage = c.coverage(&outer.0).unwrap();
+    drop(c);
+    drop(service);
+    assert!(
+        Command::new("umount")
+            .arg(outer.join("inner"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        found,
+        [
+            outer.join("in the outer.txt"),
+            outer.join("inner/in the inner.txt")
+        ]
+        .into()
+    );
+    assert!(
+        matches!(coverage.names, Proof::Live(_)),
+        "{:?}",
+        coverage.names
+    );
+    assert_eq!(coverage.holes, Vec::new());
+}

@@ -100,8 +100,10 @@ service manager's (`RUNTIME_DIRECTORY`, `CACHE_DIRECTORY`,
 `/var/cache/skwird`, `/var/lib/skwird` and `/etc/skwird`; its socket
 is open to every user (the folder 0755, the socket 0666), its index and
 state its own (0700). Not yet: a filesystem mounted after it started is
-a hole until it starts again, and a query at a folder above several
-roots (`/`) is answered from the root holding it, the others holes.
+a hole until it starts again. A query or a coverage at a folder above
+several roots (`/` above `/home`) is answered from each, every root
+below at its place: its mount hole gone, the proof the weaker of all;
+one the asker may not reach, or not read yet, a hole there.
 
 An engine a client starts runs in a process group of its own, so that a
 terminal's interrupt does not reach it, but in the client's control

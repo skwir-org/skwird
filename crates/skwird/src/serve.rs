@@ -218,7 +218,29 @@ fn outside() -> wire::Coverage {
 }
 
 /// The coverage below `root`, from the snapshot published now.
+/// How far answers below `root` can be trusted, for `asker`: the roots
+/// below it (the system service's other filesystems) each at its place.
 fn coverage(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire::Coverage, Answer> {
+    let path = root.to_path();
+    let mut c = coverage_one(shared, root, asker)?;
+    if matches!(c.names, wire::Proof::NotCovered(_)) {
+        return Ok(c);
+    }
+    let Some((i, _)) = shared.locate(&path) else {
+        return Ok(c);
+    };
+    let mut below = shared.roots_below(&path, i);
+    below.sort_by_key(|&j| shared.roots[j].components().count());
+    for j in below {
+        if let Ok(inner) = coverage_one(shared, &WirePath::of(&shared.roots[j]), asker) {
+            c = at_root_below(c, &shared.roots[j], inner);
+        }
+    }
+    Ok(c)
+}
+
+/// [`coverage`], of the root holding `root` alone.
+fn coverage_one(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire::Coverage, Answer> {
     let path = root.to_path();
     let Some((i, rel)) = shared.locate(&path) else {
         return Ok(outside());
@@ -609,8 +631,10 @@ fn changes(
     })
 }
 
-/// Answer a query from the snapshot published now, in batches, then
-/// `done` with the coverage that held; cancelled, `done` says so.
+/// Answer a query from the snapshots published now, in batches, then
+/// `done` with the coverage that held; cancelled, `done` says so. The
+/// roots below the folder asked (the system service's other filesystems)
+/// answer too, each at its place, so that a query of `/` holds `/home`.
 fn answer_query(
     shared: &Shared,
     writer: &Writer,
@@ -631,24 +655,6 @@ fn answer_query(
     let Some((i, rel)) = shared.locate(&path) else {
         return done(outside(), 0, false);
     };
-    let index = match shared.snapshot(i) {
-        Published::Ready(index) => index,
-        Published::Opening => {
-            return done(
-                wire::Coverage {
-                    names: wire::Proof::NotCovered(wire::Why::Unread),
-                    attrs: wire::Proof::NotCovered(wire::Why::Unread),
-                    holes: Vec::new(),
-                },
-                0,
-                false,
-            );
-        }
-        Published::Failed(why) => return failure("internal", why),
-    };
-    // Another user than root, asking the system service, is answered what
-    // they could list (DESIGN 4).
-    let seeing = seeing(shared, i, &index, who);
     // The system service answers any local user: a query gives at most
     // so many results, past which its `done` says there were more.
     let most = match (query.limit, shared.system) {
@@ -656,17 +662,7 @@ fn answer_query(
         (None, true) => Some(MOST_RESULTS),
         (l, false) => l,
     };
-    if let Some(s) = &seeing
-        && let Reached::Denied = reached(s, &rel, &mut HashMap::new())
-    {
-        return done(denied(), 0, false);
-    }
-    let Some(mut coverage) = coverage_at(&index, &shared.roots[i], &rel) else {
-        return failure("not_a_folder", "no folder of the index is at that path");
-    };
-    let Some(folder) = index.folder_at(&rel) else {
-        return failure("not_a_folder", "no folder of the index is at that path");
-    };
+    let limit = most.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let asked = Query {
         name: query.name.as_ref().map(|n| NameQuery {
             pattern: match n.how {
@@ -686,20 +682,100 @@ fn answer_query(
             .mtime
             .map(|[a, b]| convert::time_of(a)..=convert::time_of(b)),
         // One more than asked, to say whether there were more.
-        limit: most.map(|l| usize::try_from(l).unwrap_or(usize::MAX).saturating_add(1)),
+        limit: Some(limit.saturating_add(1)),
     };
+    let (mut entries, mut coverage) = match answer_in(shared, i, &rel, &asked, who) {
+        Ok(found) => found,
+        Err(answer) => return answer,
+    };
+    if !matches!(coverage.names, wire::Proof::NotCovered(_)) {
+        let mut below = shared.roots_below(&path, i);
+        below.sort_by_key(|&j| shared.roots[j].components().count());
+        for j in below {
+            if entries.len() > limit {
+                break;
+            }
+            let Ok((more, inner)) = answer_in(shared, j, Path::new(""), &asked, who) else {
+                continue;
+            };
+            coverage = at_root_below(coverage, &shared.roots[j], inner);
+            entries.extend(more);
+        }
+    }
+    let truncated = entries.len() > limit;
+    entries.truncate(limit);
+    let mut sent = 0u64;
+    for batch in entries.chunks(BATCH) {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if !send(writer, id, Answer::Results(batch.to_vec())) {
+            break;
+        }
+        sent += batch.len() as u64;
+    }
+    done(coverage, sent, truncated)
+}
+
+/// `outer`'s coverage with root `at`'s, `inner`, at its place: merged if
+/// it is covered; otherwise (the asker may not reach it, or it is not
+/// read yet) a hole there, the rest as it was.
+fn at_root_below(outer: wire::Coverage, at: &Path, inner: wire::Coverage) -> wire::Coverage {
+    match inner.names {
+        wire::Proof::NotCovered(why) => {
+            let mut outer = outer;
+            let path = WirePath::of(at);
+            outer.holes.retain(|h| h.path != path);
+            outer.holes.push(wire::Hole { path, why });
+            outer
+        }
+        _ => crate::coverage::with_root_below(outer, at, inner),
+    }
+}
+
+/// What root `i` answers below `rel` to `asked`, as `who` may see it, and
+/// the coverage that held.
+fn answer_in(
+    shared: &Shared,
+    i: usize,
+    rel: &Path,
+    asked: &Query,
+    who: &Asker,
+) -> Result<(Vec<wire::Entry>, wire::Coverage), Answer> {
+    let index = match shared.snapshot(i) {
+        Published::Ready(index) => index,
+        Published::Opening => {
+            return Ok((
+                Vec::new(),
+                wire::Coverage {
+                    names: wire::Proof::NotCovered(wire::Why::Unread),
+                    attrs: wire::Proof::NotCovered(wire::Why::Unread),
+                    holes: Vec::new(),
+                },
+            ));
+        }
+        Published::Failed(why) => return Err(failure("internal", why)),
+    };
+    // Another user than root, asking the system service, is answered what
+    // they could list (DESIGN 4).
+    let seeing = seeing(shared, i, &index, who);
+    if let Some(s) = &seeing
+        && let Reached::Denied = reached(s, rel, &mut HashMap::new())
+    {
+        return Ok((Vec::new(), denied()));
+    }
+    let not_a_folder = || failure("not_a_folder", "no folder of the index is at that path");
+    let mut coverage = coverage_at(&index, &shared.roots[i], rel).ok_or_else(not_a_folder)?;
+    let folder = index.folder_at(rel).ok_or_else(not_a_folder)?;
     let found = match &seeing {
-        None => index.query(folder, &asked).map(|hits| (hits, Vec::new())),
+        None => index.query(folder, asked).map(|hits| (hits, Vec::new())),
         Some(s) => {
             let sight = |f: FolderId, memo: &mut HashMap<FolderId, Sight>| s.sight(f, memo);
-            index.query_seen(folder, &asked, Some(&sight))
+            index.query_seen(folder, asked, Some(&sight))
         }
     };
-    let (hits, unknown) = match found {
-        Ok(found) => found,
-        Err(e) => return failure("bad_pattern", e),
-    };
-    // What was withheld for an ACL not evaluated: not covered, so that the
+    let (hits, unknown) = found.map_err(|e| failure("bad_pattern", e))?;
+    // What was withheld for an ACL not read: not covered, so that the
     // client walks it.
     if let Some(s) = &seeing {
         let mut memo = HashMap::new();
@@ -711,21 +787,11 @@ fn answer_query(
             .holes
             .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
     }
-    let limit = most.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
-    let truncated = hits.len() > limit;
     let root: &Path = &shared.roots[i];
-    let mut sent = 0u64;
-    for batch in hits[..hits.len().min(limit)].chunks(BATCH) {
-        if cancelled.load(Ordering::Relaxed) {
-            break;
-        }
-        let entries = batch.iter().map(|h| convert::hit(root, h)).collect();
-        if !send(writer, id, Answer::Results(entries)) {
-            break;
-        }
-        sent += batch.len() as u64;
-    }
-    done(coverage, sent, truncated)
+    Ok((
+        hits.iter().map(|h| convert::hit(root, h)).collect(),
+        coverage,
+    ))
 }
 
 #[cfg(test)]

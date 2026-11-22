@@ -94,6 +94,17 @@ impl Shared {
     }
 
     /// The root holding `path`, by its spelling, and the path below it.
+    /// The other roots strictly below `path`, which root `of` holds: the
+    /// system service's other filesystems mounted below the folder asked.
+    pub fn roots_below(&self, path: &Path, of: usize) -> Vec<usize> {
+        self.roots
+            .iter()
+            .enumerate()
+            .filter(|&(j, r)| j != of && r.starts_with(path) && r.as_path() != path)
+            .map(|(j, _)| j)
+            .collect()
+    }
+
     pub fn locate(&self, path: &Path) -> Option<(usize, PathBuf)> {
         self.roots
             .iter()
