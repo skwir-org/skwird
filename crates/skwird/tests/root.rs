@@ -9,7 +9,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeSet;
-use std::os::unix::process::CommandExt;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -154,40 +154,157 @@ fn the_service_hears_whole_filesystems_live() {
     assert!(live(&mut c, &btrfs.0));
 }
 
-/// Until its answers are filtered for each asker (step 5), the system
-/// service answers root alone: another user is refused (rule 2).
-#[test]
-fn the_service_answers_root_alone_for_now() {
-    let Some(m) = machine() else { return };
-    let root = Place::new(&m.ext4, "alone");
-    let dirs = Place::new(&m.ext4, "alone-dirs");
-    let service = Service::start(&dirs.0, &[&root.0]);
-    service.client(&root.0);
-    let out = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "as_another_user",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("SKWIRD_TEST_PEER", &service.socket)
-        .uid(65534)
-        .gid(65534)
-        .output()
-        .unwrap();
+/// A folder below `place`, made with this owner, group and mode.
+fn folder(place: &Place, rel: &str, owner: u32, group: u32, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = place.join(rel);
+    std::fs::create_dir_all(&path).unwrap();
+    std::os::unix::fs::chown(&path, Some(owner), Some(group)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+/// What the service answers a user, as they see it: every entry found
+/// below `root`, and the folders said not covered, each prefixed so. Run
+/// as that user, by the test binary run again through `setpriv`.
+fn as_user(socket: &Path, root: &Path, uid: u32, gid: u32, groups: &[u32]) -> BTreeSet<String> {
+    let groups: Vec<String> = groups.iter().map(u32::to_string).collect();
+    let mut c = Command::new("setpriv");
+    c.args([
+        format!("--reuid={uid}"),
+        format!("--regid={gid}"),
+        if groups.is_empty() {
+            "--clear-groups".to_owned()
+        } else {
+            format!("--groups={}", groups.join(","))
+        },
+    ])
+    .arg(std::env::current_exe().unwrap())
+    .args(["--exact", "an_asker", "--nocapture", "--test-threads=1"])
+    .env("SKWIRD_TEST_PEER", socket)
+    .env("SKWIRD_TEST_ROOT", root);
+    let out = c.output().unwrap();
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && said.contains("1 passed"),
         "{said}{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    said.lines()
+        // The harness writes `test an_asker ... ` before the first line, with
+        // no newline.
+        .filter_map(|l| l.split_once("seen: ").map(|(_, rest)| rest))
+        .map(str::to_owned)
+        .collect()
 }
 
-/// Run by the test above, as another user: the service does not answer.
+/// Run by the test below as another user: says each entry found, and each
+/// folder said not covered.
 #[test]
-fn as_another_user() {
-    let Some(socket) = std::env::var_os("SKWIRD_TEST_PEER") else {
+fn an_asker() {
+    let (Some(socket), Some(root)) = (
+        std::env::var_os("SKWIRD_TEST_PEER"),
+        std::env::var_os("SKWIRD_TEST_ROOT"),
+    ) else {
         return;
     };
-    assert!(Client::at(Path::new(&socket), "another").is_err());
+    let root = PathBuf::from(root);
+    let mut c = Client::at(Path::new(&socket), "an-asker").unwrap();
+    let everything = Query {
+        name: None,
+        ..named(&root, "")
+    };
+    let mut seen = Vec::new();
+    let done = c
+        .query(&everything, |batch| {
+            seen.extend(batch.iter().map(|e| e.path.to_path()));
+            true
+        })
+        .unwrap();
+    for path in seen {
+        let rel = path.strip_prefix(&root).unwrap();
+        println!("seen: found {}", rel.display());
+    }
+    // A folder they may not list, and a path in it that is not there, are
+    // answered alike: whether it exists is not said.
+    for rel in ["someone", "someone/not there"] {
+        let said = match c.coverage(&root.join(rel)) {
+            Ok(cov) => match cov.names {
+                Proof::NotCovered(why) => format!("{why:?}"),
+                _ => "covered".to_owned(),
+            },
+            Err(_) => "no folder".to_owned(),
+        };
+        println!("seen: covers {rel}: {said}");
+    }
+    for hole in done.coverage.holes {
+        let rel = hole.path.to_path();
+        println!("seen: hole {}", rel.strip_prefix(&root).unwrap().display());
+    }
+}
+
+/// The system service answers every user what they could list (DESIGN 4):
+/// a folder only its owner may read, one its group may, one any may, one
+/// that may be passed through but not listed, and one with an ACL, whose
+/// names are withheld from all but root, and said not covered.
+#[test]
+fn each_user_is_answered_what_they_could_list() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.ext4, "askers");
+    folder(&place, "", 0, 0, 0o755);
+    let own = folder(&place, "someone", 1000, 1000, 0o700);
+    std::fs::write(own.join("someone's secret.txt"), b"x").unwrap();
+    let open = folder(&place, "shared", 1001, 1001, 0o755);
+    std::fs::write(open.join("open to all.txt"), b"x").unwrap();
+    let team = folder(&place, "team", 0, 2000, 0o750);
+    std::fs::write(team.join("for the team.txt"), b"x").unwrap();
+    folder(&place, "passage", 0, 0, 0o711);
+    let inner = folder(&place, "passage/inner", 0, 0, 0o755);
+    std::fs::write(inner.join("through a passage.txt"), b"x").unwrap();
+    let acl = folder(&place, "acl", 0, 0, 0o700);
+    std::fs::write(acl.join("granted by an acl.txt"), b"x").unwrap();
+    let granted = Command::new("setfacl")
+        .args(["-m", "u:1001:rx"])
+        .arg(&acl)
+        .status()
+        .unwrap();
+    assert!(granted.success());
+    let dirs = Place::new(&m.ext4, "askers-dirs");
+    let service = Service::start(&dirs.0, &[&place.0]);
+    let mut c = service.client(&place.0);
+    wait_for(20, "live", || live(&mut c, &place.0));
+    let set =
+        |items: &[&str]| -> BTreeSet<String> { items.iter().map(|s| (*s).to_owned()).collect() };
+    let everyone = [
+        "found someone",
+        "found shared",
+        "found shared/open to all.txt",
+        "found team",
+        "found passage",
+        "found passage/inner/through a passage.txt",
+        "found acl",
+        "hole acl",
+    ];
+    let mut someone = set(&everyone);
+    someone.extend(set(&[
+        "found someone/someone's secret.txt",
+        "found team/for the team.txt",
+        "covers someone: covered",
+        "covers someone/not there: no folder",
+    ]));
+    assert_eq!(
+        as_user(&service.socket, &place.0, 1000, 1000, &[2000]),
+        someone
+    );
+    let mut other = set(&everyone);
+    other.extend(set(&[
+        "covers someone: Denied",
+        "covers someone/not there: Denied",
+    ]));
+    assert_eq!(as_user(&service.socket, &place.0, 1001, 1001, &[]), other);
+    // Root sees everything, and nothing is withheld from it.
+    let all = as_user(&service.socket, &place.0, 0, 0, &[]);
+    assert!(all.contains("found acl/granted by an acl.txt"), "{all:?}");
+    assert!(all.contains("found passage/inner"), "{all:?}");
+    assert!(!all.iter().any(|s| s.starts_with("hole")), "{all:?}");
 }

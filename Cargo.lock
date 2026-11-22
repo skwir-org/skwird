@@ -175,6 +175,7 @@ dependencies = [
 name = "skwird"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "rustix",
  "serde",
  "serde_json",

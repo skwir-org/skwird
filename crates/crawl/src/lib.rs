@@ -311,7 +311,16 @@ pub struct Options {
     /// trusted: within it, it is read again at the next check. Two
     /// seconds covers the coarsest change times local filesystems keep.
     pub tick: Duration,
+    /// Say of each folder read whether it has an access ACL ([`ACL`] in
+    /// its mode), as the system service needs to answer each asker
+    /// (DESIGN 4): one more call a folder.
+    pub acls: bool,
 }
+
+/// The bit of a folder's mode, above its permission bits, that says it
+/// has an access ACL ([`Options::acls`]); one whose ACL could not be read
+/// says so too, so that it is never answered as its mode alone says.
+pub const ACL: u16 = 0o10000;
 
 impl Default for Options {
     fn default() -> Self {
@@ -320,6 +329,7 @@ impl Default for Options {
             threads: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
             attrs: true,
             tick: Duration::from_secs(2),
+            acls: false,
         }
     }
 }

@@ -10,6 +10,8 @@
 #[cfg(target_os = "linux")]
 pub mod activation;
 #[cfg(target_os = "linux")]
+pub mod asker;
+#[cfg(target_os = "linux")]
 pub mod convert;
 #[cfg(target_os = "linux")]
 pub mod coverage;

@@ -389,3 +389,42 @@ fn saved_and_mapped_back_it_answers_alike() {
         Err(LoadError::Missing)
     ));
 }
+
+/// A folder with an access ACL, crawled for a system service (its mode
+/// says so, `skwird_crawl::ACL`), is answered like any other: its entry in
+/// its parent, and what it holds.
+#[test]
+fn a_folder_with_an_acl_is_indexed_like_any() {
+    let s = Scratch::new("acl-folder");
+    s.file("shared/inside.txt");
+    s.file("plain/other.txt");
+    std::fs::set_permissions(
+        s.join("shared"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let set = std::process::Command::new("setfacl")
+        .args(["-m", "u:65534:rx"])
+        .arg(s.join("shared"))
+        .status();
+    if !set.is_ok_and(|st| st.success()) {
+        eprintln!("skipped: no setfacl, or no ACLs on this filesystem");
+        return;
+    }
+    let root = Root::open(s.path(), Exclusions::none()).unwrap();
+    let opts = Options {
+        acls: true,
+        ..Options::default()
+    };
+    let crawl = crawl_all(&root, &opts, &Cancel::default()).unwrap();
+    let index = build(crawl, Limits::default());
+    let all = answered(&index, Path::new(""), &Query::default());
+    for rel in ["shared", "shared/inside.txt", "plain", "plain/other.txt"] {
+        assert!(
+            all.contains(&PathBuf::from(rel)),
+            "{rel} not answered: {all:?}"
+        );
+    }
+    let shared = index.folder_at(Path::new("shared")).unwrap();
+    assert_ne!(index.facts_of(shared).unwrap().mode & skwird_crawl::ACL, 0);
+}

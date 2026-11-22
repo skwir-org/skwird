@@ -1,0 +1,316 @@
+//! Who asks the system service, and what they may see (`docs/DESIGN.md`,
+//! decision 4, phase 3, step 5): their user and every group, as the
+//! kernel held them when they connected (`SO_PEERCRED`, `SO_PEERGROUPS`),
+//! with no lookup in the user database; each folder's owner, group and
+//! mode evaluated against them in the kernel's order.
+//!
+//! A result is answered only if the asker may list its folder and search
+//! every folder above it. A folder with an access ACL is not known until
+//! ACLs are evaluated: what it holds is never answered as its mode alone
+//! says, and the folder is not covered for that answer.
+#![allow(unsafe_code)] // SO_PEERGROUPS has no safe binding; the one block says why it is sound.
+
+use std::collections::HashMap;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+
+use skwird_index::block::FolderId;
+use skwird_index::{Index, Sight};
+
+/// Read, and search: a folder's entries listed, and reached.
+const LIST: u16 = 0o5;
+/// Search alone: a folder passed through.
+const SEARCH: u16 = 0o1;
+
+/// Who asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asker {
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
+}
+
+/// A folder's owner, group and mode, the [`skwird_crawl::ACL`] bit in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owned {
+    pub owner: u32,
+    pub group: u32,
+    pub mode: u16,
+}
+
+impl Asker {
+    /// The peer of `stream`, as the kernel held it when it connected.
+    pub fn of(stream: &UnixStream) -> std::io::Result<Asker> {
+        let cred = rustix::net::sockopt::socket_peercred(stream)?;
+        Ok(Asker {
+            uid: cred.uid.as_raw(),
+            gid: cred.gid.as_raw(),
+            groups: peer_groups(stream)?,
+        })
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+
+    /// Whether the asker may do all of `bits` (4 read, 1 search) in a
+    /// folder so owned: root may; a folder with an ACL is not known; then
+    /// the owner's bits for its owner, the group's for a member of its
+    /// group, the others' for anyone else, as the kernel takes them.
+    pub fn may(&self, folder: Owned, bits: u16) -> Sight {
+        if self.is_root() {
+            return Sight::Seen;
+        }
+        if folder.mode & skwird_crawl::ACL != 0 {
+            return Sight::Unknown;
+        }
+        let granted = if self.uid == folder.owner {
+            folder.mode >> 6
+        } else if self.gid == folder.group || self.groups.contains(&folder.group) {
+            folder.mode >> 3
+        } else {
+            folder.mode
+        };
+        if granted & bits == bits {
+            Sight::Seen
+        } else {
+            Sight::Hidden
+        }
+    }
+}
+
+/// The peer's groups, every one, as the kernel holds them.
+fn peer_groups(stream: &UnixStream) -> std::io::Result<Vec<u32>> {
+    let mut groups = vec![0u32; 64];
+    loop {
+        let mut len = libc::socklen_t::try_from(groups.len() * 4).unwrap_or(libc::socklen_t::MAX);
+        // SAFETY: `groups` is valid for writes of `len` bytes, the most
+        // getsockopt writes, and `len` is a word it writes the length to.
+        let done = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERGROUPS,
+                groups.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        let wanted = len as usize / 4;
+        if done == 0 {
+            groups.truncate(wanted);
+            return Ok(groups);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ERANGE) && wanted > groups.len() {
+            groups.resize(wanted, 0);
+            continue;
+        }
+        return Err(e);
+    }
+}
+
+/// What a folder at `path` is owned as, by its stat now, following no
+/// link: none if it cannot be stat-ed. Its ACL is asked too.
+pub fn owned_at(path: &Path) -> Option<Owned> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let mut none: [u8; 0] = [];
+    let acl = match rustix::fs::lgetxattr(path, "system.posix_acl_access", &mut none[..]) {
+        Ok(len) => len > 0,
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => false,
+        Err(_) => true,
+    };
+    Some(Owned {
+        owner: meta.uid(),
+        group: meta.gid(),
+        mode: (meta.mode() & 0o7777) as u16 | if acl { skwird_crawl::ACL } else { 0 },
+    })
+}
+
+/// What `asker` may see of each folder's entries in `index`: whether they
+/// may list it and search every folder above it, the folders above the
+/// index's root being `above`. Remembered in `memo`, by folder, as how far
+/// the asker reaches: each folder above a result is evaluated once.
+pub(crate) fn sight(
+    index: &Index,
+    asker: &Asker,
+    above: Sight,
+    folder: FolderId,
+    memo: &mut HashMap<FolderId, Sight>,
+) -> Sight {
+    let Some(facts) = index.facts_of(folder) else {
+        return Sight::Hidden;
+    };
+    let owned = Owned {
+        owner: facts.owner,
+        group: facts.group,
+        mode: facts.mode,
+    };
+    asker
+        .may(owned, LIST)
+        .and(reach(index, asker, above, index.parent_of(folder), memo))
+}
+
+/// Whether `asker` may search `folder` and every folder above it.
+fn reach(
+    index: &Index,
+    asker: &Asker,
+    above: Sight,
+    folder: Option<FolderId>,
+    memo: &mut HashMap<FolderId, Sight>,
+) -> Sight {
+    let mut chain = Vec::new();
+    let mut at = folder;
+    let mut base = above;
+    while let Some(f) = at {
+        if let Some(&known) = memo.get(&f) {
+            base = known;
+            break;
+        }
+        chain.push(f);
+        at = index.parent_of(f);
+    }
+    for f in chain.into_iter().rev() {
+        let searched = index.facts_of(f).map_or(Sight::Hidden, |facts| {
+            asker.may(
+                Owned {
+                    owner: facts.owner,
+                    group: facts.group,
+                    mode: facts.mode,
+                },
+                SEARCH,
+            )
+        });
+        base = base.and(searched);
+        memo.insert(f, base);
+    }
+    base
+}
+
+/// An asker's view of one root's index.
+pub struct Seeing<'a> {
+    pub index: &'a Index,
+    pub asker: &'a Asker,
+    /// Whether they may search every folder above the root.
+    pub above: Sight,
+}
+
+impl Seeing<'_> {
+    /// What they may see of `folder`'s entries ([`sight`]).
+    pub(crate) fn sight(&self, folder: FolderId, memo: &mut HashMap<FolderId, Sight>) -> Sight {
+        sight(self.index, self.asker, self.above, folder, memo)
+    }
+
+    /// The folder to say is not covered, for an entry withheld in
+    /// `folder`, whose sight is not known: the topmost folder not known
+    /// above it whose parent's entries they see, so that no name is said
+    /// that they could not list. None if they reach none of it.
+    pub(crate) fn hole_for(
+        &self,
+        folder: FolderId,
+        memo: &mut HashMap<FolderId, Sight>,
+    ) -> Option<FolderId> {
+        let mut at = folder;
+        loop {
+            let parent = match self.index.parent_of(at) {
+                Some(p) => self.sight(p, memo),
+                None => self.above,
+            };
+            match (parent, self.index.parent_of(at)) {
+                (Sight::Seen, _) => return Some(at),
+                (Sight::Hidden, _) | (Sight::Unknown, None) => return None,
+                (Sight::Unknown, Some(p)) => at = p,
+            }
+        }
+    }
+
+    /// The folders with an ACL below `folder` whose names they see: not
+    /// covered for them, until ACLs are evaluated.
+    pub(crate) fn acl_holes(
+        &self,
+        folder: FolderId,
+        memo: &mut HashMap<FolderId, Sight>,
+    ) -> Vec<FolderId> {
+        self.index
+            .acl_folders_below(folder)
+            .into_iter()
+            .filter(|&f| f != folder)
+            .filter(|&f| {
+                self.index
+                    .parent_of(f)
+                    .is_some_and(|p| self.sight(p, memo) == Sight::Seen)
+            })
+            .collect()
+    }
+}
+
+/// Whether `asker` may search every folder in `above`.
+pub fn through(asker: &Asker, above: &[Option<Owned>]) -> Sight {
+    above.iter().fold(Sight::Seen, |s, f| {
+        s.and(f.map_or(Sight::Hidden, |f| asker.may(f, SEARCH)))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asker(uid: u32, gid: u32, groups: &[u32]) -> Asker {
+        Asker {
+            uid,
+            gid,
+            groups: groups.to_vec(),
+        }
+    }
+
+    fn folder(owner: u32, group: u32, mode: u16) -> Owned {
+        Owned { owner, group, mode }
+    }
+
+    /// The owner's bits for the owner, even where the group's or the
+    /// others' would give more; the group's for a member, by its own
+    /// group or another; the others' for anyone else; root may.
+    #[test]
+    fn modes_are_taken_as_the_kernel_takes_them() {
+        let someone = asker(1000, 100, &[]);
+        let member = asker(1001, 500, &[100, 7]);
+        let stranger = asker(1002, 500, &[]);
+        let root = asker(0, 0, &[]);
+        let f = folder(1000, 100, 0o075);
+        assert_eq!(someone.may(f, LIST), Sight::Hidden, "the owner's bits");
+        assert_eq!(member.may(f, LIST), Sight::Seen, "the group's bits");
+        assert_eq!(stranger.may(f, LIST), Sight::Seen, "the others' bits");
+        assert_eq!(root.may(folder(1, 1, 0), LIST), Sight::Seen);
+        let g = folder(1000, 100, 0o711);
+        assert_eq!(member.may(g, SEARCH), Sight::Seen);
+        assert_eq!(member.may(g, LIST), Sight::Hidden, "search alone");
+        assert_eq!(
+            asker(1003, 7, &[]).may(folder(1, 7, 0o750), LIST),
+            Sight::Seen
+        );
+    }
+
+    /// A folder with an ACL is not known, to anyone but root.
+    #[test]
+    fn a_folder_with_an_acl_is_not_known() {
+        let f = folder(1000, 100, 0o777 | skwird_crawl::ACL);
+        assert_eq!(asker(1000, 100, &[]).may(f, LIST), Sight::Unknown);
+        assert_eq!(asker(0, 0, &[]).may(f, LIST), Sight::Seen);
+    }
+
+    /// Every folder above must be searchable; one hidden hides, one not
+    /// known leaves it not known.
+    #[test]
+    fn every_folder_above_must_be_searched() {
+        let someone = asker(1000, 100, &[]);
+        let open = Some(folder(0, 0, 0o755));
+        let closed = Some(folder(0, 0, 0o700));
+        let acl = Some(folder(0, 0, 0o755 | skwird_crawl::ACL));
+        assert_eq!(through(&someone, &[open, open]), Sight::Seen);
+        assert_eq!(through(&someone, &[open, closed]), Sight::Hidden);
+        assert_eq!(through(&someone, &[acl, open]), Sight::Unknown);
+        assert_eq!(through(&someone, &[acl, closed]), Sight::Hidden);
+        assert_eq!(through(&someone, &[None]), Sight::Hidden, "not stat-ed");
+    }
+}

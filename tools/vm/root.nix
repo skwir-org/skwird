@@ -41,7 +41,7 @@ in
         };
       };
       boot.supportedFilesystems = ["btrfs"];
-      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs];
+      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs pkgs.acl];
       environment.etc."skwird-test-machine".text = ''
         ext4=/mnt/ext4
         btrfs=/mnt/btrfs

@@ -3,7 +3,7 @@
 //! of its own, so that a `cancel` can reach it; the engine gone once its
 //! last client has been gone a while.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -12,10 +12,12 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use skwird_index::block::FolderId;
 use skwird_index::keeper::Event;
-use skwird_index::{NameQuery, Pattern, Query};
+use skwird_index::{Index, NameQuery, Pattern, Query, Sight};
 use skwird_protocol::{self as wire, Answer, Ask, Request, Response, WirePath};
 
+use crate::asker::{Asker, Seeing};
 use crate::convert;
 use crate::coverage::coverage_at;
 use crate::dirs::{check_socket_path, make_private};
@@ -135,22 +137,18 @@ pub fn serve(config: &Config) -> Result<(), String> {
         let Ok((stream, _)) = listener.accept() else {
             continue;
         };
-        // A user's engine answers its user alone. The system service answers
-        // root alone until its answers are filtered for each asker (phase 3,
-        // step 5): rule 2.
-        let allowed = if config.system {
-            rustix::process::Uid::ROOT
-        } else {
-            me
+        // A user's engine answers its user alone; the system service, every
+        // user, each what they could list (rule 2).
+        let Ok(asker) = Asker::of(&stream) else {
+            continue;
         };
-        match rustix::net::sockopt::socket_peercred(&stream) {
-            Ok(peer) if peer.uid == allowed => {}
-            _ => continue,
+        if !config.system && asker.uid != me.as_raw() {
+            continue;
         }
         live.join();
         let (shared, commands, live) = (Arc::clone(&shared), commands.clone(), Arc::clone(&live));
         std::thread::spawn(move || {
-            connection(stream, &shared, &commands);
+            connection(stream, &shared, &commands, &asker);
             live.leave();
         });
     }
@@ -215,7 +213,7 @@ fn outside() -> wire::Coverage {
 }
 
 /// The coverage below `root`, from the snapshot published now.
-fn coverage(shared: &Shared, root: &WirePath) -> Result<wire::Coverage, Answer> {
+fn coverage(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire::Coverage, Answer> {
     let path = root.to_path();
     let Some((i, rel)) = shared.locate(&path) else {
         return Ok(outside());
@@ -227,8 +225,77 @@ fn coverage(shared: &Shared, root: &WirePath) -> Result<wire::Coverage, Answer> 
             holes: Vec::new(),
         }),
         Published::Failed(why) => Err(failure("internal", why)),
-        Published::Ready(index) => coverage_at(&index, &shared.roots[i], &rel)
-            .ok_or_else(|| failure("not_a_folder", "no folder of the index is at that path")),
+        Published::Ready(index) => {
+            let mut holes = Vec::new();
+            if let Some(seeing) = seeing(shared, i, &index, asker) {
+                let mut memo = HashMap::new();
+                match reached(&seeing, &rel, &mut memo) {
+                    Reached::Denied => return Ok(denied()),
+                    Reached::Absent => {}
+                    Reached::Listed(folder) => {
+                        holes = seeing.acl_holes(folder, &mut memo);
+                    }
+                }
+            }
+            let mut c = coverage_at(&index, &shared.roots[i], &rel)
+                .ok_or_else(|| failure("not_a_folder", "no folder of the index is at that path"))?;
+            c.holes
+                .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
+            Ok(c)
+        }
+    }
+}
+
+/// What the asker sees of root `i`'s index: none where they see all of it
+/// (a user's engine, or root asking the system service).
+fn seeing<'a>(shared: &Shared, i: usize, index: &'a Index, asker: &'a Asker) -> Option<Seeing<'a>> {
+    (shared.system && !asker.is_root()).then(|| Seeing {
+        index,
+        asker,
+        above: crate::asker::through(asker, &shared.above[i]),
+    })
+}
+
+/// How far an asker reaches the folder at a path.
+enum Reached {
+    /// They may list it.
+    Listed(FolderId),
+    /// The index holds no folder there, and they may list the nearest one
+    /// above: they may know it is not there.
+    Absent,
+    /// They may not list it, or the nearest folder above it the index
+    /// holds: whether it exists is not said either.
+    Denied,
+}
+
+fn reached(seeing: &Seeing<'_>, rel: &Path, memo: &mut HashMap<FolderId, Sight>) -> Reached {
+    let Some((at, folder)) = rel
+        .ancestors()
+        .find_map(|a| seeing.index.folder_at(a).map(|f| (a, f)))
+    else {
+        return Reached::Denied;
+    };
+    match (seeing.sight(folder, memo), at == rel) {
+        (Sight::Seen, true) => Reached::Listed(folder),
+        (Sight::Seen, false) => Reached::Absent,
+        _ => Reached::Denied,
+    }
+}
+
+/// Not covered, for an asker who may not list the folder asked.
+fn denied() -> wire::Coverage {
+    wire::Coverage {
+        names: wire::Proof::NotCovered(wire::Why::Denied),
+        attrs: wire::Proof::NotCovered(wire::Why::Denied),
+        holes: Vec::new(),
+    }
+}
+
+/// Folder `f` of root `i`'s index, not covered for an asker.
+fn hole(shared: &Shared, i: usize, index: &Index, f: FolderId) -> wire::Hole {
+    wire::Hole {
+        path: WirePath::of(&shared.roots[i].join(index.path_of(f))),
+        why: wire::Why::Denied,
     }
 }
 
@@ -268,9 +335,40 @@ fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -
     }
 }
 
+/// A query answered on a thread of its own, so that a `cancel` can reach
+/// it, its flag kept in `cancels` while it runs.
+fn spawn_query(
+    shared: &Arc<Shared>,
+    writer: &Writer,
+    cancels: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    id: u64,
+    query: wire::Query,
+    who: &Asker,
+) -> std::thread::JoinHandle<()> {
+    let flag = Arc::new(AtomicBool::new(false));
+    cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id, Arc::clone(&flag));
+    let (shared, writer, cancels, who) = (
+        Arc::clone(shared),
+        Arc::clone(writer),
+        Arc::clone(cancels),
+        who.clone(),
+    );
+    std::thread::spawn(move || {
+        let answer = answer_query(&shared, &writer, id, &query, &flag, &who);
+        cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        send(&writer, id, answer);
+    })
+}
+
 /// One client: hello first, then its requests in turn, each query on a
 /// thread of its own.
-fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Command>) {
+fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Command>, who: &Asker) {
     let Ok(clone) = stream.try_clone() else {
         return;
     };
@@ -293,30 +391,13 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
         let id = request.id;
         let answer = match request.ask {
             Ask::Hello(_) => failure("bad_request", "hello comes once"),
-            Ask::Coverage { root } => match coverage(shared, &root) {
+            Ask::Coverage { root } => match coverage(shared, &root, who) {
                 Ok(c) => Answer::Coverage(c),
                 Err(a) => a,
             },
-            Ask::Sync { root } => sync(shared, commands, &root),
+            Ask::Sync { root } => sync(shared, commands, &root, who),
             Ask::Query(query) => {
-                let flag = Arc::new(AtomicBool::new(false));
-                cancels
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(id, Arc::clone(&flag));
-                let (shared, writer, cancels) = (
-                    Arc::clone(shared),
-                    Arc::clone(&writer),
-                    Arc::clone(&cancels),
-                );
-                queries.push(std::thread::spawn(move || {
-                    let answer = answer_query(&shared, &writer, id, &query, &flag);
-                    cancels
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&id);
-                    send(&writer, id, answer);
-                }));
+                queries.push(spawn_query(shared, &writer, &cancels, id, query, who));
                 continue;
             }
             Ask::Cancel { id: of } => {
@@ -330,6 +411,17 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 // The query answers itself: its `done` says it was
                 // cancelled.
                 continue;
+            }
+            // The system service's journal is not filtered for each asker
+            // yet, nor are registrations kept for each user (phase 3, step
+            // 6): another user is told so, and walks.
+            Ask::Changes { .. } | Ask::Exclude { .. } | Ask::Watch { .. }
+                if shared.system && !who.is_root() =>
+            {
+                failure(
+                    "unsupported",
+                    "the system service answers this for root alone so far",
+                )
             }
             Ask::Changes { root, since } => changes(shared, commands, &root, since),
             Ask::Exclude { add, remove } => {
@@ -374,7 +466,7 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
     }
 }
 
-fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath) -> Answer {
+fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath, asker: &Asker) -> Answer {
     let Some((i, rel)) = shared.locate(&root.to_path()) else {
         return Answer::Coverage(outside());
     };
@@ -390,7 +482,7 @@ fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath) -> Answer 
     {
         return failure("internal", "the engine is going");
     }
-    match coverage(shared, root) {
+    match coverage(shared, root, asker) {
         Ok(c) => Answer::Coverage(c),
         Err(a) => a,
     }
@@ -445,6 +537,7 @@ fn answer_query(
     id: u64,
     query: &wire::Query,
     cancelled: &AtomicBool,
+    who: &Asker,
 ) -> Answer {
     let path = query.root.to_path();
     let done = |coverage, count, truncated| {
@@ -473,7 +566,15 @@ fn answer_query(
         }
         Published::Failed(why) => return failure("internal", why),
     };
-    let Some(coverage) = coverage_at(&index, &shared.roots[i], &rel) else {
+    // Another user than root, asking the system service, is answered what
+    // they could list (DESIGN 4).
+    let seeing = seeing(shared, i, &index, who);
+    if let Some(s) = &seeing
+        && let Reached::Denied = reached(s, &rel, &mut HashMap::new())
+    {
+        return done(denied(), 0, false);
+    }
+    let Some(mut coverage) = coverage_at(&index, &shared.roots[i], &rel) else {
         return failure("not_a_folder", "no folder of the index is at that path");
     };
     let Some(folder) = index.folder_at(&rel) else {
@@ -502,10 +603,29 @@ fn answer_query(
             .limit
             .map(|l| usize::try_from(l).unwrap_or(usize::MAX).saturating_add(1)),
     };
-    let hits = match index.query(folder, &asked) {
-        Ok(hits) => hits,
+    let found = match &seeing {
+        None => index.query(folder, &asked).map(|hits| (hits, Vec::new())),
+        Some(s) => {
+            let sight = |f: FolderId, memo: &mut HashMap<FolderId, Sight>| s.sight(f, memo);
+            index.query_seen(folder, &asked, Some(&sight))
+        }
+    };
+    let (hits, unknown) = match found {
+        Ok(found) => found,
         Err(e) => return failure("bad_pattern", e),
     };
+    // What was withheld for an ACL not evaluated: not covered, so that the
+    // client walks it.
+    if let Some(s) = &seeing {
+        let mut memo = HashMap::new();
+        let holes: BTreeSet<FolderId> = unknown
+            .iter()
+            .filter_map(|&f| s.hole_for(f, &mut memo))
+            .collect();
+        coverage
+            .holes
+            .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
+    }
     let limit = query
         .limit
         .map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));

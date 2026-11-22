@@ -20,6 +20,31 @@ use crate::tree::ChunkId;
 use crate::tree::Tree;
 use crate::update::Proof;
 
+/// What an asker may see of a folder's entries (DESIGN 4): seen, hidden
+/// from them, or not known (an ACL not evaluated), never answered then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sight {
+    Seen,
+    Hidden,
+    Unknown,
+}
+
+impl Sight {
+    /// Both: hidden if either is, unknown if either is not known.
+    #[must_use]
+    pub fn and(self, other: Sight) -> Sight {
+        match (self, other) {
+            (Sight::Hidden, _) | (_, Sight::Hidden) => Sight::Hidden,
+            (Sight::Unknown, _) | (_, Sight::Unknown) => Sight::Unknown,
+            _ => Sight::Seen,
+        }
+    }
+}
+
+/// What an asker may see of each folder's entries, given a memo of its
+/// own for the thread that asks.
+pub type SightOf<'a> = &'a (dyn Fn(FolderId, &mut HashMap<FolderId, Sight>) -> Sight + Sync);
+
 /// What to look for below a folder. Every part given must hold.
 #[derive(Clone, Debug, Default)]
 pub struct Query {
@@ -235,6 +260,19 @@ impl Index {
     /// on threads of their own, a run of 64 entries at a time, passing
     /// over every zone whose sizes, times or kinds cannot answer.
     pub fn query(&self, root: FolderId, query: &Query) -> Result<Vec<Hit>, String> {
+        self.query_seen(root, query, None).map(|(hits, _)| hits)
+    }
+
+    /// [`Index::query`] for an asker (DESIGN 4): an entry answers only if
+    /// `sight` says its folder's entries are seen. An entry that would
+    /// answer, in a folder whose sight is not known, is withheld, and its
+    /// folder given back: not covered for this answer.
+    pub fn query_seen(
+        &self,
+        root: FolderId,
+        query: &Query,
+        sight: Option<SightOf<'_>>,
+    ) -> Result<(Vec<Hit>, Vec<FolderId>), String> {
         let names = query
             .name
             .as_ref()
@@ -250,6 +288,7 @@ impl Index {
                 .as_ref()
                 .map(|r| from_signed(r.start().sec)..=from_signed(r.end().sec)),
             query,
+            sight,
         };
         let limit = query.limit.unwrap_or(usize::MAX);
         let ranges = self.tree.ranges(root);
@@ -258,21 +297,20 @@ impl Index {
             .clamp(1, 8)
             .min(ranges.len().max(1));
         let per = ranges.len().div_ceil(threads).max(1);
-        let parts: Vec<Vec<Hit>> = std::thread::scope(|scope| {
+        let parts: Vec<Found> = std::thread::scope(|scope| {
             let filter = &filter;
             let handles: Vec<_> = ranges
                 .chunks(per)
                 .map(|group| {
                     scope.spawn(move || {
-                        let mut hits = Vec::new();
-                        let mut paths = HashMap::new();
+                        let mut found = Found::default();
                         for (chunk, blocks) in group {
-                            if hits.len() >= limit {
+                            if found.hits.len() >= limit {
                                 break;
                             }
-                            self.scan(*chunk, blocks.clone(), filter, limit, &mut hits, &mut paths);
+                            self.scan(*chunk, blocks.clone(), filter, limit, &mut found);
                         }
-                        hits
+                        found
                     })
                 })
                 .collect();
@@ -281,9 +319,14 @@ impl Index {
                 .map(|h| h.join().expect("a scanning thread does not panic"))
                 .collect()
         });
-        let mut hits: Vec<Hit> = parts.into_iter().flatten().collect();
+        let mut hits = Vec::new();
+        let mut unknown = std::collections::BTreeSet::new();
+        for part in parts {
+            hits.extend(part.hits);
+            unknown.extend(part.unknown);
+        }
         hits.truncate(limit);
-        Ok(hits)
+        Ok((hits, unknown.into_iter().collect()))
     }
 
     /// Scan the entries of `blocks` in `chunk`, adding those that answer.
@@ -293,8 +336,7 @@ impl Index {
         blocks: Range<usize>,
         filter: &Filter<'_>,
         limit: usize,
-        hits: &mut Vec<Hit>,
-        paths: &mut HashMap<FolderId, PathBuf>,
+        found: &mut Found,
     ) {
         let view = self.tree.chunk(chunk).view();
         let items = view.entries(blocks.start).start..view.entries(blocks.end - 1).end;
@@ -343,10 +385,19 @@ impl Index {
                         continue;
                     }
                     if filter.attrs_answer(&view, j) {
-                        if hits.len() >= limit {
+                        if found.hits.len() >= limit {
                             return;
                         }
-                        hits.push(self.hit(&view, j, paths));
+                        match found.sight(filter, view.folder(view.block_of(j))) {
+                            Sight::Seen => {
+                                let hit = self.hit(&view, j, &mut found.paths);
+                                found.hits.push(hit);
+                            }
+                            Sight::Hidden => {}
+                            Sight::Unknown => {
+                                found.unknown.insert(view.folder(view.block_of(j)));
+                            }
+                        }
                     }
                 }
                 i = end;
@@ -383,6 +434,31 @@ impl Index {
     pub fn state_of(&self, folder: FolderId) -> Option<crate::block::State> {
         let loc = self.tree.loc(folder)?;
         Some(self.tree.chunk(loc.chunk).view().state(loc.block as usize))
+    }
+
+    /// The folder holding `folder`: none for the root.
+    pub fn parent_of(&self, folder: FolderId) -> Option<FolderId> {
+        let loc = self.tree.loc(folder)?;
+        self.tree.chunk(loc.chunk).view().parent(loc.block as usize)
+    }
+
+    /// The folders below `root`, itself included, whose mode says they
+    /// have an access ACL ([`skwird_crawl::ACL`]): read from their blocks,
+    /// no entry read.
+    pub fn acl_folders_below(&self, root: FolderId) -> Vec<FolderId> {
+        let mut out = Vec::new();
+        for (chunk, blocks) in self.tree.ranges(root) {
+            let view = self.tree.chunk(chunk).view();
+            for b in blocks {
+                if view
+                    .facts(b)
+                    .is_some_and(|f| f.mode & skwird_crawl::ACL != 0)
+                {
+                    out.push(view.folder(b));
+                }
+            }
+        }
+        out
     }
 
     /// A folder's facts, read from its block alone.
@@ -465,6 +541,38 @@ struct Filter<'a> {
     /// The modification times' seconds that answer, as zones keep them.
     times: Option<RangeInclusive<u64>>,
     query: &'a Query,
+    /// What the asker may see, if answers are for an asker.
+    sight: Option<SightOf<'a>>,
+}
+
+/// What one scanning thread found: its hits, its folders' paths, what the
+/// asker may see of each folder, and the folders whose sight is not known
+/// that held an entry that would answer.
+#[derive(Default)]
+struct Found {
+    hits: Vec<Hit>,
+    paths: HashMap<FolderId, PathBuf>,
+    seen: HashMap<FolderId, Sight>,
+    /// The last folder asked of, and its sight: entries come a folder at
+    /// a time.
+    last: Option<(FolderId, Sight)>,
+    unknown: std::collections::BTreeSet<FolderId>,
+}
+
+impl Found {
+    fn sight(&mut self, filter: &Filter<'_>, folder: FolderId) -> Sight {
+        let Some(sight) = filter.sight else {
+            return Sight::Seen;
+        };
+        if let Some((f, s)) = self.last
+            && f == folder
+        {
+            return s;
+        }
+        let s = sight(folder, &mut self.seen);
+        self.last = Some((folder, s));
+        s
+    }
 }
 
 impl Filter<'_> {

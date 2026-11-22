@@ -59,15 +59,33 @@ pub struct Shared {
     pub roots: Vec<PathBuf>,
     /// Whether this is the system service.
     pub system: bool,
+    /// For the system service, the folders above each root, outermost
+    /// first, as they were when it started: an asker must search them all
+    /// to reach the root (DESIGN 4).
+    pub above: Vec<Vec<Option<crate::asker::Owned>>>,
     pub published: RwLock<Vec<Published>>,
 }
 
 impl Shared {
     pub fn new(roots: Vec<PathBuf>, system: bool) -> Shared {
         let n = roots.len();
+        let above = roots
+            .iter()
+            .map(|root| {
+                let mut above: Vec<_> = root
+                    .ancestors()
+                    .skip(1)
+                    .filter(|_| system)
+                    .map(crate::asker::owned_at)
+                    .collect();
+                above.reverse();
+                above
+            })
+            .collect();
         Shared {
             roots,
             system,
+            above,
             published: RwLock::new(vec![Published::Opening; n]),
         }
     }
@@ -272,6 +290,8 @@ pub fn writer(
     let opts = Options {
         watcher: watcher.clone(),
         threads: config.threads,
+        // The system service answers each asker by each folder's ACL too.
+        acls: config.system,
         ..Options::default()
     };
     let registrations = registered(&config.dirs, EXCLUDED);

@@ -479,3 +479,36 @@ fn a_kill_at_any_moment_leaves_an_index_that_opens_sound() {
     eprintln!("{loaded} of {rounds} rounds loaded what the killed process left");
     assert!(loaded > 0, "no round loaded what a killed process left");
 }
+
+/// A folder with an access ACL, kept for a system service, is answered
+/// like any other once built, and once loaded again.
+#[test]
+fn a_folder_with_an_acl_is_kept_like_any() {
+    let s = Scratch::new("keeper-acl");
+    s.file("shared/inside.txt");
+    s.file("plain/other.txt");
+    let set = std::process::Command::new("setfacl")
+        .args(["-m", "u:65534:rx"])
+        .arg(s.join("shared"))
+        .status();
+    if !set.is_ok_and(|st| st.success()) {
+        eprintln!("skipped: no setfacl, or no ACLs on this filesystem");
+        return;
+    }
+    let acls = Options {
+        acls: true,
+        ..opts()
+    };
+    for _ in 0..2 {
+        let root = Root::open(s.path(), Exclusions::none()).unwrap();
+        let (k, _) = Keeper::open(
+            &s.join("index"),
+            root,
+            acls.clone(),
+            limits(),
+            &Cancel::default(),
+        )
+        .unwrap();
+        assert_eq!(ours(k.index()), of_walk(s.path()));
+    }
+}

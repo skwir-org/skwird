@@ -292,6 +292,20 @@ fn kind_of_mode(mode: u16) -> Kind {
     kind_of(FileType::from_raw_mode(u32::from(mode)))
 }
 
+/// Whether the open folder `fd` has an access ACL: one more than its mode
+/// says. A filesystem without ACLs has none; one that cannot be asked
+/// says it may, so that the folder is never answered as its mode alone
+/// says.
+fn has_access_acl(fd: &OwnedFd) -> bool {
+    let mut none: [u8; 0] = [];
+    match rustix::fs::fgetxattr(fd, "system.posix_acl_access", &mut none[..]) {
+        Ok(len) => len > 0,
+        // NOTSUP and OPNOTSUPP are one number on Linux.
+        Err(Errno::NODATA | Errno::NOTSUP) => false,
+        Err(_) => true,
+    }
+}
+
 fn folder_stat(st: &Statx) -> FolderStat {
     FolderStat {
         id: id_of(st),
@@ -378,10 +392,13 @@ fn read(
             return not_covered(stat, why);
         }
     };
-    let stat = match statx_fd(&fd) {
+    let mut stat = match statx_fd(&fd) {
         Ok(st) => folder_stat(&st),
         Err(e) => return not_covered(None, Why::Failed(e.raw_os_error())),
     };
+    if opts.acls && has_access_acl(&fd) {
+        stat.mode |= crate::ACL;
+    }
     if root.exclusions.holds(Some(stat.id), &root.path.join(rel)) {
         return not_covered(Some(stat), Why::Excluded);
     }

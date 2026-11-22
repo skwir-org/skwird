@@ -1158,6 +1158,22 @@ committed once the gate holds.
 5. **Answers filtered per asker** (DESIGN 4): `SO_PEERCRED` and
    `SO_PEERGROUPS`, modes and ACLs evaluated, each folder's answer kept
    per asker until it changes, limits per asker.
+
+   **Done on 2026-11-22**, but for the ACLs' evaluation (DESIGN 4, "As
+   built"): the asker from the socket, modes evaluated as the kernel
+   takes them, a result given if its folder may be read and searched
+   and every folder above it searched, judged inside the query's scan
+   so that limits hold and no folder hidden is walked. A folder with an
+   ACL is not known: what it holds is withheld, and it is named not
+   covered. A folder the asker may not list, or a path below one, is
+   answered denied, whether it exists or not. Root tests: three users
+   (one in a folder's group, one not, root) asking one tree with a
+   folder only its owner reads, one its group reads, one any reads, one
+   that may be passed through but not listed, and one with an ACL; each
+   is answered exactly what they could list, and the ACL's folder is a
+   hole for both users. Not done: the ACLs evaluated (the next step,
+   5b), the answers kept per asker, the limits per asker; the journal
+   and registrations, refused to other users until step 6.
 6. **Each user's exclusions** (DESIGN 5): the default ones in every
    home, each user's files read, registrations kept per user, each
    applying to folders that user owns.

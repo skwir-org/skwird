@@ -400,6 +400,29 @@ proved as root in the test machine on Linux 6.18.58):
   It reads every name on the machine and answers any local user, so it
   is treated as attack surface from the first line.
 
+**As built** (phase 3, step 5, 2026-11-22: `skwird::asker`):
+- Root, and a user asking their own engine, see the index whole. Any
+  other user asking the system service is answered a result only if
+  they may read and search its folder and search every folder above it,
+  up to the filesystem's own top: within the index by its folders'
+  facts, above the root by the folders as they were when the service
+  started. A folder they may read but not search holds names they are
+  not given (`ls` would list them, and stat none).
+- Each folder is judged once a query, with what is above it.
+- **An ACL is not evaluated yet:** a folder with an access ACL (the
+  crawl says so, `skwird_crawl::ACL`, one `fgetxattr` a folder) is not
+  known for anyone but root. A result in it is withheld, and the
+  topmost such folder whose parent the asker may list is named not
+  covered (denied) in the answer's coverage, so that the client walks
+  it, and a coverage below names each such folder. Never answered as
+  its mode alone says, and never a name the asker could not list.
+- **Whether a folder exists is said only to who could list its
+  parent:** a coverage or a query at a folder the asker may not list,
+  or at a path below one, is answered not covered (denied) alike.
+- Not yet: the answers kept per asker across queries, the limits per
+  asker, and the journal and registrations for other users than root,
+  which are refused for now (step 6).
+
 ### 5. Private folders are never indexed
 
 It is not enough to leave them out of answers: they are never read into
