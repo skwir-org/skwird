@@ -1487,6 +1487,14 @@ committed once the gate holds.
    "A save writes what is new"). Still to see: what each chunk made
    durable costs a save of many folders.
 
+   **Measured at `000d4d3`**, at a load of 4.6 to 10: a change answered
+   in 211 ms at the median and 361 ms at most, all ten; the sync 0.10 s;
+   the query as the user 1.11 times root's; read back 1.12 s; saves of
+   1 to 25 ms against 18 to 86. Every budget met but idle: 0.66 s in
+   30 s, 2.2% against 2%. The measurement now says the idle time by the
+   service's threads: whether the writer keeps to its account (1.5%) and
+   what reading the events takes beside it.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded

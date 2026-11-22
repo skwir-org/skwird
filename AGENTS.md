@@ -63,12 +63,13 @@ and `docs/PLAN.md` (the phases and where they stand) first.
 - **A share counts all the work it bounds,** and stays under its
   budget, leaving room for what cannot wait. The writer's work for what
   is heard (finding, applying, saving) is timed by its own thread's
-  clock and held to 1%, half the idle budget. Reading events cannot wait
-  without losing them. A share that counted applying alone took the
-  whole 2%, and the system service took 2.8%. A share each folder keeps
-  to bounds one folder, not many: what no folder's own hold bounds goes
-  through one account (`live::Gather::spent`), or 30 busy folders take
-  20% of a core.
+  clock and held to 1.5%, three quarters of the idle budget (DESIGN 8,
+  "One account, sized to the budget"). Reading events, which keeps the
+  rest, cannot wait without losing them. A share that counted applying
+  alone took the whole 2%, and the system service took 2.8%. A share
+  each folder keeps to bounds one folder, not many: what no folder's own
+  hold bounds goes through one account (`live::Gather::spent`), or 30
+  busy folders take 20% of a core.
 - **Wake for a batch, not for each event.** A thread woken once for each
   event spends more on waking than on the event: the writer woke 3,300
   times for 3,700 events, 60% of its time. The reader waits a little

@@ -387,7 +387,7 @@ threads_begin() {
     # The pass is root's shell's to expand (SC2016), and what it says is
     # written to the user's own files, as meant (SC2024).
     # shellcheck disable=SC2016
-    local pass='for t in /proc/$1/task/*; do read -r run wait _ 2>/dev/null <"$t/schedstat" && echo "${t##*/} $run $wait"; done'
+    local pass='for t in /proc/$1/task/*; do read -r comm 2>/dev/null <"$t/comm" && read -r run wait _ 2>/dev/null <"$t/schedstat" && echo "${t##*/} $comm $run $wait"; done'
     # shellcheck disable=SC2024
     sudo -n sh -c "$pass" sh "$sys_pid" >"$threads_at/before"
     # shellcheck disable=SC2024
@@ -395,14 +395,25 @@ threads_begin() {
         sh "$sys_pid" "$threads_at/stop" >"$threads_at/during" &
     threads_sampler=$!
 }
+# With `named`, each kind of thread's time on a processor is said too,
+# by its name (the writer, the reader of what is heard, a client's...).
 threads_end() {
     : >"$threads_at/stop"
     wait "$threads_sampler" 2>/dev/null || true
-    awk 'NR == FNR { run0[$1] = $2; wait0[$1] = $3; next }
-        { run[$1] = $2; wait[$1] = $3 }
+    awk -v named="${1:-}" 'NR == FNR { run0[$1] = $3; wait0[$1] = $4; next }
+        { name[$1] = $2; run[$1] = $3; wait[$1] = $4 }
         END {
-            for (t in run) { r += run[t] - run0[t]; w += wait[t] - wait0[t] }
-            printf "%.2f s on a processor, %.2f s waiting for one", r / 1e9, w / 1e9
+            for (t in run) {
+                d = run[t] - run0[t]; r += d; w += wait[t] - wait0[t]
+                kind = name[t]; sub(/^skwird-/, "", kind); by[kind] += d
+            }
+            printf "%.2f s on a processor", r / 1e9
+            if (named != "") {
+                n = 0; s = ""
+                for (k in by) if (by[k] >= 5e6) { s = s (n++ ? ", " : "") sprintf("%s %.2f s", k, by[k] / 1e9) }
+                if (n) printf " (%s)", s
+            }
+            printf ", %.2f s waiting for one", w / 1e9
         }' "$threads_at/before" "$threads_at/during"
     rm -rf "$threads_at"
 }
@@ -476,8 +487,9 @@ measure_system() {
     rm -f "$client"
     local before
     before=$(sudo -n awk '{ print $14 + $15 }' "/proc/$sys_pid/stat")
+    threads_begin
     sleep 30
-    echo "idle, 30 s without a client: $(sudo -n awk -v a="$before" -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15 - a) / hz }' "/proc/$sys_pid/stat") s of processor time"
+    echo "idle, 30 s without a client: $(sudo -n awk -v a="$before" -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15 - a) / hz }' "/proc/$sys_pid/stat") s of processor time; by its threads: $(threads_end named)"
     echo "memory idle: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
     stop_system
     local from
