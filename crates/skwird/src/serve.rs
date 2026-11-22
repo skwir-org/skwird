@@ -293,8 +293,46 @@ fn seeing<'a>(shared: &Shared, i: usize, index: &'a Index, asker: &'a Asker) -> 
     (shared.system && !asker.is_root()).then(|| Seeing {
         index,
         asker,
-        above: crate::asker::through(asker, &shared.above[i]),
+        above: above(shared, i, asker),
     })
+}
+
+/// Whether `asker` may search every folder above root `i`: each as the
+/// index of the root holding it says now, live, so that a folder closed
+/// since the start (`chmod 700 ~` above a filesystem of its own) closes
+/// what is below it; as it was at the start where no root holds it.
+fn above(shared: &Shared, i: usize, asker: &Asker) -> Sight {
+    let mut ancestors: Vec<&Path> = shared.roots[i].ancestors().skip(1).collect();
+    ancestors.reverse();
+    let at_start = &shared.above[i];
+    ancestors
+        .iter()
+        .enumerate()
+        .fold(Sight::Seen, |sight, (k, folder)| {
+            let held = shared
+                .locate(folder)
+                .filter(|(j, _)| *j != i)
+                .and_then(|(j, rel)| match shared.snapshot(j) {
+                    Published::Ready(index) => {
+                        let facts = index.facts_of(index.folder_at(&rel)?)?;
+                        let owned = crate::asker::Owned {
+                            owner: facts.owner,
+                            group: facts.group,
+                            mode: facts.mode,
+                        };
+                        Some(asker.may_by(owned, index.acl_of(facts.id), 0o1))
+                    }
+                    _ => None,
+                });
+            let searched = held.unwrap_or_else(|| {
+                at_start
+                    .get(k)
+                    .copied()
+                    .flatten()
+                    .map_or(Sight::Hidden, |f| asker.may(f, 0o1))
+            });
+            sight.and(searched)
+        })
 }
 
 /// How far an asker reaches the folder at a path.

@@ -655,3 +655,49 @@ fn a_query_above_another_root_answers_from_both() {
     );
     assert_eq!(coverage.holes, Vec::new());
 }
+
+/// A folder above a root, closed while the service runs, closes what the
+/// root holds for those it no longer lets through: judged as the root
+/// holding it says now, not as it was at the start.
+#[test]
+fn a_folder_closed_above_a_root_closes_the_root() {
+    let Some(m) = machine() else { return };
+    let place = Place::new(&m.ext4, "above");
+    folder(&place, "", 0, 0, 0o755);
+    let theirs = folder(&place, "theirs", 1000, 1000, 0o755);
+    folder(&place, "theirs/data", 1000, 1000, 0o755);
+    let source = Place::new(&m.btrfs.join("a"), "data-source");
+    std::fs::write(source.join("on its own disk.txt"), b"x").unwrap();
+    let data = theirs.join("data");
+    assert!(
+        Command::new("mount")
+            .args(["--bind".as_ref(), source.0.as_os_str(), data.as_os_str()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let dirs = Place::new(&m.ext4, "above-dirs");
+    let service = Service::start(&dirs.0, &[&place.0, &data]);
+    let mut c = service.client(&place.0);
+    wait_for(20, "live", || live(&mut c, &place.0) && live(&mut c, &data));
+    // Asked at the root below itself: only the folders above judge it.
+    let found = "found on its own disk.txt";
+    let before = as_user(&service.socket, &data, 1001, 1001, &[]);
+
+    std::fs::set_permissions(&theirs, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    wait_for(5, "the folder closed heard", || {
+        !as_user(&service.socket, &data, 1001, 1001, &[]).contains(found)
+    });
+    let owner = as_user(&service.socket, &data, 1000, 1000, &[]);
+    drop(c);
+    drop(service);
+    assert!(
+        Command::new("umount")
+            .arg(&data)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(before.contains(found), "{before:?}");
+    assert!(owner.contains(found), "its owner still: {owner:?}");
+}

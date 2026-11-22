@@ -420,8 +420,10 @@ proved as root in the test machine on Linux 6.18.58):
   other user asking the system service is answered a result only if
   they may read and search its folder and search every folder above it,
   up to the filesystem's own top: within the index by its folders'
-  facts, above the root by the folders as they were when the service
-  started. A folder they may read but not search holds names they are
+  facts, above the root as the index of the root holding each folder
+  says now, live (as it was at the start where no root holds it: a
+  review found a folder closed since left what was below open). A
+  folder they may read but not search holds names they are
   not given (`ls` would list them, and stat none).
 - Each folder is judged once a query, with what is above it.
 - **ACLs are evaluated** (step 5b, `skwird_crawl::acl`). The crawl says

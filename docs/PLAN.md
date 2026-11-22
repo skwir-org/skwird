@@ -1265,8 +1265,9 @@ committed once the gate holds.
    Left, as the review found them: the writer's load each user can ask
    for (a sync derives every exclusion again and may check a whole
    root, registering and withdrawing a folder refreshes its root,
-   reading the journal reads the log), no time limit on a query, and the
-   folders above a root taken as they were when the service started.
+   reading the journal reads the log) and no time limit on a query. The
+   folders above a root, taken as they were at the start, are judged
+   live since (a root test closes one while the service runs).
 
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
