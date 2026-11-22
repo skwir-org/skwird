@@ -401,20 +401,24 @@ measure_system() {
         echo "(not every filesystem built in half an hour)"
     fi
     echo "memory once built: $(sudo -n cat "/proc/$sys_pid/status" | status_memory)"
-    local times=() i t0 name
+    local times=() i t0 name late=0
     for i in $(seq 1 10); do
         name="skwird-system-probe-$i"
         t0=$(now)
         : >"$probe/$name"
         until sysw find "$name" --in "$probe" 2>/dev/null | grep -q .; do
-            [ "$(since "$t0" | cut -d. -f1)" -lt 10 ] || break
+            if [ "$(since "$t0" | cut -d. -f1)" -ge 10 ]; then
+                late=$((late + 1))
+                break
+            fi
             sleep 0.005
         done
         times+=("$(since_ms "$t0")")
         rm -f "$probe/$name"
         sleep 0.3
     done
-    printf '%s\n' "${times[@]}" | sort -n | awk '{ a[NR] = $1 } END { printf "a change to its answer, live (%d files made): median %d ms, most %d ms\n", NR, a[int((NR + 1) / 2)], a[NR] }'
+    # One not answered in 10 s is counted at 10 s, and said.
+    printf '%s\n' "${times[@]}" | sort -n | awk -v late="$late" '{ a[NR] = $1 } END { printf "a change to its answer, live (%d files made): median %d ms, most %d ms", NR, a[int((NR + 1) / 2)], a[NR]; if (late > 0) printf " (%d not answered within 10 s, counted at 10 s)", late; printf "\n" }'
     start=$(now)
     sysw sync "$HOME" >/dev/null
     echo "a sync of your home (the barrier): $(since "$start") s"
