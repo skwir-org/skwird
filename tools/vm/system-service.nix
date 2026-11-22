@@ -19,6 +19,8 @@ pkgs.testers.runNixOSTest {
       enable = true;
       system = true;
     };
+    # /dev/vdb, mounted while the service runs.
+    virtualisation.emptyDiskImages = [256];
     users.groups.team.gid = 2000;
     users.users = {
       someone = {
@@ -98,5 +100,24 @@ pkgs.testers.runNixOSTest {
         for name in ["id_test", "dear diary"]:
             found = lines(machine.succeed(f"SKWIRD_NO_START=1 skwird find '{name}' --in /home"))
             assert found == [], (name, found)
+
+    with subtest("a filesystem mounted while it runs is a root, let go of once unmounted"):
+        machine.succeed(
+            "mkfs.ext4 -q /dev/vdb",
+            "mkdir -p /srv/later",
+            "mount /dev/vdb /srv/later",
+            "echo x > '/srv/later/on a disk mounted later.txt'",
+        )
+        machine.wait_until_succeeds(
+            "SKWIRD_NO_START=1 skwird find 'mounted later' --in /srv/later | grep -q 'mounted later.txt'",
+            timeout=30,
+        )
+        said = machine.succeed("SKWIRD_NO_START=1 skwird coverage /srv/later")
+        assert "names: live since " in said, said
+        machine.succeed("umount /srv/later")
+        machine.wait_until_succeeds(
+            "test -z \"$(SKWIRD_NO_START=1 skwird find 'mounted later' --in /srv)\"",
+            timeout=30,
+        )
   '';
 }

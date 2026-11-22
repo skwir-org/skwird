@@ -42,6 +42,9 @@ pub struct Config {
     /// The system service (phase 3): every user's files, whole
     /// filesystems marked (fanotify), its own folders the system's.
     pub system: bool,
+    /// Its roots found in the mount table, not named: followed as
+    /// filesystems are mounted and unmounted.
+    pub discovered: bool,
 }
 
 /// What a root publishes for queries to read.
@@ -56,13 +59,16 @@ pub enum Published {
 
 /// What the writer and the connections share.
 pub struct Shared {
-    pub roots: Vec<PathBuf>,
+    /// Each root's path, and whether it is there: at the system service, a
+    /// filesystem mounted since the start is a root too, and one unmounted
+    /// is one no longer. A root keeps its number for the engine's life.
+    roots: RwLock<Vec<(PathBuf, bool)>>,
     /// Whether this is the system service.
     pub system: bool,
     /// For the system service, the folders above each root, outermost
-    /// first, as they were when it started: an asker must search them all
-    /// to reach the root (DESIGN 4).
-    pub above: Vec<Vec<Option<crate::asker::Owned>>>,
+    /// first, as they were when it became one: for the folders no root
+    /// holds, which an asker must search too (DESIGN 4).
+    above: RwLock<Vec<Vec<Option<crate::asker::Owned>>>>,
     /// The queries each user runs now (`serve::Running`).
     pub running: Arc<std::sync::Mutex<std::collections::HashMap<u32, usize>>>,
     /// The connections each user holds open now.
@@ -73,26 +79,27 @@ pub struct Shared {
     pub published: RwLock<Vec<Published>>,
 }
 
+/// The folders above a root, outermost first, as they are now, for the
+/// system service (none for a user's engine).
+fn above_of(root: &Path, system: bool) -> Vec<Option<crate::asker::Owned>> {
+    let mut above: Vec<_> = root
+        .ancestors()
+        .skip(1)
+        .filter(|_| system)
+        .map(crate::asker::owned_at)
+        .collect();
+    above.reverse();
+    above
+}
+
 impl Shared {
     pub fn new(roots: Vec<PathBuf>, system: bool) -> Shared {
         let n = roots.len();
-        let above = roots
-            .iter()
-            .map(|root| {
-                let mut above: Vec<_> = root
-                    .ancestors()
-                    .skip(1)
-                    .filter(|_| system)
-                    .map(crate::asker::owned_at)
-                    .collect();
-                above.reverse();
-                above
-            })
-            .collect();
+        let above = roots.iter().map(|root| above_of(root, system)).collect();
         Shared {
-            roots,
+            roots: RwLock::new(roots.into_iter().map(|r| (r, true)).collect()),
             system,
-            above,
+            above: RwLock::new(above),
             running: Arc::default(),
             connections: Arc::default(),
             asked: std::sync::Mutex::default(),
@@ -100,25 +107,103 @@ impl Shared {
         }
     }
 
-    /// The root holding `path`, by its spelling, and the path below it.
+    fn read_roots(&self) -> std::sync::RwLockReadGuard<'_, Vec<(PathBuf, bool)>> {
+        self.roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Root `i`'s path.
+    pub fn root(&self, i: usize) -> PathBuf {
+        self.read_roots()
+            .get(i)
+            .map(|(p, _)| p.clone())
+            .unwrap_or_default()
+    }
+
+    /// The roots there now.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.read_roots()
+            .iter()
+            .filter(|(_, there)| *there)
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+
+    /// The folders above root `i`, outermost first, as they were when it
+    /// became one.
+    pub fn above(&self, i: usize) -> Vec<Option<crate::asker::Owned>> {
+        self.above
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(i)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// `path` a root from now on, opening: its number, the one it had if
+    /// it was one before.
+    pub fn add_root(&self, path: &Path) -> usize {
+        let mut roots = self
+            .roots
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut published = self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut above = self
+            .above
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fresh = above_of(path, self.system);
+        if let Some(i) = roots.iter().position(|(p, _)| p == path) {
+            roots[i].1 = true;
+            published[i] = Published::Opening;
+            above[i] = fresh;
+            return i;
+        }
+        roots.push((path.to_path_buf(), true));
+        published.push(Published::Opening);
+        above.push(fresh);
+        roots.len() - 1
+    }
+
+    /// Root `i` no longer one: its filesystem unmounted. A path there is
+    /// answered by the root holding it now.
+    pub fn drop_root(&self, i: usize) {
+        if let Some(r) = self
+            .roots
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(i)
+        {
+            r.1 = false;
+        }
+        self.publish(i, Published::Failed("no longer mounted".into()));
+    }
+
     /// The other roots strictly below `path`, which root `of` holds: the
     /// system service's other filesystems mounted below the folder asked.
     pub fn roots_below(&self, path: &Path, of: usize) -> Vec<usize> {
-        self.roots
+        self.read_roots()
             .iter()
             .enumerate()
-            .filter(|&(j, r)| j != of && r.starts_with(path) && r.as_path() != path)
+            .filter(|&(j, (r, there))| {
+                *there && j != of && r.starts_with(path) && r.as_path() != path
+            })
             .map(|(j, _)| j)
             .collect()
     }
 
+    /// The root holding `path`, by its spelling, and the path below it.
     pub fn locate(&self, path: &Path) -> Option<(usize, PathBuf)> {
-        self.roots
+        self.read_roots()
             .iter()
             .enumerate()
-            .filter(|(_, r)| path.starts_with(r))
-            .max_by_key(|(_, r)| r.components().count())
-            .map(|(i, r)| {
+            .filter(|(_, (r, there))| *there && path.starts_with(r))
+            .max_by_key(|(_, (r, _))| r.components().count())
+            .map(|(i, (r, _))| {
                 (
                     i,
                     path.strip_prefix(r).unwrap_or(Path::new("")).to_path_buf(),
@@ -443,6 +528,7 @@ pub fn writer(
         config,
         shared,
         cancel,
+        opts: opts.clone(),
         keepers,
         registrations,
         kept_live,
@@ -514,51 +600,68 @@ fn open_all(
     opts: &Options,
     cancel: &Cancel,
 ) -> (Vec<Option<Keeper>>, Vec<bool>) {
-    let mut keepers = Vec::new();
-    let mut built = vec![false; config.roots.len()];
     let (ex, refused) = exclusions(config, registrations);
     log_refused(refused);
-    for (i, path) in config.roots.iter().enumerate() {
-        let start = Instant::now();
-        let opened = Root::open(path, ex.clone()).and_then(|root| {
-            Keeper::open(
-                &index_dir(&config.dirs, path),
-                root,
-                opts.clone(),
-                Limits::default(),
-                cancel,
-            )
-        });
-        match opened {
-            Ok((keeper, how)) => {
-                let sizes = keeper.index().sizes();
-                log(&format!(
-                    "root {i} {} in {:.2?}: {} entries in {} folders",
-                    match how {
-                        Opened::Loaded { replayed, .. } =>
-                            format!("loaded, {replayed} records replayed"),
-                        Opened::Built { because: None } => "built".to_owned(),
-                        Opened::Built { because: Some(_) } => "built again".to_owned(),
-                    },
-                    start.elapsed(),
-                    sizes.entries,
-                    sizes.folders
-                ));
+    config
+        .roots
+        .iter()
+        .enumerate()
+        .map(|(i, path)| open_one(config, shared, i, path, &ex, opts, cancel))
+        .unzip()
+}
+
+/// Open root `i`, at `path`: its index read back, or crawled; published
+/// once ready. Says whether it was built.
+fn open_one(
+    config: &Config,
+    shared: &Shared,
+    i: usize,
+    path: &Path,
+    ex: &Exclusions,
+    opts: &Options,
+    cancel: &Cancel,
+) -> (Option<Keeper>, bool) {
+    let start = Instant::now();
+    let opened = Root::open(path, ex.clone()).and_then(|root| {
+        Keeper::open(
+            &index_dir(&config.dirs, path),
+            root,
+            opts.clone(),
+            Limits::default(),
+            cancel,
+        )
+    });
+    match opened {
+        Ok((keeper, how)) => {
+            let sizes = keeper.index().sizes();
+            log(&format!(
+                "root {i} {} in {:.2?}: {} entries in {} folders",
                 match how {
-                    Opened::Loaded { reconciled, .. } => log_reconciled(i, reconciled),
-                    Opened::Built { .. } => built[i] = true,
+                    Opened::Loaded { replayed, .. } =>
+                        format!("loaded, {replayed} records replayed"),
+                    Opened::Built { because: None } => "built".to_owned(),
+                    Opened::Built { because: Some(_) } => "built again".to_owned(),
+                },
+                start.elapsed(),
+                sizes.entries,
+                sizes.folders
+            ));
+            let built = match how {
+                Opened::Loaded { reconciled, .. } => {
+                    log_reconciled(i, reconciled);
+                    false
                 }
-                shared.publish(i, Published::Ready(Arc::new(keeper.snapshot())));
-                keepers.push(Some(keeper));
-            }
-            Err(e) => {
-                log(&format!("root {i} cannot be opened: {e}"));
-                shared.publish(i, Published::Failed(e.to_string()));
-                keepers.push(None);
-            }
+                Opened::Built { .. } => true,
+            };
+            shared.publish(i, Published::Ready(Arc::new(keeper.snapshot())));
+            (Some(keeper), built)
+        }
+        Err(e) => {
+            log(&format!("root {i} cannot be opened: {e}"));
+            shared.publish(i, Published::Failed(e.to_string()));
+            (None, false)
         }
     }
-    (keepers, built)
 }
 
 /// What the writer holds.
@@ -566,6 +669,8 @@ struct Writing<'a> {
     config: &'a Config,
     shared: &'a Shared,
     cancel: Cancel,
+    /// How every root is read: a root mounted since is read so too.
+    opts: Options,
     keepers: Vec<Option<Keeper>>,
     /// Folders clients keep out of the index.
     registrations: Vec<Registration>,
@@ -1104,6 +1209,7 @@ impl Writing<'_> {
     /// at mount points made or taken below it are read again at once.
     fn mounts_changed(&mut self) {
         self.marks_followed();
+        self.roots_followed();
         for root in 0..self.keepers.len() {
             let Some(keeper) = self.keepers[root].as_mut() else {
                 continue;
@@ -1178,29 +1284,93 @@ impl Writing<'_> {
     /// its crawl (`built`) or by the check now.
     fn hear_whole(&mut self, since: Time, built: &[bool]) {
         for (root, &crawled) in built.iter().enumerate() {
-            if self.marked[root].is_none() {
-                continue;
-            }
-            let Some(keeper) = self.keepers[root].as_mut() else {
-                continue;
-            };
-            if !crawled {
-                let start = Instant::now();
-                match keeper.refresh(&self.cancel) {
-                    Ok(done) => log(&format!(
-                        "root {root} checked in {:.2?}: {} read again, {} crawled",
-                        start.elapsed(),
-                        done.reread,
-                        done.crawled
-                    )),
-                    Err(e) => {
-                        log(&format!("root {root} cannot be checked, so not live: {e}"));
-                        continue;
-                    }
+            self.hear_root(root, since, crawled);
+        }
+    }
+
+    /// Root `root`, its filesystem marked before `since`, heard whole from
+    /// then on, once proven current after: by its crawl (`crawled`), or by
+    /// the check now.
+    fn hear_root(&mut self, root: usize, since: Time, crawled: bool) {
+        if self.marked.get(root).copied().flatten().is_none() {
+            return;
+        }
+        let Some(keeper) = self.keepers.get_mut(root).and_then(Option::as_mut) else {
+            return;
+        };
+        if !crawled {
+            let start = Instant::now();
+            match keeper.refresh(&self.cancel) {
+                Ok(done) => log(&format!(
+                    "root {root} checked in {:.2?}: {} read again, {} crawled",
+                    start.elapsed(),
+                    done.reread,
+                    done.crawled
+                )),
+                Err(e) => {
+                    log(&format!("root {root} cannot be checked, so not live: {e}"));
+                    return;
                 }
             }
-            keeper.heard_whole(since);
-            self.publish(root);
+        }
+        keeper.heard_whole(since);
+        self.publish(root);
+    }
+
+    /// The system service's roots followed as filesystems are mounted and
+    /// unmounted, where they are found in the mount table, not named: one
+    /// mounted is marked, opened and heard as at the start; one unmounted
+    /// is let go of, and a path there answered by the root holding it now.
+    fn roots_followed(&mut self) {
+        if !self.config.system || !self.config.discovered {
+            return;
+        }
+        if self.group.is_none()
+            && let Ok(table) = Table::read()
+        {
+            self.table = table;
+        }
+        let now = crate::system::roots(&self.table, crate::system::removable);
+        let there = self.shared.roots();
+        for path in there.iter().filter(|p| !now.contains(p)) {
+            if let Some((i, rel)) = self.shared.locate(path)
+                && rel.as_os_str().is_empty()
+            {
+                self.keepers[i] = None;
+                self.marked[i] = None;
+                self.shared.drop_root(i);
+                log(&format!("root {i}: no longer mounted, let go of"));
+            }
+        }
+        let added: Vec<&PathBuf> = now.iter().filter(|p| !there.contains(p)).collect();
+        if added.is_empty() {
+            return;
+        }
+        let (ex, refused) = exclusions(self.config, &self.registrations);
+        log_refused(refused);
+        for path in added {
+            let i = self.shared.add_root(path);
+            while self.keepers.len() <= i {
+                self.keepers.push(None);
+                self.marked.push(None);
+            }
+            log(&format!("root {i}: mounted, a root from now on"));
+            self.marked[i] = self
+                .group
+                .as_ref()
+                .and_then(|g| mark(g, i, path, &self.table));
+            let since = Time::now();
+            let (keeper, built) = open_one(
+                self.config,
+                self.shared,
+                i,
+                path,
+                &ex,
+                &self.opts,
+                &self.cancel,
+            );
+            self.keepers[i] = keeper;
+            self.hear_root(i, since, built);
         }
     }
 

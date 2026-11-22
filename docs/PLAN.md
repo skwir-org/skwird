@@ -1156,8 +1156,10 @@ committed once the gate holds.
    here: the folders' ACLs (step 5); each user's own files (step 6),
    so a user's own exclusions hold only once step 6 is done; a
    filesystem mounted after the service started, a hole until it starts
-   again; a query above several roots, answered from one (done after,
-   on 2026-11-22: each answers, at its place). Open for the
+   again (done after, on 2026-11-22: a root from then on, and one
+   unmounted let go of, proven in the system-service machine); a query
+   above several roots, answered from one (done after, on 2026-11-22:
+   each answers, at its place). Open for the
    user: snapshots (DESIGN, open question 10).
 5. **Answers filtered per asker** (DESIGN 4): `SO_PEERCRED` and
    `SO_PEERGROUPS`, modes and ACLs evaluated, each folder's answer kept

@@ -250,6 +250,7 @@ fn serve(args: &Args) -> Result<(), String> {
             .ok()
             .and_then(|v| v.parse().ok()),
         system: args.system,
+        discovered: args.system && args.roots.is_empty(),
     })
 }
 

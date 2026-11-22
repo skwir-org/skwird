@@ -238,10 +238,10 @@ fn coverage(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire::Cov
         return Ok(c);
     };
     let mut below = shared.roots_below(&path, i);
-    below.sort_by_key(|&j| shared.roots[j].components().count());
+    below.sort_by_key(|&j| shared.root(j).components().count());
     for j in below {
-        if let Ok(inner) = coverage_one(shared, &WirePath::of(&shared.roots[j]), asker) {
-            c = at_root_below(c, &shared.roots[j], inner);
+        if let Ok(inner) = coverage_one(shared, &WirePath::of(&shared.root(j)), asker) {
+            c = at_root_below(c, &shared.root(j), inner);
         }
     }
     Ok(c)
@@ -273,12 +273,12 @@ fn coverage_one(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire:
                     }
                 }
             }
-            let mut c = coverage_at(&index, &shared.roots[i], &rel)
+            let mut c = coverage_at(&index, &shared.root(i), &rel)
                 .ok_or_else(|| failure("not_a_folder", "no folder of the index is at that path"))?;
             // A hole is a folder's name: said only to who may list its
             // parent, never another user's private folder's.
             if let Some(seeing) = &seeing {
-                seeing.seen_holes(&shared.roots[i], &mut c.holes, &mut memo);
+                seeing.seen_holes(&shared.root(i), &mut c.holes, &mut memo);
             }
             c.holes
                 .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
@@ -302,9 +302,10 @@ fn seeing<'a>(shared: &Shared, i: usize, index: &'a Index, asker: &'a Asker) -> 
 /// since the start (`chmod 700 ~` above a filesystem of its own) closes
 /// what is below it; as it was at the start where no root holds it.
 fn above(shared: &Shared, i: usize, asker: &Asker) -> Sight {
-    let mut ancestors: Vec<&Path> = shared.roots[i].ancestors().skip(1).collect();
+    let root = shared.root(i);
+    let mut ancestors: Vec<&Path> = root.ancestors().skip(1).collect();
     ancestors.reverse();
-    let at_start = &shared.above[i];
+    let at_start = shared.above(i);
     ancestors
         .iter()
         .enumerate()
@@ -373,7 +374,7 @@ fn denied() -> wire::Coverage {
 /// Folder `f` of root `i`'s index, not covered for an asker.
 fn hole(shared: &Shared, i: usize, index: &Index, f: FolderId) -> wire::Hole {
     wire::Hole {
-        path: WirePath::of(&shared.roots[i].join(index.path_of(f))),
+        path: WirePath::of(&shared.root(i).join(index.path_of(f))),
         why: wire::Why::Denied,
     }
 }
@@ -402,7 +403,7 @@ fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -
                     wire::Scope::User
                 },
                 engine: concat!("skwird ", env!("CARGO_PKG_VERSION")).to_owned(),
-                roots: shared.roots.iter().map(|r| WirePath::of(r)).collect(),
+                roots: shared.roots().iter().map(|r| WirePath::of(r)).collect(),
             };
             send(writer, id, Answer::Hello(welcome)).then_some(hello.client)
         }
@@ -695,7 +696,7 @@ fn changes(
     let Ok((events, token)) = answer else {
         return Answer::TooOld {};
     };
-    let base = &shared.roots[i];
+    let base = &shared.root(i);
     // Another user than root, asking the system service, is told what
     // changed in folders they may list now (DESIGN 4): an event is theirs
     // if they may list the folder holding what it names. A removal in a
@@ -800,7 +801,7 @@ fn answer_query(
     };
     if !matches!(coverage.names, wire::Proof::NotCovered(_)) {
         let mut below = shared.roots_below(&path, i);
-        below.sort_by_key(|&j| shared.roots[j].components().count());
+        below.sort_by_key(|&j| shared.root(j).components().count());
         for j in below {
             if entries.len() > limit {
                 break;
@@ -808,7 +809,7 @@ fn answer_query(
             let Ok((more, inner)) = answer_in(shared, j, Path::new(""), &asked, who) else {
                 continue;
             };
-            coverage = at_root_below(coverage, &shared.roots[j], inner);
+            coverage = at_root_below(coverage, &shared.root(j), inner);
             entries.extend(more);
         }
     }
@@ -875,7 +876,7 @@ fn answer_in(
         return Ok((Vec::new(), denied()));
     }
     let not_a_folder = || failure("not_a_folder", "no folder of the index is at that path");
-    let mut coverage = coverage_at(&index, &shared.roots[i], rel).ok_or_else(not_a_folder)?;
+    let mut coverage = coverage_at(&index, &shared.root(i), rel).ok_or_else(not_a_folder)?;
     let folder = index.folder_at(rel).ok_or_else(not_a_folder)?;
     let found = match &seeing {
         None => index.query(folder, asked).map(|hits| (hits, Vec::new())),
@@ -891,13 +892,13 @@ fn answer_in(
     // there is not said either.
     if let Some(s) = &seeing {
         let mut memo = HashMap::new();
-        s.seen_holes(&shared.roots[i], &mut coverage.holes, &mut memo);
+        s.seen_holes(&shared.root(i), &mut coverage.holes, &mut memo);
         let holes = s.acl_holes(folder, &mut memo);
         coverage
             .holes
             .extend(holes.into_iter().map(|f| hole(shared, i, &index, f)));
     }
-    let root: &Path = &shared.roots[i];
+    let root: &Path = &shared.root(i);
     Ok((
         hits.iter().map(|h| convert::hit(root, h)).collect(),
         coverage,

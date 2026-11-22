@@ -99,8 +99,11 @@ service manager's (`RUNTIME_DIRECTORY`, `CACHE_DIRECTORY`,
 `STATE_DIRECTORY`, `CONFIGURATION_DIRECTORY`) or `/run/skwird`,
 `/var/cache/skwird`, `/var/lib/skwird` and `/etc/skwird`; its socket
 is open to every user (the folder 0755, the socket 0666), its index and
-state its own (0700). Not yet: a filesystem mounted after it started is
-a hole until it starts again. A query or a coverage at a folder above
+state its own (0700). A filesystem that stores files, mounted while it
+runs, is a root from then on, marked, read and live as at the start;
+one unmounted is let go of, and a path there answered by the root
+holding it now (roots found in the mount table alone, not named). A
+query or a coverage at a folder above
 several roots (`/` above `/home`) is answered from each, every root
 below at its place: its mount hole gone, the proof the weaker of all;
 one the asker may not reach, or not read yet, a hole there.
