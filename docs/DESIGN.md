@@ -1039,6 +1039,31 @@ what was made after its first open; in the test of the watches, under
 16 busy processes, the coverage failure came back once in 20 runs
 without it, and never in 80 with it.
 
+**What finding gave is kept, whatever it gave** (the same day, the
+user's run at `c45e4aa`: while the home was built, 47 s at a load of 5
+to 11, finding took 273 ms for 1,939 events, of which 16 folders were
+counted as found). A folder heard was kept as found in an index, or as
+in none; one in a root being opened, gone, or reached by no mount was
+found again for each batch, and not counted. Now each is kept while it
+holds (`Unfound`):
+- **in a root being opened,** while the root still is: what is heard in
+  it is held, and found again as it is replayed;
+- **gone,** for good: its handle never opens again;
+- **reached by no mount,** as one in no index, while no index changes
+  its shape: a folder renamed as it was opened is reached by none, and
+  the rename changes its index (a folder renamed is made at its new
+  name and let go of at its old one);
+- **its handle failed to open:** not kept, it lowers its filesystem's
+  coverage.
+
+The save line counts each. The root test of a slow root now writes to
+files it holds while it opens, twice in batches apart, and asks for
+them by their new size: a file written to moves no folder's change
+time, so the check as the root opens does not see it, and the events
+held alone tell it. With the second batch's folders taken as kept but
+not held, it fails there. What it saves on the user's machine is to be
+measured.
+
 **The log is the journal.** Every change the writer applies, whatever
 found it (the first crawl, a check, an event), is appended to a
 numbered log before it reaches a chunk. One structure does three

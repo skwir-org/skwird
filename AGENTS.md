@@ -78,7 +78,9 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   identity does not say where a folder is: a folder moved is in the
   index twice until its old parent is read again. What is found in no
   index is kept only while no index changes its shape (`tree::shapes`):
-  a folder comes into one only by a change that moves it.
+  a folder comes into one only by a change that moves it. Whatever
+  finding gives is kept only while it holds (`Unfound`), but a handle
+  that failed to open, which lowers coverage.
 - **Watch, then open, then list.** A listing may leave out what was made
   after its folder was opened (POSIX; btrfs does): a folder is watched,
   then opened again for its listing, so that what is made meanwhile is

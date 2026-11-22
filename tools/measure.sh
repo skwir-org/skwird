@@ -406,8 +406,9 @@ threads_end() {
         }' "$threads_at/before" "$threads_at/during"
     rm -rf "$threads_at"
 }
-# The processor time `time` said of a client ("%3U %3S", in $1).
-client_time() { awk '{ printf "%.2f s on a processor", $1 + $2 }' "$1"; }
+# The processor time `time` said of a client ("%3U %3S", in $1), its
+# decimals written as the locale writes them (a comma in French).
+client_time() { awk '{ gsub(/,/, "."); printf "%.2f s on a processor", $1 + $2 }' "$1"; }
 measure_system() {
     if [ -S /run/skwird/socket ]; then
         echo "(a system service runs here: not measured, so as not to meet it)"

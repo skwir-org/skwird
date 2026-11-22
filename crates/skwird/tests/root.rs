@@ -841,17 +841,46 @@ fn a_root_slow_to_open_delays_itself_alone() {
     // Made while the slow root is crawled: some in folders it read already.
     std::thread::sleep(Duration::from_millis(1500));
     assert!(!live(&mut c, &slow.0), "the slow root still opening");
-    let made: BTreeSet<PathBuf> = (0..200)
-        .step_by(10)
-        .map(|a| slow.join(&format!("d{a:03}/made while opening.txt")))
-        .collect();
+    let in_each = |name: &str| -> BTreeSet<PathBuf> {
+        (0..200)
+            .step_by(10)
+            .map(|a| slow.join(&format!("d{a:03}/{name}")))
+            .collect()
+    };
+    let made = in_each("made while opening.txt");
     for path in &made {
         std::fs::write(path, b"x").unwrap();
     }
+    // Files written to, twice, in batches apart: what the folder's change
+    // time does not say, which the check as it opens does not see, so that
+    // the events held alone tell it. The second is held by what was kept
+    // of the first, its folders known to be in a root being opened.
+    let (once, twice) = (in_each("entry-1"), in_each("entry-2"));
+    for path in &once {
+        std::fs::write(path, b"abc").unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    for path in &twice {
+        std::fs::write(path, b"abcde").unwrap();
+    }
+    assert!(!live(&mut c, &slow.0), "the slow root still opening");
     let synced = c.sync(&slow.0).unwrap();
     assert!(matches!(synced.names, Proof::Live(_)), "{:?}", synced.names);
     assert_eq!(
         answered(&mut c, &named(&slow.0, "made while opening")),
         made
+    );
+    let sized = |c: &mut Client, name: &str, size: u64| {
+        let query = Query {
+            size: Some([size, size]),
+            ..named(&slow.0, name)
+        };
+        answered(c, &query)
+    };
+    assert_eq!(sized(&mut c, "entry-1", 3), once, "written to once");
+    assert_eq!(
+        sized(&mut c, "entry-2", 5),
+        twice,
+        "written to in a later batch"
     );
 }

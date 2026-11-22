@@ -330,6 +330,23 @@ struct Found {
     shape: u64,
 }
 
+/// What finding a folder heard gave, but a folder of an index: kept while
+/// it holds, so that a folder heard again is not found again for each batch
+/// of its events (`Writing::find_heard`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unfound {
+    /// In no index (outside every root, kept out, not read yet), or reached
+    /// by no mount: while the process's shapes stay
+    /// ([`skwird_index::tree::shapes`]), since a folder comes into an index,
+    /// or is renamed in one, only by a change that moves them.
+    Nowhere(u64),
+    /// In this root, being opened: what is heard in it is held, while the
+    /// root is still opening, and found again as it is replayed.
+    Held(usize),
+    /// Gone: its handle never opens again.
+    Gone,
+}
+
 /// The most folders heard the system service keeps as found: past them,
 /// every one is let go of, and found again when heard.
 const FOUND_KEPT: usize = 4096;
@@ -763,13 +780,13 @@ struct Writing<'a> {
     /// would give the same ([`Keeper::holds`]): a busy folder is not found
     /// again for each event (DESIGN 8). At most [`FOUND_KEPT`].
     found: HashMap<fanotify::Folder, Found>,
-    /// Each folder heard found in no index, with the shapes of this
-    /// process then ([`skwird_index::tree::shapes`]): kept while they stay,
-    /// so that a busy folder kept out (the engine's own, the Nix store) is
-    /// not found again for each batch of its events. Let go of whenever a
-    /// root comes or goes, and the registrations or the mounts change. At
-    /// most [`FOUND_KEPT`].
-    unfound: HashMap<fanotify::Folder, u64>,
+    /// Each folder heard found in no index, in a root being opened, or
+    /// gone ([`Unfound`]): kept while that holds, so that a busy folder kept
+    /// out (the engine's own, the Nix store), or one heard while its root is
+    /// crawled, is not found again for each batch of its events. Let go of
+    /// whenever a root comes or goes, and the registrations or the mounts
+    /// change. At most [`FOUND_KEPT`].
+    unfound: HashMap<fanotify::Folder, Unfound>,
     /// What was heard and not applied yet, and what is due.
     gather: Gather,
     /// The folder cookies are made in, once watched.
@@ -1687,9 +1704,9 @@ impl Writing<'_> {
     /// root's index has the shape it had then, no folder made, moved or let
     /// go of since, and holds it with the identity it was found with
     /// ([`Keeper::holds`]); otherwise it is found again. One found in no
-    /// index (outside every root, kept out, not read yet) is taken so while
-    /// no index has changed its shape since ([`skwird_index::tree::shapes`]):
-    /// a folder comes into an index only by one that changes. What finding
+    /// index, in a root being opened, or gone, is taken so while that holds
+    /// ([`Unfound`]); one whose handle failed to open is found again, its
+    /// filesystem's coverage lowered. What finding
     /// takes is charged to the folder, as its application is (DESIGN 8).
     /// And the folders in a root being opened, whose events are held until
     /// it is.
@@ -1735,21 +1752,24 @@ impl Writing<'_> {
                 found.insert(folder.clone(), Some((root, f)));
                 continue;
             }
-            if self.unfound.get(folder) == Some(&shapes) {
-                self.done.nowhere_before += 1;
+            if let Some(is_held) = self.known_unfound(folder, shapes) {
+                self.done.known_before += 1;
+                if is_held {
+                    held.insert(folder.clone());
+                }
                 found.insert(folder.clone(), None);
                 continue;
             }
             let start = thread_time();
-            // Whether it is in no index: none holds it, though it is there.
-            let mut nowhere = false;
+            // What is kept of it found in no index, if anything.
+            let mut kept = None;
             let at = match resolver.resolve(folder) {
                 Resolved::At(path, id) => match self.shared.locate(&path) {
                     // In a root being opened: held until it is.
-                    Some((root, _))
-                        if self.keepers[root].is_none() && self.opening.contains_key(&root) =>
-                    {
+                    Some((root, _)) if self.opening_root(root) => {
                         held.insert(folder.clone());
+                        self.done.held += 1;
+                        kept = Some(Unfound::Held(root));
                         None
                     }
                     Some((root, rel)) => {
@@ -1761,18 +1781,36 @@ impl Writing<'_> {
                                 shape: keeper.shape(),
                             })
                         });
-                        nowhere = at.is_none();
+                        if at.is_none() {
+                            self.done.nowhere += 1;
+                            kept = Some(Unfound::Nowhere(shapes));
+                        }
                         at
                     }
                     None => {
-                        nowhere = true;
+                        self.done.nowhere += 1;
+                        kept = Some(Unfound::Nowhere(shapes));
                         None
                     }
                 },
-                // Gone, its removal is heard in a parent; no mount reaches
-                // it, or no mark kept has it: no root holds it.
-                Resolved::Gone | Resolved::Unreachable(_) | Resolved::Unmarked => None,
+                // Gone, its removal is heard in a parent: its handle never
+                // opens again.
+                Resolved::Gone => {
+                    self.done.gone += 1;
+                    kept = Some(Unfound::Gone);
+                    None
+                }
+                // No mount reaches it, or no mark kept has it: no root holds
+                // it, until a mount or an index changes (a folder renamed as
+                // it was opened is reached by none, and changes its index).
+                Resolved::Unreachable(_) | Resolved::Unmarked => {
+                    self.done.unreached += 1;
+                    kept = Some(Unfound::Nowhere(shapes));
+                    None
+                }
+                // Not kept: it lowers the coverage of its filesystem.
                 Resolved::Failed(_) => {
+                    self.done.failed += 1;
                     failed.insert(folder.fsid);
                     None
                 }
@@ -1784,16 +1822,32 @@ impl Writing<'_> {
                 self.found.insert(folder.clone(), at);
                 self.done.found_again += 1;
                 charges.push((at.root, at.folder, thread_time().saturating_sub(start)));
-            } else if nowhere {
+            } else if let Some(kept) = kept {
                 if self.unfound.len() >= FOUND_KEPT {
                     self.unfound.clear();
                 }
-                self.unfound.insert(folder.clone(), shapes);
-                self.done.nowhere += 1;
+                self.unfound.insert(folder.clone(), kept);
             }
             found.insert(folder.clone(), at.map(|at| (at.root, at.folder)));
         }
         (found, failed, charges, held)
+    }
+
+    /// Whether root `root` is being opened, its events held.
+    fn opening_root(&self, root: usize) -> bool {
+        self.keepers.get(root).is_some_and(Option::is_none) && self.opening.contains_key(&root)
+    }
+
+    /// What is kept of `folder`, found before in no index, in a root being
+    /// opened, or gone, if it still holds ([`Unfound`]): whether it is held.
+    /// None where nothing kept holds.
+    fn known_unfound(&self, folder: &fanotify::Folder, shapes: u64) -> Option<bool> {
+        match *self.unfound.get(folder)? {
+            Unfound::Nowhere(at) if at == shapes => Some(false),
+            Unfound::Held(root) if self.opening_root(root) => Some(true),
+            Unfound::Gone => Some(false),
+            _ => None,
+        }
     }
 
     /// What the group heard: each folder named found by its handle, at its
@@ -1937,13 +1991,18 @@ struct Done {
     /// Serving syncs: what was gathered of their root applied at once, or
     /// the check serving one whose cookie came late. Not charged.
     syncing: std::time::Duration,
-    /// Of the folders events named, each batch's: those found before, and
-    /// those found again (the system service, `Writing::find_heard`);
-    /// those found in no index, and of them those known so before.
+    /// Of the folders events named, each batch's (the system service,
+    /// `Writing::find_heard`): those found before, and those found again;
+    /// those found in no index, in a root being opened, gone, reached by no
+    /// mount, or whose handle failed to open; and those known so before.
     found_before: u64,
     found_again: u64,
     nowhere: u64,
-    nowhere_before: u64,
+    held: u64,
+    gone: u64,
+    unreached: u64,
+    failed: u64,
+    known_before: u64,
     /// How often the writer woke, and its whole processor time, since
     /// the last save: what the kinds above leave out is its own.
     wakes: u64,
@@ -2000,7 +2059,8 @@ impl Done {
              ({} distinct; {} as they were, {} patched, {} spliced, {} cut again), {} folders crawled, {} \
              entries stat-ed, the largest folder {} entries, the busiest read {} times, a read {} µs \
              at the median, {} µs at most; of the folders events named, {} as found before, {} \
-             found again, {} in no index, {} known so before; processor time: {} ms \
+             found again, {} in no index, {} in a root being opened, {} gone, {} reached by \
+             no mount, {} failed to open; {} known so before; processor time: {} ms \
              finding, {} ms applying, {} ms saving, {} ms giving memory back, {} ms serving syncs, of {} ms the \
              writer took, woken {} times",
             done.events,
@@ -2021,7 +2081,11 @@ impl Done {
             done.found_before,
             done.found_again,
             done.nowhere,
-            done.nowhere_before,
+            done.held,
+            done.gone,
+            done.unreached,
+            done.failed,
+            done.known_before,
             done.noticing.as_millis(),
             done.applying.as_millis(),
             done.saving.as_millis(),

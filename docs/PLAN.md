@@ -1463,6 +1463,19 @@ committed once the gate holds.
    meanwhile (on a processor, waiting for one) and the client's time:
    whether the service's niceness holds them.
 
+   **Measured at `c45e4aa`**, at a load of 4.9 to 11: the sync 0.20 s,
+   its service threads 0.12 s on a processor and none waiting for one;
+   the queries 0.70 and 0.92 s, none waiting either. The service's
+   niceness holds neither: step 2 of the recommendation is not taken.
+   The client's time read 0.00 s, wrongly: `time` wrote its decimals
+   with the locale's comma; now read either way. A change answered in
+   3.83 s at the median, two of ten not within 10 s; idle 2.5% (not
+   met). While the home was built, finding cost 273 ms for 1,939
+   events: folders in a root being opened were found again at each
+   batch. Now kept (DESIGN 8, "What finding gave is kept, whatever it
+   gave"). The account is still owed on this desktop: saves of 67 to
+   116 ms and reads of 75 ms of the large folders are charged to it.
+
 The user's choices for this phase (2026-11-22): the roots (DESIGN 1),
 modes and ACLs evaluated by the service (DESIGN 4), each user's files
 read (DESIGN 5). A finding that contradicts a decision is recorded
