@@ -1899,15 +1899,42 @@ above).
    - Under Wine, the parsing, the assembly and the rule pass on records
      of the tests' making. The calls themselves wait for Windows.
 
-   **Left of step 7**, nothing of which Wine can try:
-   - **The index from the table.** The file table gives names, kinds and
-     ids, not sizes, times, nor a folder's change time, which the check
-     needs. So either each folder is read once after it (the table only
-     a faster first pass of names), or the file table's own records are
-     parsed for them (`$STANDARD_INFORMATION`, `$DATA`), as Everything
-     does. A choice to make with a Windows machine to measure on (open
-     question 7). `Volume::enumerate` also holds every record in memory,
-     to bound before a volume of millions.
+   **The file table, read raw** (2026-11-23, on GitHub's Windows runners,
+   the fast way the user chose; `skwird_crawl::mft`):
+   - **`Volume::table`** reads an NTFS volume's file table whole from the
+     disk: where it is (`FSCTL_GET_NTFS_VOLUME_DATA`), its first record's
+     data runs, then 1 MiB reads.
+   - **`decode`** checks and restores each record by its update sequence.
+     A sector written apart from the rest is torn and never read; its
+     number is kept as unread. It reads:
+     - the times, attributes and security id (`$STANDARD_INFORMATION`);
+     - each name and its folder, the short DOS names left out;
+     - the data's size, the reparse tag and whether a mount point mounts
+       a volume.
+   - **`Table`** merges a file's records, places each name in its folder
+     only where that folder's record is still the same file, and keeps
+     the volume's metadata out.
+   - **`TableReader`**, given to the crawl (`crawl_by`), reads each folder
+     from the table as `windows::read` reads one from its listing, through
+     the same `listed`.
+   - **Proven on a 512 MB virtual NTFS disk the runner makes**
+     (`skwird_testkit::ntfs`, never the runner's own drive):
+     - the table holds what a walk finds (paths, kinds, identities,
+       sizes);
+     - a crawl read from the table is the crawl read from the folders:
+       identities, times, what is left out and why (a `.private` folder,
+       an exclusion, a junction, links), entries, sizes and writes.
+   - **What the runs taught:**
+     - NTFS keeps a folder's kind in its record's head, never in its
+       attributes: the table adds it, as a listing does;
+     - the two ways of naming a volume (`FILE_ID_INFO`, the table's) are
+       the same 64 bits.
+   - **Not yet:** a file table fragmented past its first record (an
+     `$ATTRIBUTE_LIST` on record 0) is refused, and the walk serves.
+     Every record is held in memory while the table is built: to bound,
+     and to measure, on a volume of millions.
+
+   **Left of step 7:**
    - **The journal followed:** read on a thread of its own, each record's
      parent folder found by its id and gathered, its position kept with
      the index, and the rule applied at each start.
