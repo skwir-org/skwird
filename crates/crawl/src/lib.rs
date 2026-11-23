@@ -359,7 +359,9 @@ pub struct Options {
     pub tick: Duration,
     /// Say of each folder read whether it has an access ACL ([`ACL`] in
     /// its mode), as the system service needs to answer each asker
-    /// (DESIGN 4): one more call a folder.
+    /// (DESIGN 4): one more call a folder. On Windows, each folder's
+    /// security id instead, as its owner, and the root fetches the
+    /// descriptor of each id met ([`Root::descriptor`]).
     pub acls: bool,
 }
 

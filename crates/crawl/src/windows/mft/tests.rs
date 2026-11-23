@@ -590,3 +590,77 @@ fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
     assert!(read.len() > 12, "{read:?}");
     assert_eq!(read, walked);
 }
+
+/// What each folder is judged by, for the system service (DESIGN 4): its
+/// security id, the same read from its volume's table and from its own
+/// record; the descriptor each id names, fetched once, held by the root.
+/// Two folders of the same access share an id; one given its own access
+/// has another. On a test machine's volume alone.
+#[test]
+fn each_folder_says_what_it_is_judged_by() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    let s = Scratch::under(&volume, "mft-security");
+    s.dir(r"tree\shared one");
+    s.dir(r"tree\shared two");
+    let own = s.dir(r"tree\its own");
+    // Its access its own: inherited no more, the administrators' alone.
+    let granted = std::process::Command::new("icacls")
+        .arg(&own)
+        .args(["/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"])
+        .output()
+        .unwrap();
+    assert!(
+        granted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&granted.stdout)
+    );
+    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
+    flush(&letter);
+    let root = crate::Root::open(&s.join("tree"), crate::Exclusions::none()).unwrap();
+    let opts = Options {
+        threads: 2,
+        acls: true,
+        ..Options::default()
+    };
+    let cancel = crate::Cancel::default();
+    let owners = |crawl: &crate::Crawl| -> BTreeMap<PathBuf, u32> {
+        crawl
+            .folders
+            .iter()
+            .filter_map(|f| Some((f.rel.clone(), f.stat?.owner)))
+            .collect()
+    };
+    let read = owners(&crate::crawl_all(&root, &opts, &cancel).unwrap());
+    let table = Volume::open(OsStr::new(&letter)).unwrap().table().unwrap();
+    let reader = TableReader { table: &table };
+    let from_table = owners(
+        &crate::crawl_below_by(
+            &root,
+            Path::new(""),
+            None,
+            &opts,
+            &cancel,
+            &|r, rel, id, o| reader.read(r, rel, id, o),
+        )
+        .unwrap(),
+    );
+    assert_eq!(from_table, read, "the same ids both ways");
+    assert_eq!(read.len(), 4, "{read:?}");
+    let id = |p: &str| read[Path::new(p)];
+    assert!(read.values().all(|&id| id != 0), "{read:?}");
+    assert_eq!(id("shared one"), id("shared two"));
+    assert_ne!(id("its own"), id("shared one"));
+    for (path, id) in &read {
+        assert!(
+            root.descriptor(*id).is_some(),
+            "{}: no descriptor for {id}",
+            path.display()
+        );
+    }
+    assert_ne!(
+        root.descriptor(id("its own")),
+        root.descriptor(id("shared one"))
+    );
+}

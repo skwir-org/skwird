@@ -37,10 +37,9 @@ use windows_sys::Win32::Foundation::{
     HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_ID_128,
-    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdType, GetFinalPathNameByHandleW,
-    OPEN_EXISTING, OpenFileById, VOLUME_NAME_DOS,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
@@ -50,6 +49,7 @@ use windows_sys::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
 
 use super::{Heard, Queue, event};
 use crate::windows::journal::{self, Position, Volume};
+use crate::windows::security::open_by_id;
 use crate::windows::{Handle, plain, verbatim};
 
 /// The journal a volume is given where it has none: 32 MiB, grown and cut
@@ -164,42 +164,16 @@ impl Follower {
     /// The path of the folder of identity `id`, opened through the root's
     /// folder: none if it is gone, an error if it cannot be opened.
     fn path_of(&self, id: u128) -> Result<Option<PathBuf>, u32> {
-        let mut descriptor = FILE_ID_DESCRIPTOR {
-            dwSize: u32::try_from(size_of::<FILE_ID_DESCRIPTOR>()).unwrap_or(u32::MAX),
-            Type: FileIdType,
-            Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: 0 },
-        };
-        if let Ok(narrow) = u64::try_from(id) {
-            descriptor.Anonymous.FileId = i64::from_le_bytes(narrow.to_le_bytes());
-        } else {
-            descriptor.Type = ExtendedFileIdType;
-            descriptor.Anonymous.ExtendedFileId = FILE_ID_128 {
-                Identifier: id.to_le_bytes(),
-            };
-        }
-        // SAFETY: the root's folder, open; the descriptor alive for the
-        // call; the handle given is ours to close.
-        let folder = unsafe {
-            OpenFileById(
-                self.hint.0,
-                &raw const descriptor,
-                FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                FILE_FLAG_BACKUP_SEMANTICS,
-            )
-        };
-        if folder == INVALID_HANDLE_VALUE {
-            // SAFETY: no argument.
-            return match unsafe { GetLastError() } {
+        let folder = match open_by_id(&self.hint, id, FILE_READ_ATTRIBUTES) {
+            Ok(folder) => folder,
+            Err(
                 ERROR_INVALID_PARAMETER
                 | ERROR_FILE_NOT_FOUND
                 | ERROR_PATH_NOT_FOUND
-                | ERROR_DELETE_PENDING => Ok(None),
-                other => Err(other),
-            };
-        }
-        let folder = Handle(folder);
+                | ERROR_DELETE_PENDING,
+            ) => return Ok(None),
+            Err(other) => return Err(other),
+        };
         let mut buffer = vec![0u16; 512];
         loop {
             // SAFETY: the buffer and its length in units; the count returned

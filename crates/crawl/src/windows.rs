@@ -32,6 +32,7 @@
 
 pub mod journal;
 pub mod mft;
+pub(crate) mod security;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -167,6 +168,12 @@ pub struct Root {
     /// opened below it is held to ([`Root::open_folder`]).
     inside: Vec<u16>,
     exclusions: Exclusions,
+    /// The security descriptor of each security id met below it, fetched
+    /// once through a folder holding it (the system service's, DESIGN 4).
+    descriptors: Mutex<HashMap<u32, Arc<[u8]>>>,
+    /// Its volume, open while a folder's record is read, let go of with its
+    /// folder ([`Root::let_go`]).
+    volume: Mutex<Option<Arc<Handle>>>,
 }
 
 impl Root {
@@ -204,7 +211,50 @@ impl Root {
             below: Mutex::new(HashMap::new()),
             inside,
             exclusions,
+            descriptors: Mutex::new(HashMap::new()),
+            volume: Mutex::new(None),
         })
+    }
+
+    /// The security descriptor of security id `id`, where a folder holding
+    /// it was read: none otherwise, and a folder holding it is not known.
+    pub fn descriptor(&self, id: u32) -> Option<Arc<[u8]>> {
+        self.descriptors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+    }
+
+    /// Fetch the descriptor of security id `id` through `folder` (its file
+    /// reference), which holds it, unless it is held already. A descriptor
+    /// that cannot be fetched is not held: its folders are not known.
+    pub(crate) fn learn(&self, id: u32, folder: u64) {
+        if id == 0 || self.descriptor(id).is_some() {
+            return;
+        }
+        let Ok(dir) = self.dir() else { return };
+        if let Ok(descriptor) = security::descriptor_of(&dir, folder) {
+            self.descriptors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id, descriptor.into());
+        }
+    }
+
+    /// The security id NTFS keeps for `folder` (its file reference), read
+    /// from its record through the root's volume: none where it cannot be
+    /// read (not NTFS, or the record is another file's).
+    pub(crate) fn security_of(&self, folder: u64) -> Option<u32> {
+        let volume = {
+            let mut held = self.volume.lock().unwrap_or_else(PoisonError::into_inner);
+            if held.is_none() {
+                let device = journal::device_of(&self.path).ok()?;
+                *held = Some(Arc::new(journal::open_device(&device, 0).ok()?));
+            }
+            Arc::clone(held.as_ref()?)
+        };
+        security::security_id(&volume, folder).ok().flatten()
     }
 
     /// Its folder, open: as it was opened, or opened again by its path if
@@ -271,9 +321,10 @@ impl Root {
         None
     }
 
-    /// Let go of its folder until it is next read.
+    /// Let go of its folder, and its volume, until it is next read.
     pub fn let_go(&self) {
         *self.handle.write().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.volume.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Its path, named plainly.
@@ -935,10 +986,15 @@ pub(crate) fn read(
         Ok(handle) => handle,
         Err(fail) => return not_covered(None, why_not_opened(fail)),
     };
-    let (stat, attributes) = match stat_of(&handle) {
+    let (mut stat, attributes) = match stat_of(&handle) {
         Ok(stat) => stat,
         Err(e) => return not_covered(None, Why::Failed(e.raw_os_error().unwrap_or(0))),
     };
+    if opts.acls {
+        // The system service's: what an asker is judged by (DESIGN 4).
+        stat.owner = root.security_of(stat.id.ino).unwrap_or(0);
+        root.learn(stat.owner, stat.id.ino);
+    }
     match opened_kind(&handle, attributes) {
         Folder::Entered => {}
         // A reparse point opened as itself: a link put where the folder

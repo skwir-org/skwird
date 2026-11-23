@@ -205,13 +205,25 @@ pub fn fixup(record: &mut [u8]) -> Result<(), Bad> {
 
 /// Record `number` as read from the table: checked, restored, decoded.
 pub fn decode(number: u64, record: &mut [u8]) -> Result<Decoded, Bad> {
-    match record.get(..4) {
-        Some(b"FILE") => {}
-        // NTFS marks a record it found torn so.
-        Some(b"BAAD") => return Err(Bad::Torn),
-        _ => return Err(Bad::Empty),
-    }
+    signed(record)?;
     fixup(record)?;
+    decode_fixed(number, record)
+}
+
+/// Whether a record is one, and not marked torn.
+fn signed(record: &[u8]) -> Result<(), Bad> {
+    match record.get(..4) {
+        Some(b"FILE") => Ok(()),
+        // NTFS marks a record it found torn so.
+        Some(b"BAAD") => Err(Bad::Torn),
+        _ => Err(Bad::Empty),
+    }
+}
+
+/// Record `number` as NTFS holds it in memory, its sector ends restored
+/// already, as `FSCTL_GET_NTFS_FILE_RECORD` gives it: decoded.
+pub fn decode_fixed(number: u64, record: &[u8]) -> Result<Decoded, Bad> {
+    signed(record)?;
     let flags = u16_at(record, 0x16).ok_or(Bad::Malformed)?;
     if flags & 1 == 0 {
         return Err(Bad::Unused);
@@ -604,7 +616,12 @@ impl TableReader<'_> {
         let Some(record) = self.table.get(id.ino) else {
             return not_covered(None, Why::Gone);
         };
-        let stat = Table::stat_of(record, dev);
+        let mut stat = Table::stat_of(record, dev);
+        if opts.acls {
+            // The system service's: what an asker is judged by (DESIGN 4).
+            stat.owner = record.security.unwrap_or(0);
+            root.learn(stat.owner, record.reference);
+        }
         if !record.folder {
             return not_covered(Some(stat), Why::Replaced);
         }

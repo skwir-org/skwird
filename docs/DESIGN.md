@@ -503,6 +503,36 @@ proved as root in the test machine on Linux 6.18.58):
   across queries. The journal is filtered for each asker (Protocol,
   `changes`).
 
+**On Windows** (2026-11-23, phase 4, step 7, as it is being built), the
+same rules, judged as Windows judges them:
+- **Who asks** is the token of the pipe's client, taken by impersonating
+  it once it connects (`ImpersonateNamedPipeClient`), never its claim.
+  It is kept for the connection and judged with `AccessCheck`, as the
+  system would judge an open: its user, its groups, their deny and allow
+  entries, its integrity level.
+- **What a folder is judged by** is its security descriptor. NTFS keeps
+  one for every set of files that share it (`$Secure`) and names it in
+  each file's record by a security id. A folder's id is what the index
+  keeps as its owner, a number as wide, so the index keeps its layout
+  (its group and mode none). The table gives it (`mft`). A folder read
+  again gives it through its record (`FSCTL_GET_NTFS_FILE_RECORD`).
+- **The descriptors** are fetched where folders are read, on the
+  crawl's and the checks' threads: one for each id, through a folder
+  holding it, kept for the root. Never while a client waits (AGENTS.md,
+  "Blocking"). A folder whose descriptor is not held is not known: not
+  answered, and not covered for the asker, as a folder whose ACL was not
+  read is on Linux.
+- **A folder is answered if its descriptor grants listing**
+  (`FILE_LIST_DIRECTORY`). Every folder above it must grant traversal
+  (`FILE_TRAVERSE`) unless the token may bypass traverse checking
+  (`SeChangeNotifyPrivilege`, every user's by default). Windows checks it
+  so too, which a walk by the user would meet.
+- **Holes, existence, limits:** as on Linux.
+- A volume with no security of its own (FAT, exFAT) is listed by anyone:
+  every folder on it is answered. ReFS keeps descriptors as NTFS does but
+  has no file table: not a root of the service until its folders' ids
+  can be told.
+
 ### 5. Private folders are never indexed
 
 It is not enough to leave them out of answers: they are never read into
