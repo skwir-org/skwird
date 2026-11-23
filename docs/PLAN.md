@@ -1755,7 +1755,26 @@ above).
    - a file made behind its back was found after a `sync` ("checked");
    - read back on the next start, it went once idle.
 
-   The engine's own tests under Wine are next.
+   **Its tests** (`crates/skwird/tests/windows.rs`, done on 2026-11-23,
+   step 4 done). Each engine gets a home, an application data folder and
+   a pipe of the test's own. Under Wine, all pass:
+   - an engine answers what a walk finds, Unicode names among them, and
+     says a path outside its root is outside;
+   - a sync answers with a change made behind its back, checked;
+   - a client starts the engine, and the engine goes once idle;
+   - the user's file of exclusions and Windows' default private folders
+     hold;
+   - a second engine waits on the lock, and takes over.
+
+   The start found a fault of Windows' own. std's `Command` gives a child
+   every inheritable handle, so the engine a client started held the
+   client's output pipe, and a read of that output waited for the engine
+   to go idle. The client now starts it with `CreateProcessW`,
+   inheriting nothing, and names its log (`SKWIRD_LOG`). Under Wine,
+   each process is one of the host's and inherits its parent's
+   descriptors whatever Windows is asked, so that end is proven on
+   Windows alone. Under Wine the test reads the client's output from a
+   file.
 5. **Live** (`ReadDirectoryChangesW`).
    - One handle per root watches its whole tree, read on a thread of
      its own.

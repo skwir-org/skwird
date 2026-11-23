@@ -92,6 +92,13 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   two never compare equal. Names are bytes everywhere: on Windows,
   their WTF-8 (`skwird_crawl::wtf8`), never Rust's encoded bytes of an
   `OsStr`, which it does not promise.
+- **On Windows, a process skwird starts inherits no handle.** Windows
+  gives a child every inheritable handle its parent holds where asked
+  to inherit any, and std's `Command` asks. An engine started so held
+  its client's output pipe open, and what read the client's output to
+  its end waited for the engine to go idle. A client starts the engine
+  with `CreateProcessW` inheriting nothing (`skwird_client::pipe`), and
+  names its log (`SKWIRD_LOG`), which the engine opens itself.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

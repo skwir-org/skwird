@@ -93,3 +93,24 @@ pub fn thread_time() -> Duration {
     let total = ticks(kernel) + ticks(user);
     Duration::new(total / 10_000_000, (total % 10_000_000) as u32 * 100)
 }
+
+/// Make the file at `path`, appended to, this process's standard error,
+/// where the engine writes its log: a client starts the engine with none
+/// of its own handles on Windows, so it names the log instead
+/// (`SKWIRD_LOG`).
+#[cfg(windows)]
+pub fn log_to(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // Kept open for the process's life: the standard error from now on.
+    let handle = file.into_raw_handle();
+    // SAFETY: a handle of this process's, open, never closed.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}

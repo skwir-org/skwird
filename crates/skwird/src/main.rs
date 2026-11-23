@@ -219,6 +219,12 @@ fn run(args: &Args) -> Result<(), String> {
 
 #[cfg(any(target_os = "linux", windows))]
 fn serve(args: &Args) -> Result<(), String> {
+    // On Windows a client starts the engine with none of its handles, and
+    // names its log (`SKWIRD_LOG`): what it logs goes there.
+    #[cfg(windows)]
+    if let Some(log) = std::env::var_os("SKWIRD_LOG") {
+        let _ = skwird::os::log_to(std::path::Path::new(&log));
+    }
     // The system service's folders are its service manager's; its roots,
     // unless named, every local filesystem that stores files (DESIGN 1).
     let dirs = if args.system {
