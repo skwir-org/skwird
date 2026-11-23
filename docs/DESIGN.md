@@ -1506,6 +1506,21 @@ machine alone, a third of before.
   standing alone, outside skwird's workspace, and names the commit they
   came from. A client may instead write its own, from this section and
   the transcripts the tests keep.
+- **What `skwird-client` owes a client** (asked by skwir's session on
+  2026-11-23, before its provider was built):
+  - **Every call can be given up on.** After the engine says nothing
+    for a while (`Find::silence`, its hello included), or from another
+    thread (`Client::stopper`). Either closes the connection. So an
+    engine that accepts and then hangs, or one slow to check, holds no
+    client's search.
+  - **An engine started is not the client's to look after.** It runs
+    from `/`, so it holds none of the client's folders busy (a mount, a
+    removable volume). A thread of the client's reaps it once it ends,
+    so it never stays a zombie of the client's.
+  - **The XDG folders are read as the engine reads them:** a variable
+    that is empty or relative names none. A client may name the folders
+    itself (`Find::runtime`, `Find::state`), and an engine it starts is
+    given them, so it serves where it is looked for.
 
 **As built** (phase 1, step 5):
 - The messages are `skwird-protocol`'s types, and

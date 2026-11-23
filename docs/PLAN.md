@@ -618,6 +618,19 @@ its ADR-050). Its sessions build them, in its repository:
   a crate on crates.io. The copies' two dependencies come from
   crates.io through skwir's lockfile, and their advisories are checked
   as skwir's own.
+
+  Begun on 2026-11-23. skwir's session copied the crates at `40f7f87`,
+  read the client, and asked for five changes before building its
+  provider on it. Four are made (DESIGN, Protocol, "What
+  `skwird-client` owes a client"):
+  - every call can be given up on;
+  - an engine started runs from `/`;
+  - an engine started is reaped;
+  - the XDG folders are read as the engine reads them, or named by the
+    client.
+
+  The fifth is phase 4's: on Windows, an engine started opens no
+  console window.
 - **D. The harvest's enumeration and journal** (skwir's ADR-089):
   `changes` from step 4, live from phase 2. A `changes` that a check
   found holds no write made in place: such a write changes no folder's
@@ -1550,7 +1563,10 @@ it; phase 4, under Wine, if nothing of phase 3 is left.
 
 ## Phase 4: Windows
 
-- A user's engine first: the walk and `ReadDirectoryChangesW`.
+- A user's engine first: the walk and `ReadDirectoryChangesW`. A client
+  starts it with no console window (`CREATE_NO_WINDOW`, as skwir's
+  ADR-074 starts every program), from a folder it holds nothing busy
+  in.
 - Then the service: the file table and the change journal. A position
   kept in the journal is used only if the journal's id is the same, and
   the position is at least its lowest valid USN and not past its next
