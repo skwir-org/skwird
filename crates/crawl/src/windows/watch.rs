@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use windows_sys::Win32::Foundation::{
@@ -42,6 +43,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{Handle, verbatim};
+
+mod follow;
 
 /// What a root's watch heard.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,6 +103,8 @@ pub struct Watcher {
     roots: Mutex<HashMap<usize, Watched>>,
     /// The folder cookies are made in, as the system names it.
     cookies: Arc<Mutex<Option<PathBuf>>>,
+    /// The journal reads done, every followed root's ([`Watcher::follow_root`]).
+    journal_reads: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Watcher {
@@ -121,6 +126,7 @@ impl Watcher {
             queue: Arc::default(),
             roots: Mutex::new(HashMap::new()),
             cookies: Arc::new(Mutex::new(None)),
+            journal_reads: Arc::default(),
         })
     }
 
@@ -187,6 +193,49 @@ impl Watcher {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(scope, watched);
         Ok(())
+    }
+
+    /// Hear every change below the root `scope` at `path` from now on,
+    /// through its volume's change journal (the system service's way,
+    /// [`follow`]): from the journal's next record, so that what is made
+    /// once this returns is heard whenever it is read.
+    pub fn follow_root(&self, scope: usize, path: &Path) -> std::io::Result<()> {
+        let mut follower = follow::Follower::start(path)?;
+        if !follower.ask() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stop = Arc::new(event()?);
+        let (queue, cookies, reads, root) = (
+            Arc::clone(&self.queue),
+            Arc::clone(&self.cookies),
+            Arc::clone(&self.journal_reads),
+            path.to_path_buf(),
+        );
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::Builder::new()
+                .name("skwird-journal".into())
+                .spawn(move || {
+                    follow::run(follower, &stop, scope, &root, &queue, &cookies, &reads);
+                })?
+        };
+        self.roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                scope,
+                Watched {
+                    stop,
+                    thread: Some(thread),
+                },
+            );
+        Ok(())
+    }
+
+    /// The journal reads done so far, every followed root's: one for each
+    /// batch of records, none while nothing changes.
+    pub fn journal_reads(&self) -> u64 {
+        self.journal_reads.load(Ordering::Relaxed)
     }
 
     /// Hear nothing of root `scope` any more.

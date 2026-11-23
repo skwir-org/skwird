@@ -191,6 +191,17 @@ pub fn ntfs() -> Option<PathBuf> {
     volume.map(PathBuf::from)
 }
 
+/// A second NTFS volume of the tests' own (`T:\`, `SKWIRD_TEST_NTFS_SPARE`),
+/// for a test that changes a volume as a whole (its journal deleted), which
+/// no other test reads. None anywhere but on a machine of the tests'.
+pub fn ntfs_spare() -> Option<PathBuf> {
+    let volume = std::env::var_os("SKWIRD_TEST_NTFS_SPARE").filter(|_| throwaway());
+    if volume.is_none() {
+        eprintln!("skipped: needs a spare NTFS volume of the tests' own (SKWIRD_TEST_NTFS_SPARE)");
+    }
+    volume.map(PathBuf::from)
+}
+
 /// Whether this runs under Wine, not Windows (`tools/wine-tests`): what
 /// Wine cannot hold, a test does not ask of it, and says so.
 pub fn under_wine() -> bool {

@@ -29,29 +29,34 @@ jobs:
         run: cargo fetch --locked
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # An NTFS volume of the tests' own, S:, on a virtual disk: what reads
-      # a volume whole (the file table, the journal) never reads the
-      # runner's own (skwird_testkit::ntfs).
-      - name: a test volume
+      # NTFS volumes of the tests' own, on virtual disks: what reads a
+      # volume whole (the file table, the journal) never reads the
+      # runner's own. S: is every such test's (skwird_testkit::ntfs); T:
+      # is for one that changes a volume as a whole, its journal deleted
+      # (skwird_testkit::ntfs_spare).
+      - name: test volumes
         shell: pwsh
         run: |
-          $vhd = Join-Path $env:RUNNER_TEMP "skwird-tests.vhdx"
-          $script = Join-Path $env:RUNNER_TEMP "skwird-tests.diskpart"
-          @"
+          foreach ($letter in "S", "T") {
+            $vhd = Join-Path $env:RUNNER_TEMP "skwird-tests-$letter.vhdx"
+            $script = Join-Path $env:RUNNER_TEMP "skwird-tests-$letter.diskpart"
+            @"
           create vdisk file="$vhd" maximum=512 type=expandable
           select vdisk file="$vhd"
           attach vdisk
           convert mbr
           create partition primary
-          format fs=ntfs quick label=skwird-tests
-          assign letter=S
+          format fs=ntfs quick label=skwird-$letter
+          assign letter=$letter
           "@ | Set-Content -Path $script -Encoding ascii
-          diskpart /s $script
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          Get-Volume -DriveLetter S
+            diskpart /s $script
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            Get-Volume -DriveLetter $letter
+          }
       - name: tests
         run: cargo test --workspace --no-fail-fast
         env:
           # A machine of the tests' own (skwird_testkit::throwaway).
           SKWIRD_TEST_MACHINE: "1"
           SKWIRD_TEST_NTFS: 'S:\'
+          SKWIRD_TEST_NTFS_SPARE: 'T:\'

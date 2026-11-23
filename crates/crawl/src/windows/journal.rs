@@ -26,17 +26,18 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{ERROR_HANDLE_EOF, GENERIC_READ, GetLastError};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING,
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
-    FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0,
-    READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
+    CREATE_USN_JOURNAL_DATA, FSCTL_CREATE_USN_JOURNAL, FSCTL_ENUM_USN_DATA,
+    FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0, READ_USN_JOURNAL_DATA_V0,
+    USN_JOURNAL_DATA_V0,
 };
 
 use super::Handle;
@@ -265,20 +266,86 @@ impl Volume {
     }
 }
 
+impl Volume {
+    /// The volume holding `path`, whatever letter or folder it is mounted
+    /// at.
+    pub fn of(path: &Path) -> std::io::Result<Volume> {
+        open_device(&device_of(path)?, 0).map(Volume)
+    }
+
+    /// Make its journal, where it has none (`FSCTL_CREATE_USN_JOURNAL`):
+    /// at most `max` bytes, grown and cut by `delta`. One there already is
+    /// kept, its records with it.
+    pub fn create_journal(&self, max: u64, delta: u64) -> std::io::Result<()> {
+        let input = CREATE_USN_JOURNAL_DATA {
+            MaximumSize: max,
+            AllocationDelta: delta,
+        };
+        control(&self.0, FSCTL_CREATE_USN_JOURNAL, &input, &mut []).map(|_| ())
+    }
+}
+
+/// The device of the volume holding `path` (`\\?\Volume{…}`),
+/// NUL-terminated: its mount point found (`C:\`, or a folder another
+/// volume is mounted at), then the volume mounted there.
+pub(crate) fn device_of(path: &Path) -> std::io::Result<Vec<u16>> {
+    let name = super::verbatim(path);
+    let mut point = vec![0u16; name.len() + 2];
+    // SAFETY: a NUL-terminated name; the buffer and its length in units,
+    // as long as the name, which its mount point is a part of.
+    let ok = unsafe {
+        GetVolumePathNameW(
+            name.as_ptr(),
+            point.as_mut_ptr(),
+            u32::try_from(point.len()).unwrap_or(u32::MAX),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut device = vec![0u16; 64];
+    // SAFETY: the mount point, NUL-terminated by the call; the buffer and
+    // its length, more than a volume's name (`\\?\Volume{GUID}\`) takes.
+    let ok = unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            point.as_ptr(),
+            device.as_mut_ptr(),
+            u32::try_from(device.len()).unwrap_or(u32::MAX),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Without its last `\`, the name opens the volume, not its root folder.
+    let end = device.iter().position(|&u| u == 0).unwrap_or(device.len());
+    device.truncate(end);
+    if device.last() == Some(&u16::from(b'\\')) {
+        device.pop();
+    }
+    device.push(0);
+    Ok(device)
+}
+
 fn open_volume(volume: &OsStr) -> std::io::Result<Handle> {
     let mut name: Vec<u16> = OsStr::new(r"\\.\").encode_wide().collect();
     name.extend(volume.encode_wide());
     name.push(0);
+    open_device(&name, 0)
+}
+
+/// The volume device `device` names (NUL-terminated), opened to read, with
+/// `flags` (`FILE_FLAG_OVERLAPPED` for a read that waits).
+pub(crate) fn open_device(device: &[u16], flags: u32) -> std::io::Result<Handle> {
     // SAFETY: a NUL-terminated name alive for the call, no security
     // attributes, no template; the handle given is ours to close.
     let handle = unsafe {
         CreateFileW(
-            name.as_ptr(),
+            device.as_ptr(),
             GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
-            0,
+            flags,
             std::ptr::null_mut(),
         )
     };
