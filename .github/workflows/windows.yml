@@ -1,0 +1,29 @@
+# Windows' tests on Windows (docs/PLAN.md, phase 4): NTFS, its pipes and
+# Task Scheduler, where Wine has only its own answers. On demand alone: a
+# push to a branch ci/windows/... or ci/all/..., or run by hand. The
+# runner is a machine of its own, thrown away after, and its user an
+# administrator: tests that change the system or need an administrator
+# run here (SKWIRD_TEST_MACHINE), never on a developer's own system.
+name: windows
+on:
+  push:
+    branches: ["ci/windows/**", "ci/all/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml's channel, for the runner's host (MSVC).
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace --no-fail-fast

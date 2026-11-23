@@ -1,0 +1,35 @@
+# Routine CI: the gate's checks that run on any Linux machine, on every
+# push to main and to a work branch (ci/...), and on pull requests
+# (AGENTS.md, Testing). Not the tests that need root, which run in the
+# flake's machines, nor those under Wine: tools/gate.sh runs both locally.
+# Windows' and macOS' tests run on their own systems on demand
+# (windows.yml, macos.yml).
+name: ci
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml's channel, components and targets.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy, this system
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy, Windows
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - name: clippy, macOS
+        run: cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+      - name: tests
+        run: cargo test --workspace

@@ -1,0 +1,26 @@
+# macOS' tests on macOS (docs/PLAN.md, phase 5). On demand alone: a push
+# to a branch ci/macos/... or ci/all/..., or run by hand. The runner is a
+# machine of its own, thrown away after.
+name: macos
+on:
+  push:
+    branches: ["ci/macos/**", "ci/all/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml's channel, for the runner's host.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace --no-fail-fast
