@@ -73,6 +73,8 @@ use windows as sys;
 #[cfg(windows)]
 pub use windows::Root;
 #[cfg(windows)]
+pub use windows::security::read_anything;
+#[cfg(windows)]
 pub use windows::watch::{Heard, Watcher};
 #[cfg(windows)]
 pub use windows::{OPEN_TO_ALL, descriptor_on, journal, mft};

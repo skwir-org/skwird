@@ -212,7 +212,13 @@ impl Follower {
         let mut said = HashSet::new();
         let mut out = Vec::new();
         let mut doubt = false;
+        let mut cookies_said = HashSet::new();
         for r in records {
+            // The volume's metadata (`$Extend` and the like), below no root:
+            // never opened, as a folder of it is no one's to open.
+            if is_metadata(r.parent) {
+                continue;
+            }
             let folder = if let Some(known) = folders.get(&r.parent) {
                 known.clone()
             } else {
@@ -231,8 +237,12 @@ impl Follower {
             let cookie = (r.reason & FILE_CREATE != 0 && cookies == Some(folder.as_path()))
                 .then(|| name.to_str()?.strip_prefix("cookie-")?.parse::<u64>().ok())
                 .flatten();
+            // Said once a batch: NTFS writes a record for each change to a
+            // file made, each saying it was made, until it is closed.
             if let Some(n) = cookie {
-                out.push(Heard::Cookie(n));
+                if cookies_said.insert(n) {
+                    out.push(Heard::Cookie(n));
+                }
                 continue;
             }
             let rel = below.join(&name);
@@ -245,6 +255,14 @@ impl Follower {
         }
         out
     }
+}
+
+/// Whether the file `id` names is the volume's metadata: one of the first
+/// sixteen records but the root folder's (`$MFT`, `$Extend`…), which no
+/// root holds.
+fn is_metadata(id: u128) -> bool {
+    let number = id & 0x0000_FFFF_FFFF_FFFF;
+    number < 16 && number != 5
 }
 
 /// Read root `scope`'s journal, its first read asked, until `stop` is

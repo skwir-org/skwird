@@ -130,3 +130,62 @@ pub(crate) fn security_id(volume: &Handle, file: u64) -> std::io::Result<Option<
         _ => Ok(None),
     }
 }
+
+/// Enable, in this process's token, the privilege to read any file
+/// whatever its descriptor (`SeBackupPrivilege`), as the system service
+/// runs with: a folder its descriptor denies the service is still opened
+/// by its identity (`FILE_FLAG_BACKUP_SEMANTICS`), its descriptor read,
+/// where it would be a doubt otherwise (`System Volume Information`,
+/// which `LocalSystem` alone may open). Whether it is enabled now: an
+/// elevated administrator's token and `LocalSystem`'s hold it, others not.
+pub fn read_anything() -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let name: Vec<u16> = "SeBackupPrivilege".encode_utf16().chain([0]).collect();
+    let mut luid = LUID::default();
+    // SAFETY: no system named (this one); a NUL-terminated name; the LUID
+    // ours.
+    if unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &raw mut luid) } == 0 {
+        return false;
+    }
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: this process's pseudo-handle; the token ours, closed below.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &raw mut token,
+        )
+    } == 0
+    {
+        return false;
+    }
+    let token = Handle(token);
+    let wanted = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: the token, open to adjust; the one privilege the count says;
+    // no previous state asked.
+    let ok = unsafe {
+        AdjustTokenPrivileges(
+            token.0,
+            0,
+            &raw const wanted,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    // It succeeds without assigning a privilege the token does not hold.
+    // SAFETY: no argument.
+    ok != 0 && unsafe { GetLastError() } != ERROR_NOT_ALL_ASSIGNED
+}

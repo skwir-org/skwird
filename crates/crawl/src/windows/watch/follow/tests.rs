@@ -56,6 +56,10 @@ fn a_journal_says_what_changed_below_its_root() {
     let Some(volume) = skwird_testkit::ntfs() else {
         return;
     };
+    // As the system service runs: a folder denied the test's token
+    // (`System Volume Information`, which Windows writes in at times) is
+    // still opened, not a doubt.
+    assert!(crate::read_anything(), "an elevated administrator holds it");
     let s = Scratch::under(&volume, "follow");
     let root = s.dir("tree");
     let cookies = s.dir(r"tree\cookies");
@@ -139,4 +143,17 @@ fn a_followed_root_is_idle_and_its_watch_ends_with_its_journal() {
     );
     let all = until(&heard, |h| h.contains(&Heard::Lost { scope: 2 }));
     assert!(all.contains(&Heard::Lost { scope: 2 }));
+}
+
+/// The volume's metadata is told by its record's number alone: the first
+/// sixteen records but the root folder's, whatever its sequence number.
+#[test]
+fn the_volumes_metadata_is_told_by_its_number() {
+    use super::is_metadata;
+    let at = |number: u128, sequence: u128| number | (sequence << 48);
+    assert!(is_metadata(at(11, 11)), "$Extend");
+    assert!(is_metadata(at(0, 1)), "$MFT");
+    assert!(!is_metadata(at(5, 5)), "the root folder");
+    assert!(!is_metadata(at(16, 1)));
+    assert!(!is_metadata(at(40, 2)));
 }
