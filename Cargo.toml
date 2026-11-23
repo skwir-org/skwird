@@ -37,3 +37,10 @@ cast_sign_loss = "allow"
 
 [profile.release]
 debug = 1
+
+# What packages ship (tools/package): the release's code, its symbols
+# stripped, which those who install it have no use for.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true

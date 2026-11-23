@@ -1477,6 +1477,63 @@ run; what one costs on the user's machine since the reader's longer
 wait (8, "A wake for many events") is measured in the root tests'
 machine alone, a third of before.
 
+### 11. A package installs, and enables nothing
+
+(2026-11-23.) skwird's Linux packages, the Debian and Ubuntu one, the
+RPM and the AUR's, hold the files Nix's does (`dist/nix/package.nix`):
+- the program (`/usr/bin/skwird`);
+- a user's units, the socket and the service
+  (`/usr/lib/systemd/user`), and the system service's
+  (`/usr/lib/systemd/system`);
+- the system service's user (`/usr/lib/sysusers.d/skwird.conf`), made
+  at installation by the package's script (Debian, RPM) or pacman's
+  hook (Arch);
+- the licences.
+
+**Nothing is enabled nor started at installation.** A user's engine
+starts with its first client and goes a minute after its last (1). A
+user keeps one for the session with `systemctl --user enable --now
+skwird.socket`, an administrator for every user with `systemctl
+--global enable skwird.socket`. The system service is its
+administrator's to enable (`systemctl enable --now
+skwird-system.service`). The reasons:
+- installing an index must not start reading every name on the machine;
+- the system service holds `CAP_SYS_ADMIN`;
+- whether a machine wants one engine for all or one per user is its
+  administrator's choice, which no package can make (4).
+
+Fedora's and Arch's conventions enable nothing either. Debian's, which
+starts a service its package ships, is set aside. NixOS's module is
+the administrator's choice made in configuration: it enables what it
+is asked to.
+
+**Upgraded,** the system service, where enabled and running, restarts
+on the new program. A user's engine keeps the old one until it goes:
+the protocol's version says what it speaks (Protocol).
+
+**Removed,** the system service is stopped and disabled, so that no
+link is left to a unit gone. Its index (`/var/cache/skwird`) is let go
+of: a list of every name on the machine is left behind by no package.
+Debian's purge takes its state (`/var/lib/skwird`) too. Its
+configuration (`/etc/skwird`) is its administrator's, and each user's
+engine's folders are the user's: neither is touched.
+
+**Each is built on the distribution it is for,** whose C library it
+links: with rustup's Rust at the tree's channel for Debian, Ubuntu and
+Fedora (a distribution's may be older than skwird needs), and with
+Arch's own for the AUR, as skwir's packages are (its ADR-040).
+`tools/package/try.sh` builds one in a distribution's root, installs
+it into a fresh one with the distribution's package manager, and
+checks it there (`tools/package/check.sh`):
+- the files and the user;
+- nothing enabled;
+- a user's engine, started by its first client, answering a home of
+  synthetic names, and never a private folder's;
+- after removal, no file of the package's left, nor the index.
+
+The system service itself needs fanotify, which no user namespace
+grants: the flake's machines prove it (`checks`).
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`

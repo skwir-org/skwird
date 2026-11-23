@@ -1,0 +1,19 @@
+#!/bin/sh
+# skwird's package, removed: the service manager told, and the system
+# service's index let go of, a list of every name on the machine left
+# behind by no package (docs/DESIGN.md, decision 11). Purged, its state
+# too. Its configuration (/etc/skwird) is its administrator's, and each
+# user's engine's folders are the user's: neither is touched.
+set -e
+case "$1" in
+remove | purge)
+    rm -rf /var/cache/skwird
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+    ;;
+esac
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/skwird
+fi
+exit 0

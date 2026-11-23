@@ -23,7 +23,10 @@ on were made on 2026-11-11 (DESIGN 2, 5 and the Protocol): private
 folders a client registers, tool stores indexed, network mounts never
 crawled, no crate on crates.io. skwir released
 0.6.0 on 2026-11-21, and its steps for skwird (below, "skwir, the first
-client") can take the client's copies now.
+client") can take the client's copies now. Phase 4 is paused at its
+step 7 (2026-11-23), waiting for a Windows virtual machine: a user's
+engine on Windows is built and tested under Wine. Its plan to go on is
+written there.
 
 ## Phase 0: measure (done)
 
@@ -1920,6 +1923,44 @@ above).
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.
 
+### Paused (2026-11-23), and how it goes on
+
+Steps 1 to 6 are done, and step 7 is begun: a user's engine on Windows
+is built, and tested as far as Wine goes. The user has no Windows
+machine, so the rest waits for two things, both settled for when it
+resumes:
+- **The index from the file table: the fast way** (the user's lean, and
+  agreed, on 2026-11-23). On NTFS, the service parses the file table's
+  own records for sizes, times and security ids, as Everything does,
+  rather than reading each folder after a pass of names. The reasons:
+  - the walk opens each folder and asks it several questions, so a home
+    of 800,000 folders would take minutes cold; the file table is one
+    sequential read of the volume, seconds for a million files;
+  - where a kept position no longer holds, the table is read again in
+    seconds rather than every folder checked, so no folder's change time
+    is needed;
+  - each record carries the security id that answers per asker need.
+
+  The work is the parser: multi-sector records and their fix-ups,
+  records spread over several, hard links, short DOS names left out.
+  ReFS, FAT and exFAT have no such table: their volumes are walked.
+- **A Windows virtual machine** (`tools/vm/windows`), as the root tests
+  have their NixOS machines. Microsoft's evaluation editions are
+  licensed for testing:
+  - Windows Server 2025 with the desktop, 180 days, needs no TPM;
+  - Windows 11 Enterprise, 90 days, needs a virtual TPM and Secure Boot.
+
+  The user downloads the ISO, accepting its terms. The harness:
+  - QEMU with KVM, an unattended install that turns OpenSSH on, and a
+    snapshot each run starts from;
+  - the tests built here for Windows, copied in over SSH, the service's
+    run as administrator.
+
+  It costs 30 to 40 GB of disk, and 4 to 8 GB of memory while it runs.
+  It would prove what Wine cannot: NTFS's times, ids, journal and file
+  table, Task Scheduler, a pipe's security. Its speeds are a guide, not
+  a machine's. OneDrive needs an account, so it stays untried there.
+
 ## Phase 5: macOS
 
 - `getattrlistbulk` and FSEvents, from fsearch:
@@ -1955,5 +1996,40 @@ above).
   (`dist/nix/package.nix`, written in nixpkgs' manner as skwir's ADR-124
   asks, since phase 3's first step). Whether the name is free there is
   DESIGN's open question 9.
+
+  **Linux's, built and tried** (2026-11-23, DESIGN 11):
+  - **The packages:** Debian's and Ubuntu's (cargo-deb), the RPM
+    (cargo-generate-rpm) and the AUR's (`dist/aur/PKGBUILD`), each with
+    the program, the units and the system service's user, and enabling
+    nothing.
+    - The scripts: `dist/debian`, `dist/rpm`, `dist/aur/skwird.install`.
+    - Removal stops the system service and lets go of its index.
+  - **Tried by `tools/package/try.sh`**, without root, in a
+    distribution's root entered in a user namespace, as skwir's are. It
+    builds the package in one root and installs it into a fresh one with
+    the distribution's package manager, which brings what it depends on.
+    `tools/package/check.sh` checks it there, as root then as a user:
+    - the files and the user;
+    - nothing enabled;
+    - a user's engine answering a home of synthetic names, and never a
+      private folder's;
+    - after removal, nothing left.
+
+    Debian 13, Ubuntu 24.04, Fedora 44 and Arch pass.
+  - **Not in the gate:** a try downloads a root and a toolchain, and
+    takes minutes. It is run when a package's files change, and before a
+    release.
+
+  **Left:**
+  - a version: the crates are 0.0.0, and the first release's version is
+    the user's to choose;
+  - the system service in a package's system, which needs fanotify, so
+    a machine (the flake's prove it on NixOS);
+  - skwir.org's repositories and their signing, skwir's release tools'
+    work, beside skwir's own packages;
+  - publishing: the AUR, the PKGBUILD's source URL (where the releases
+    are to be, assumed `github.com/skwir-org/skwird`), nixpkgs;
+  - Homebrew, once macOS has an engine (phase 5), and winget, once
+    Windows' is proven on a Windows machine (phase 4, paused).
 - CI once there are crates to check on three systems. The development
   shell (`flake.nix`) already carries the Windows and macOS targets.

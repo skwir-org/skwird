@@ -72,6 +72,16 @@ services.skwird.enable = true;
 # services.skwird.system = true;     # the system service (experimental)
 ```
 
+### From a Linux package
+
+`tools/package/try.sh debian|ubuntu|fedora|arch` builds the package for
+a distribution in a root of its own and checks it installed there, into
+`target/package/linux`. A package installs the program, the units and
+the system service's user, and enables nothing: clients start a user's
+engine, and the user service or the system service are enabled as
+above, or below (`docs/DESIGN.md`, decision 11). Removing it stops the
+system service and lets go of its index.
+
 ### As the system service (experimental, phase 3)
 
 `skwird serve --system`, run from boot by `dist/systemd/skwird-system.service`

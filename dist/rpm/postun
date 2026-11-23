@@ -1,0 +1,11 @@
+# skwird's package, erased ($1 0): the system service's index let go of,
+# a list of every name on the machine left behind by no package
+# (docs/DESIGN.md, decision 11). Its state and configuration are kept, as
+# RPMs keep them; each user's engine's folders are the user's.
+if [ "$1" -eq 0 ]; then
+    rm -rf /var/cache/skwird
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+fi
+exit 0

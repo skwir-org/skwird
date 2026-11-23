@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "An index of file names kept current, answered over a local socket: the engine, and its command line"
+description = "An index of file names kept current, answered over a local socket"
 
 [lib]
 path = "src/lib.rs"
@@ -44,3 +44,54 @@ skwird-testkit.workspace = true
 
 [lints]
 workspace = true
+
+# Debian and Ubuntu (cargo-deb, tools/package/deb.sh): the engine and its
+# command line, the user's units and the system service's, and the system
+# service's user. Nothing is enabled nor started (docs/DESIGN.md,
+# decision 11); the maintainer scripts (dist/debian) make the user and let
+# go of the system service's index at removal.
+[package.metadata.deb]
+maintainer = "The skwir authors"
+copyright = "The skwir authors"
+profile = "dist"
+section = "utils"
+priority = "optional"
+extended-description = """\
+An index of file names kept current by the system's change \
+notifications, answered over a local socket. A user's engine starts with \
+its first client (skwir, or the skwird command); the system service, \
+which an administrator enables, covers every user's files and answers \
+each only what they could list."""
+depends = "$auto"
+maintainer-scripts = "../../dist/debian/"
+assets = [
+    ["target/release/skwird", "usr/bin/", "755"],
+    ["../../dist/systemd/skwird.service", "usr/lib/systemd/user/", "644"],
+    ["../../dist/systemd/skwird.socket", "usr/lib/systemd/user/", "644"],
+    ["../../dist/systemd/skwird-system.service", "usr/lib/systemd/system/", "644"],
+    ["../../dist/sysusers/skwird.conf", "usr/lib/sysusers.d/", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/skwird/", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/skwird/", "644"],
+    ["../../README.md", "usr/share/doc/skwird/", "644"],
+]
+
+# Fedora and the others that install RPMs (cargo-generate-rpm,
+# tools/package/rpm.sh): the same files, the licences plain files (kept
+# where documents are not installed, as in container images), the
+# scriptlets dist/rpm's.
+[package.metadata.generate-rpm]
+url = "https://skwir.org"
+auto-req = "auto"
+post_install_script = "../../dist/rpm/post"
+pre_uninstall_script = "../../dist/rpm/preun"
+post_uninstall_script = "../../dist/rpm/postun"
+assets = [
+    { source = "target/release/skwird", dest = "/usr/bin/skwird", mode = "755" },
+    { source = "../../dist/systemd/skwird.service", dest = "/usr/lib/systemd/user/skwird.service", mode = "644" },
+    { source = "../../dist/systemd/skwird.socket", dest = "/usr/lib/systemd/user/skwird.socket", mode = "644" },
+    { source = "../../dist/systemd/skwird-system.service", dest = "/usr/lib/systemd/system/skwird-system.service", mode = "644" },
+    { source = "../../dist/sysusers/skwird.conf", dest = "/usr/lib/sysusers.d/skwird.conf", mode = "644" },
+    { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/skwird/LICENSE-MIT", mode = "644" },
+    { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/skwird/LICENSE-APACHE", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/skwird/README.md", mode = "644", doc = true },
+]

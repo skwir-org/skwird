@@ -149,6 +149,14 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   Downloads to the user's own folders. A test that passes there passes
   against Wine's answers, not NTFS's. A path in a test is absolute as
   its system has it: `/home/...` is not absolute on Windows.
+- Linux's packages are tried in distribution roots:
+  `tools/package/try.sh debian|ubuntu|fedora|arch` builds one in a
+  root under `~/.cache/skwird-tests/roots`, entered as its root in a
+  user namespace (bubblewrap), installs it into a fresh root, and checks
+  it there (`tools/package/check.sh`). A root holds nothing of the
+  user's: no home, no runtime folder. A try downloads, so it is not in
+  the gate: run it when a package's files change (`dist/`, the
+  manifest's metadata, `tools/package`), and before a release.
 - Assert what an answer holds, not merely that it parses.
 
 ## Shell hygiene

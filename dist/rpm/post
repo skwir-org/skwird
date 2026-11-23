@@ -1,0 +1,15 @@
+# skwird's package, installed or upgraded (tools/package/rpm.sh): the
+# system service's user made (dist/sysusers/skwird.conf), and the service
+# manager told of the new units. Nothing is enabled nor started
+# (docs/DESIGN.md, decision 11). Upgraded ($1 past 1), the system service,
+# where enabled and running, is restarted on the new program.
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers skwird.conf
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if [ "$1" -gt 1 ]; then
+        systemctl try-restart skwird-system.service || :
+    fi
+fi
+exit 0
