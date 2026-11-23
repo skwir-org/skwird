@@ -40,7 +40,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, ReadFile};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, ReadFile,
+};
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
 
@@ -399,7 +401,14 @@ impl Table {
                     reference: d.number | (u64::from(d.sequence) << 48),
                     folder: d.folder,
                     names: d.names,
-                    attributes: standard.attributes,
+                    // NTFS keeps a folder's kind in its record's head, not in
+                    // its attributes: a listing adds it, and so does the table.
+                    attributes: standard.attributes
+                        | if d.folder {
+                            FILE_ATTRIBUTE_DIRECTORY
+                        } else {
+                            0
+                        },
                     security: standard.security,
                     mtime: super::time(standard.mtime),
                     ctime: super::time(standard.ctime),
@@ -585,11 +594,11 @@ impl TableReader<'_> {
             None => return not_covered(None, Why::Gone),
         };
         // The volume as a stat names it (`FILE_ID_INFO`), which the walk's
-        // identities carry: the table's serial is its 64 bits as NTFS
-        // keeps them, of which a stat's shares the low 32 at least. A root
-        // on another volume than the table's has none of its folders.
+        // identities carry: on NTFS, the same 64 bits as the table's serial
+        // (`FSCTL_GET_NTFS_VOLUME_DATA`), seen so on Windows Server 2025. A
+        // root on another volume than the table's has none of its folders.
         let dev = root.stat.id.dev;
-        if dev as u32 != self.table.serial as u32 || id.dev != dev {
+        if dev != self.table.serial || id.dev != dev {
             return not_covered(None, Why::Mount);
         }
         let Some(record) = self.table.get(id.ino) else {

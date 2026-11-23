@@ -173,6 +173,27 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   manifest's metadata, `tools/package`), and before a release.
 - Assert what an answer holds, not merely that it parses.
 
+## Disk
+
+Rust builds fill a disk fast, and the user's is shared with skwir's
+work. Keep what skwird leaves on it in check:
+- **No incremental cache for what is built once a gate:** the Windows
+  and macOS lints and the tests under Wine run with
+  `CARGO_INCREMENTAL=0` (`tools/gate.sh`, `tools/wine-tests`). Windows'
+  cache alone took 3 GB. Linux's own builds keep theirs, for quick
+  iteration.
+- **Look before a large build, and after:** `df -h /`, and `du -sh
+  target ~/.cache/skwird-tests`. What may be removed whenever space is
+  short, all of it made again as needed:
+  - `target/*/debug/incremental`, `target/release`;
+  - a target folder of a one-off build, never left in `target/`;
+  - the package trials' build roots (`~/.cache/skwird-tests/roots/*-build`,
+    about 2 GB each), keeping the images beside them
+    (`*.rootfs.tar.xz`), so that no image is downloaded again.
+- A test's scratch folder is removed when it ends (`Scratch`); one a
+  killed test left is removed with the rest of `~/.cache/skwird-tests`'s
+  leftovers.
+
 ## Shell hygiene
 
 - Never put backticks in a double-quoted `git commit -m "..."`: write

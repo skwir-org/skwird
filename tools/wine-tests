@@ -42,5 +42,6 @@ if [ "$outside" != 0 ]; then
   exit 1
 fi
 
-CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER="$PWD/tools/wine-run" \
+# Built once a gate: no incremental cache kept (AGENTS.md, "Disk").
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER="$PWD/tools/wine-run" CARGO_INCREMENTAL=0 \
   cargo test --workspace --target x86_64-pc-windows-gnu "$@"

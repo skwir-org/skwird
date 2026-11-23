@@ -40,9 +40,11 @@ if [ "$run_tests" = 1 ]; then
     sed 's/\x1b\[[0-9;]*m//g' target/vm-tests.log | grep "^test result"
   fi
 fi
+# Built once a gate, so no incremental cache is kept for them: Windows'
+# alone took 3 GB of a disk (AGENTS.md, "Disk").
 for target in x86_64-pc-windows-gnu aarch64-apple-darwin; do
   step "clippy, $target"
-  cargo clippy --workspace --all-targets --target "$target" -- -D warnings
+  CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --target "$target" -- -D warnings
 done
 if [ "$run_tests" = 1 ] && [ "$run_wine" = 1 ]; then
   step "tests for Windows, under Wine"

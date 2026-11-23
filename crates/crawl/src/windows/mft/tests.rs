@@ -226,7 +226,7 @@ fn tree_records() -> Vec<(u64, Vec<u8>)> {
                 5,
                 FOLDER,
                 0,
-                &[standard(EPOCH, EPOCH, 0x16, 0), file_name(root, ".", 3)],
+                &[standard(EPOCH, EPOCH, 0x06, 0), file_name(root, ".", 3)],
             ),
         ),
         (
@@ -245,7 +245,7 @@ fn tree_records() -> Vec<(u64, Vec<u8>)> {
                 FOLDER,
                 0,
                 &[
-                    standard(EPOCH, EPOCH, 0x10, 0),
+                    standard(EPOCH, EPOCH, 0x20, 0),
                     file_name(root, "Projets", 1),
                 ],
             ),
@@ -281,7 +281,7 @@ fn tree_records() -> Vec<(u64, Vec<u8>)> {
                 FOLDER,
                 0,
                 &[
-                    standard(EPOCH, EPOCH, 0x10, 0),
+                    standard(EPOCH, EPOCH, 0x20, 0),
                     file_name(root, "reused", 1),
                 ],
             ),
@@ -346,6 +346,15 @@ fn the_table_is_the_tree_its_names_make() {
         "the reused record is another file"
     );
     assert_eq!(table.get(reference(31, 4)).unwrap().alloc, 303_104);
+    // A folder's attributes say it is one, as a listing's do, though its
+    // record keeps that in its head alone (its standard information as NTFS
+    // writes it, here without).
+    let folder = table.get(reference(30, 1)).unwrap();
+    assert_ne!(folder.attributes & FILE_ATTRIBUTE_DIRECTORY, 0);
+    assert_eq!(
+        table.get(reference(31, 4)).unwrap().attributes & FILE_ATTRIBUTE_DIRECTORY,
+        0
+    );
 }
 
 /// The table's first record says where the table is: its data's runs.
