@@ -23,10 +23,11 @@ on were made on 2026-11-11 (DESIGN 2, 5 and the Protocol): private
 folders a client registers, tool stores indexed, network mounts never
 crawled, no crate on crates.io. skwir released
 0.6.0 on 2026-11-21, and its steps for skwird (below, "skwir, the first
-client") can take the client's copies now. Phase 4 is paused at its
-step 7 (2026-11-23), waiting for a Windows virtual machine: a user's
-engine on Windows is built and tested under Wine. Its plan to go on is
-written there.
+client") can take the client's copies now. Phase 4 is at its step 7
+(2026-11-23): a user's engine on Windows is built and tested under Wine,
+and the system service is built and tested on GitHub's Windows runners,
+which stand in for a Windows machine, the user having none (below,
+"Paused, and how it goes on").
 
 ## Phase 0: measure (done)
 
@@ -1998,20 +1999,55 @@ above).
    a folder every user may list, not one the administrators alone may;
    an administrator lists both.
 
+   **The service** (2026-11-23, DESIGN 4, "On Windows";
+   `skwird::service`, `skwird::system`'s Windows part):
+   - **Registered** by `skwird service add [--root PATH]...`, which starts
+     it; `remove` stops it and takes it back. It runs as `LocalSystem`,
+     its token kept to the backup, traverse and volume privileges, started
+     once the boot is done and again after a failure. Under the service
+     manager it runs from its dispatcher, and a stop ends it; from a
+     console, it serves in the foreground.
+   - **Its folders,** `%ProgramData%\skwird`, its own and the
+     administrators' alone; one another user made there is refused.
+   - **Its pipe,** `\\.\pipe\skwird`: every user who logs on may connect,
+     none but the system and the administrators may make an instance,
+     its owner the service's account. A client asks it first and takes
+     it only if so owned; a pipe another user made is refused.
+   - **Its roots:** every volume of the machine's own that stores files
+     (`skwird_crawl::volumes`), never one on a USB, SD or MMC bus. On
+     NTFS, each is built from its volume's file table
+     (`Keeper::open_by`, `from_table`), and followed through its journal;
+     FAT and exFAT are walked and watched.
+   - **Its users** are numbered by their SIDs, the numbers kept in its
+     state; their homes are their profiles, where the default private
+     folders are left out.
+   - **Folders above a root,** which no root holds, are passed through by
+     a token that may bypass traverse checking, as Windows lets it; one
+     that may not is not known to, and is answered nothing below.
+   - Under Wine, its parts that are not the system's pass: the roots
+     chosen from volumes, the numbers kept, a command line read back
+     whole. The rest is proven on the runners
+     (`crates/skwird/tests/windows_service.rs`, in a test binary of its
+     own, since the system's pipe answers every client while it runs):
+     the service registered and asked by an administrator and by a user
+     the test makes, each answered what they could list. Also there:
+     the system's pipe made by an administrator is taken, a user may not
+     make an instance of it, and a pipe another user made, open to all,
+     is refused.
+
    **Left of step 7:**
-   - **The service:** Windows' service control, run as `LocalSystem`
-     with the backup privilege; the system's pipe `\\.\pipe\skwird` open
-     to every user who logs on; clients checking that its owner is that
-     account, never a pipe another user made.
-   - **Its roots:** every fixed volume that stores files (NTFS, FAT,
-     exFAT), not on a USB bus, each built from its file table on NTFS and
-     followed through its journal.
-   - **Its users:** each SID numbered, the number kept, so that what a
-     user registered stays theirs; every home's default private folders
-     left out (rule 3), and each user's own exclusions.
+   - **Each user's own exclusions:** their file and what their engine's
+     clients registered, read from their profile, taken only if no other
+     user may write it; and which folders a user owns, by their
+     descriptors' owners, for what they register with the service.
    - **The journal's position kept with the index,** and DESIGN 2's rule
      applied at each start: caught up where it holds, the table read
-     again where it does not.
+     again where it does not. Until then, a start checks each root.
+   - **A volume attached or taken away while the service runs**
+     (`RegisterDeviceNotification`): a root from then on, or let go of.
+     Until then, the roots are those at its start.
+   - **Folders above a root** judged by their descriptors, for a token
+     that may not bypass traverse checking.
 8. **Measured,** on a Windows machine when one is at hand: the user's
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.
@@ -2020,8 +2056,10 @@ above).
 
 Steps 1 to 6 are done, and step 7 is begun: a user's engine on Windows
 is built, and tested as far as Wine goes. The user has no Windows
-machine, so the rest waits for two things, both settled for when it
-resumes:
+machine. Two things were settled for when it resumed; it resumed the
+same day on GitHub's Windows runners (`.github/workflows/windows.yml`),
+each a machine thrown away after its job, in place of the virtual
+machine below, which stays the way to measure (step 8):
 - **The index from the file table: the fast way** (the user's lean, and
   agreed, on 2026-11-23). On NTFS, the service parses the file table's
   own records for sizes, times and security ids, as Everything does,

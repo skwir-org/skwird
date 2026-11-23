@@ -378,16 +378,29 @@ fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
         .unwrap_or_default()
 }
 
-/// A folder's owner as the system service judges it: on Unix by its stat;
-/// none on Windows, whose system service comes with phase 4's step 7.
+/// A folder above a root as the system service judges it, where no root
+/// holds it: on Unix by its stat.
 #[cfg(unix)]
 fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
     crate::asker::owned_at(path)
 }
 
+/// On Windows, a folder there, its security id not read (0). An asker is
+/// asked only to pass through it, which a token that may bypass traverse
+/// checking does unchecked (`SeChangeNotifyPrivilege`, every user's by
+/// default), as Windows lets it; a token that may not is not known to,
+/// and is answered nothing below (DESIGN 4, "On Windows"). None where no
+/// folder is there.
 #[cfg(windows)]
-fn owned_at(_: &Path) -> Option<crate::asker::Owned> {
-    None
+fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.is_dir())
+        .then_some(crate::asker::Owned {
+            owner: 0,
+            group: 0,
+            mode: 0,
+            dev: 0,
+        })
 }
 
 fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {
@@ -670,7 +683,7 @@ pub fn writer(
             .roots
             .iter()
             .enumerate()
-            .map(|(i, root)| watch_whole(w, i, root))
+            .map(|(i, root)| watch_whole(w, i, root, config.system))
             .collect(),
         _ => vec![None; config.roots.len()],
     };
@@ -755,13 +768,26 @@ fn open_one(
     cancel: &Cancel,
 ) -> (Option<Keeper>, bool) {
     let start = Instant::now();
+    // The system service builds an index on NTFS from its volume's file
+    // table (Windows' alone).
+    #[cfg(windows)]
+    let table = |root: &Root, opts: &Options, cancel: &Cancel, limits| {
+        from_table(i, root, opts, cancel, limits)
+    };
+    #[cfg(windows)]
+    let builder: Option<skwird_index::keeper::Builder> = config
+        .system
+        .then_some(&table as skwird_index::keeper::Builder);
+    #[cfg(not(windows))]
+    let builder = None;
     let opened = Root::open(path, ex.clone()).and_then(|root| {
-        Keeper::open(
+        Keeper::open_by(
             &index_dir(&config.dirs, path),
             root,
             opts.clone(),
             Limits::default(),
             cancel,
+            builder,
         )
     });
     match opened {
@@ -795,6 +821,44 @@ fn open_one(
             (None, false)
         }
     }
+}
+
+/// Root `i`'s index built from its volume's file table, read whole from
+/// the disk in one pass, where a walk opens every folder (the user's
+/// choice of 2026-11-23, `docs/PLAN.md`, phase 4): on NTFS, for the
+/// system service, which may read a volume. Elsewhere, or where the table
+/// cannot be read, the folders are walked.
+#[cfg(windows)]
+fn from_table(
+    i: usize,
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    limits: Limits,
+) -> Result<skwird_index::build::Built, skwird_crawl::Error> {
+    use skwird_index::build::{crawl_and_build, crawl_and_build_by};
+    if root.fs_name() != "NTFS" {
+        return crawl_and_build(root, opts, cancel, limits);
+    }
+    let start = Instant::now();
+    let table = match skwird_crawl::journal::Volume::of(root.path()).and_then(|v| v.table()) {
+        Ok(table) => table,
+        Err(e) => {
+            log(&format!(
+                "root {i}: its volume's file table cannot be read, so its folders are walked: {e}"
+            ));
+            return crawl_and_build(root, opts, cancel, limits);
+        }
+    };
+    log(&format!(
+        "root {i}: its volume's file table read in {:.2?}: {} records",
+        start.elapsed(),
+        table.len()
+    ));
+    let reader = skwird_crawl::mft::TableReader { table: &table };
+    crawl_and_build_by(root, opts, cancel, limits, &|root, rel, id, opts| {
+        reader.read(root, rel, id, opts)
+    })
 }
 
 /// What the writer holds.
@@ -1540,7 +1604,7 @@ impl Writing<'_> {
         let watcher = self.watcher.as_ref()?;
         let path = self.keepers.get(i)?.as_ref()?.root().path().to_path_buf();
         let since = Time::now();
-        self.marked[i] = watch_whole(watcher, i, &path);
+        self.marked[i] = watch_whole(watcher, i, &path, self.config.system);
         self.marked[i].map(|_| since)
     }
 }
@@ -1769,14 +1833,21 @@ impl Writing<'_> {
     }
 }
 
-/// Mark root `i`'s filesystem, at `root`: its device, or none if it was
-/// refused, said why, and the root is checked, never live.
-/// Root `i`, at `root`, heard whole from now on (Windows): its tree
-/// watched by one handle. Said marked, as a filesystem is on Linux, with
-/// no device to name; none if it cannot be, and it is checked, never
-/// live.
+/// Root `i`, at `root`, heard whole from now on (Windows): for the system
+/// service, through its volume's change journal (NTFS's); otherwise, or
+/// where its volume has none to follow (FAT, exFAT), its tree watched by
+/// one handle. Said marked, as a filesystem is on Linux, with no device
+/// to name; none if it cannot be, and it is checked, never live.
 #[cfg(windows)]
-fn watch_whole(watcher: &Watcher, i: usize, root: &Path) -> Option<(u32, u32)> {
+fn watch_whole(watcher: &Watcher, i: usize, root: &Path, system: bool) -> Option<(u32, u32)> {
+    if system {
+        match watcher.follow_root(i, root) {
+            Ok(()) => return Some((0, 0)),
+            Err(e) => log(&format!(
+                "root {i}: its volume's journal cannot be followed, so its tree is watched: {e}"
+            )),
+        }
+    }
     match watcher.watch_root(i, root) {
         Ok(()) => Some((0, 0)),
         Err(e) => {
@@ -1788,6 +1859,8 @@ fn watch_whole(watcher: &Watcher, i: usize, root: &Path) -> Option<(u32, u32)> {
     }
 }
 
+/// Mark root `i`'s filesystem, at `root`: its device, or none if it was
+/// refused, said why, and the root is checked, never live.
 fn mark(group: &Group, i: usize, root: &Path, table: &Table) -> Option<(u32, u32)> {
     match group.mark(root, table) {
         Ok(m) => {

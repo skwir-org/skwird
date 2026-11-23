@@ -44,6 +44,16 @@ impl Listener {
         })
     }
 
+    /// Serving the system's pipe `at` names: every user may connect, and
+    /// its owner is the service's account, which no other user can make
+    /// it. Refused if another process holds the name.
+    #[cfg(windows)]
+    pub fn bind_system(at: &Path) -> std::io::Result<Listener> {
+        Ok(Listener {
+            inner: skwird_client::pipe::Server::bind_system(at.as_os_str())?,
+        })
+    }
+
     /// The next client, waited for at most `wait`, as long as it takes if
     /// none: none once it passed, or where a client went before it was
     /// taken. Woken by a client alone: no polling.

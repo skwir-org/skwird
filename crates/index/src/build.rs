@@ -7,7 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use skwird_crawl::{
-    Cancel, Crawl, Crawled, Error, FolderStat, Kind, Options, Outcome, Root, Watch, crawl,
+    Cancel, Crawl, Crawled, Error, FolderStat, Kind, Options, Outcome, Reader, Root, Watch,
+    crawl_by, read_folder_watched,
 };
 
 use crate::block::{Block, Facts, FolderId, Item, NameId, State};
@@ -148,6 +149,20 @@ pub fn crawl_and_build(
     cancel: &Cancel,
     limits: Limits,
 ) -> Result<Built, Error> {
+    crawl_and_build_by(root, opts, cancel, limits, &|root, rel, _, opts| {
+        read_folder_watched(root, rel, opts)
+    })
+}
+
+/// [`crawl_and_build`], each folder read by `reader` (on NTFS, the system
+/// service's volume's file table: `skwird_crawl::mft::TableReader`).
+pub fn crawl_and_build_by(
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    limits: Limits,
+    reader: Reader<'_>,
+) -> Result<Built, Error> {
     // A few folders ahead: the crawl waits for the packer rather than hold
     // what it has not packed yet.
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Crawled)>(256);
@@ -159,10 +174,11 @@ pub fn crawl_and_build(
             }
             packer
         });
-        let took = crawl(root, Path::new(""), opts, cancel, &|slot, crawled| {
+        let sink = |slot, crawled| {
             // The packer ends only once every sender is gone.
             let _ = tx.send((slot, crawled));
-        });
+        };
+        let took = crawl_by(root, Path::new(""), None, opts, cancel, &sink, reader);
         drop(tx);
         let packer = packing.join().expect("the packer does not panic");
         took.map(|took| {

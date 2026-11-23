@@ -47,6 +47,11 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TooOld;
 
+/// What builds a root's index anew ([`Keeper::open_by`]): as
+/// [`crate::build::crawl_and_build`] does, by other means.
+pub type Builder<'a> =
+    &'a dyn Fn(&Root, &Options, &Cancel, Limits) -> Result<crate::build::Built, Error>;
+
 /// How an index was opened.
 #[derive(Debug)]
 pub enum Opened {
@@ -169,6 +174,21 @@ impl Keeper {
         limits: Limits,
         cancel: &Cancel,
     ) -> Result<(Keeper, Opened), Error> {
+        Keeper::open_by(dir, root, opts, limits, cancel, None)
+    }
+
+    /// [`Keeper::open`], an index built anew by `builder` where one is
+    /// given (on NTFS, the system service reads its volume's file table),
+    /// by a crawl of the folders' own listings otherwise. It is called only
+    /// where no index is read back.
+    pub fn open_by(
+        dir: &Path,
+        root: Root,
+        opts: Options,
+        limits: Limits,
+        cancel: &Cancel,
+        builder: Option<Builder<'_>>,
+    ) -> Result<(Keeper, Opened), Error> {
         let because = match store::load(dir, limits) {
             Ok((index, mark)) => match Keeper::replayed(dir, index, &mark) {
                 Some((index, log, replayed)) => {
@@ -209,7 +229,10 @@ impl Keeper {
         };
         let start = Time::now();
         // Packed as it is read: the crawl is never held whole.
-        let built = crate::build::crawl_and_build(&root, &opts, cancel, limits)?;
+        let built = match builder {
+            Some(build) => build(&root, &opts, cancel, limits)?,
+            None => crate::build::crawl_and_build(&root, &opts, cancel, limits)?,
+        };
         let mut index = built.index;
         let tells = root.fs_name() != "fuse";
         index.set_proof(if tells {

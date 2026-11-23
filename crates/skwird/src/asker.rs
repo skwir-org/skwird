@@ -72,13 +72,23 @@ impl Asker {
 
     /// The peer of a pipe: its token, taken as its server's end does
     /// (`skwird_client::pipe::Stream::client_token`), which it is judged
-    /// by. Its ids are none a user has: no mode grants it anything, should
-    /// it ever be evaluated.
+    /// by. Its user is the number the system service gave its SID
+    /// (`crate::system::number_of`); refused where the service cannot give
+    /// one. A user's engine numbers no one: its one user has none. Its
+    /// group ids are none a user has: no mode grants it anything, should it
+    /// ever be evaluated.
     #[cfg(windows)]
     pub fn of(stream: &Stream) -> std::io::Result<Asker> {
         let token = Token::of(stream.client_token()?)?;
+        let uid = match crate::system::number_of(&token.sid) {
+            Some(n) => n,
+            None if crate::system::numbering() => {
+                return Err(std::io::Error::other("the asker cannot be numbered"));
+            }
+            None => u32::MAX,
+        };
         Ok(Asker {
-            uid: u32::MAX,
+            uid,
             gid: u32::MAX,
             groups: Vec::new(),
             token: Some(std::sync::Arc::new(token)),

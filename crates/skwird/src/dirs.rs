@@ -24,6 +24,12 @@ pub struct Dirs {
     /// `$XDG_STATE_HOME/skwird`: what clients registered, and the log of
     /// what the engine did.
     pub state: PathBuf,
+    /// On Windows, the pipe it answers on, a name and no file: its user's
+    /// (`\\.\pipe\skwird-<SID>`), or the system's (`\\.\pipe\skwird`), or
+    /// the one `SKWIRD_PIPE` names (a test's own). None where its user's
+    /// SID cannot be read.
+    #[cfg(windows)]
+    pub pipe: Option<PathBuf>,
 }
 
 fn var(name: &str) -> Option<PathBuf> {
@@ -36,8 +42,7 @@ fn var(name: &str) -> Option<PathBuf> {
 impl Dirs {
     /// A user's engine's folders on Windows (`docs/PLAN.md`, phase 4,
     /// step 4): in the user's local application data, never roamed,
-    /// `skwird`'s own; the home its profile. Its pipe is its user's own
-    /// ([`Dirs::socket`]).
+    /// `skwird`'s own; the home its profile. Its pipe is its user's own.
     #[cfg(windows)]
     pub fn from_env() -> Result<Dirs, String> {
         let home = var("USERPROFILE").ok_or("USERPROFILE is not set")?;
@@ -50,6 +55,7 @@ impl Dirs {
             config: base.join("config"),
             state: base.join("state"),
             home,
+            pipe: skwird_client::pipe::user_pipe(),
         })
     }
 
@@ -77,6 +83,7 @@ impl Dirs {
     /// service manager names them (systemd's `RUNTIME_DIRECTORY`,
     /// `CACHE_DIRECTORY`, `STATE_DIRECTORY` and `CONFIGURATION_DIRECTORY`,
     /// the first of each list), or the usual places.
+    #[cfg(not(windows))]
     pub fn system() -> Dirs {
         let dir = |name: &str, default: &str| {
             std::env::var(name)
@@ -94,13 +101,35 @@ impl Dirs {
         }
     }
 
+    /// The system service's folders on Windows (`docs/PLAN.md`, phase 4,
+    /// step 7): in the machine's program data (`%ProgramData%\skwird`, a
+    /// test's own where it names another), its own alone
+    /// ([`make_system`]). Its pipe is the system's, `\\.\pipe\skwird`, or
+    /// the one `SKWIRD_PIPE` names. It has no home: the folder is its own.
+    #[cfg(windows)]
+    pub fn system() -> Dirs {
+        let base = var("ProgramData")
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("skwird");
+        let pipe = std::env::var_os("SKWIRD_PIPE")
+            .filter(|v| !v.is_empty())
+            .map_or_else(skwird_client::system_socket, PathBuf::from);
+        Dirs {
+            runtime: base.join("run"),
+            cache: base.join("cache"),
+            config: base.join("config"),
+            state: base.join("state"),
+            home: base,
+            pipe: Some(pipe),
+        }
+    }
+
     /// Where the engine answers: its socket in its runtime folder; on
-    /// Windows, its user's pipe (or `SKWIRD_PIPE`'s), a name and no
-    /// file.
+    /// Windows, its pipe.
     pub fn socket(&self) -> PathBuf {
         #[cfg(windows)]
-        if let Some(pipe) = skwird_client::pipe::user_pipe() {
-            return pipe;
+        if let Some(pipe) = &self.pipe {
+            return pipe.clone();
         }
         self.runtime.join("socket")
     }
@@ -163,11 +192,29 @@ pub fn make_private(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot make a folder of skwird's: {e}"))
 }
 
-/// The system service's runtime folder: no system service runs on
-/// Windows yet (phase 4, step 7).
+/// The system service's folders made, before anything is kept in them.
+/// On Windows, its folder in the machine's program data, and each of its
+/// own in it, its own and the administrators' alone
+/// (`crate::service::make_own`): no socket is in them, the pipe having a
+/// security descriptor of its own.
 #[cfg(windows)]
-pub fn make_shared(_: &Path) -> Result<(), String> {
-    Err("skwird's system service runs on Linux so far: Windows' comes with phase 4".into())
+pub fn make_system(dirs: &Dirs) -> Result<(), String> {
+    if let Some(base) = dirs.runtime.parent() {
+        crate::service::make_own(base)?;
+    }
+    for dir in [&dirs.runtime, &dirs.cache, &dirs.config, &dirs.state] {
+        crate::service::make_own(dir)?;
+    }
+    Ok(())
+}
+
+/// The system service's folders made, before anything is kept in them:
+/// its runtime folder open to every user, who finds its socket there; its
+/// state its own.
+#[cfg(unix)]
+pub fn make_system(dirs: &Dirs) -> Result<(), String> {
+    make_shared(&dirs.runtime)?;
+    make_private(&dirs.state)
 }
 
 /// `dir`, made if it is not there, owned by the user running this and

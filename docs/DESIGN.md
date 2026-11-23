@@ -456,6 +456,61 @@ proved as root in the test machine on Linux 6.18.58):
   to follow no link. Its index and state are its own (0700), its socket
   every user's (0666, its folder 0755).
 
+  **On Windows** (2026-11-23, phase 4, step 7, `skwird::service`):
+  `skwird service add` registers it with the service manager and starts
+  it, as `systemctl enable --now` does; `remove` stops it and takes it
+  back.
+  - **It runs as `LocalSystem`.** Its roots are read from their volumes,
+    the file table raw and the journal, which the administrators and
+    `LocalSystem` alone may open. Windows grants an account of a service's
+    own no volume's raw read short of the administrators' group, and
+    Everything's service runs so. What bounds it is the rest:
+    - its token keeps only the privileges it uses
+      (`SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO`, as
+      `CapabilityBoundingSet` does): reading any folder whatever its
+      descriptor (`SeBackupPrivilege`), passing through any
+      (`SeChangeNotifyPrivilege`), making a volume's journal
+      (`SeManageVolumePrivilege`);
+    - it starts once the boot is done (a delayed automatic start), below
+      normal priority, and is started again 10 s after a failure, three
+      times a day;
+    - a stop ends it, as `SIGTERM` ends the Linux service: its index is
+      saved with each change, and read back.
+  - **Its folders** are `%ProgramData%\skwird` (`run`, `cache`, `config`,
+    `state`), `LocalSystem`'s and the administrators' alone, nothing
+    inherited from above. Any user may make a folder in the program
+    data, so one there already is taken only if `LocalSystem` or the
+    administrators own it and it is no link; it is then made theirs alone
+    again. Otherwise the service does not start: the folder's maker could
+    read its index.
+  - **Its pipe**, `\\.\pipe\skwird`:
+    - every user who logs on may connect (`Authenticated Users`): read
+      and write a connection, and read its security;
+    - none but `LocalSystem` and the administrators may make an instance
+      of it. `GENERIC_WRITE` would grant that (`FILE_CREATE_PIPE_INSTANCE`
+      is the bit a file's appending is), and let any user answer the
+      service's clients;
+    - its owner is `LocalSystem`, or the administrators where one runs it
+      by hand from a console. A pipe's maker can name as its owner only
+      itself or a group it may own as, so no other user can make a pipe
+      owned so. A client takes a pipe only if its owner is one of the
+      two, or its server runs as the client's own user (Protocol).
+  - **Its users** are numbered by their SIDs, as Unix numbers its users,
+    the numbers kept in its state (`users`): `LocalSystem` is 0, the
+    others from 1000, in the order they are met. Limits and registrations
+    go by the number. A user it cannot number is refused.
+  - **Their homes** are their profiles (`ProfileList`), where every
+    default private folder is left out (5). Their own files of
+    exclusions, and the folders they own: next (PLAN).
+  - **Its roots:** every volume of the machine's own that stores files
+    (NTFS, FAT, exFAT), at its drive's letter or its shortest folder.
+    Never one on a USB, SD or MMC bus, or of a removable medium (open
+    question 8), nor a share, a disc, memory, or ReFS. On NTFS, each is
+    built from its volume's file table and followed through its journal;
+    on FAT and exFAT, walked and watched (`ReadDirectoryChangesW`). A
+    volume attached while it runs is not a root until it starts again
+    (PLAN).
+
 **As built** (phase 3, step 5, 2026-11-22: `skwird::asker`):
 - Root, and a user asking their own engine, see the index whole. Any
   other user asking the system service is answered a result only if
@@ -1601,13 +1656,19 @@ repositories, their versions their own.
     the name (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and remote clients are
     refused.
   - Any user may make a pipe of any name first. So a client checks,
-    before it says anything, that the server's process runs as itself,
-    and is identified to the server, never impersonated
-    (`SECURITY_IDENTIFICATION`).
+    before it says anything, that the pipe's owner is `LocalSystem` or
+    the administrators (the system service's, which no other user can
+    make so), or that its server's process runs as itself; and it is
+    identified to the server, never impersonated
+    (`SECURITY_IDENTIFICATION`). It asks only to read and write the
+    connection and to read its security, what the system's pipe grants
+    every user.
   - Reads and writes are overlapped, so a call can be given up on after
     a silence, or stopped from another thread, as on Unix.
-  - The system service's pipe, `\\.\pipe\skwird`, is not asked until
-    the service exists (step 7) and a client can tell its account.
+  - The system service's pipe, `\\.\pipe\skwird` (step 7, DESIGN 4, "On
+    Windows"), is asked first, then the user's, as the sockets are on
+    Unix. A pipe of the system's name that another user made is refused,
+    and the user's is asked.
 - **Framing.** JSON lines at first, for readability; each message has
   an id.
 - **Messages:**

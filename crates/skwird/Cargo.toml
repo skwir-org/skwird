@@ -31,13 +31,18 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The lock, a thread's processor time, the log (phase 4, step 4); an
-# asker's token judged (step 7).
+# asker's token judged; the system service, its folders, its users' profiles
+# (step 7).
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
+  "Win32_System_Environment",
   "Win32_System_IO",
+  "Win32_System_Registry",
+  "Win32_System_Services",
   "Win32_System_Threading",
 ] }
 

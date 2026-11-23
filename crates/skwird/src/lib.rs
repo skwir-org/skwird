@@ -1,8 +1,8 @@
 //! skwird, the engine: an index of the names below its roots, kept
 //! current, answered over a local socket (`docs/DESIGN.md`): a user's
 //! engine, started by its first client or by the user's session, and the
-//! system service. On Linux, and on Windows from phase 4 (a named pipe,
-//! no watcher yet); macOS comes with phase 5.
+//! system service. On Linux, and on Windows from phase 4 (a named pipe, a
+//! service the service manager runs); macOS comes with phase 5.
 //!
 //! The library is the engine whole, so that it is tested without a
 //! socket where a test needs none; the program (`main.rs`) serves it, and
@@ -28,6 +28,8 @@ pub mod memory;
 pub mod os;
 #[cfg(any(target_os = "linux", windows))]
 pub mod serve;
+#[cfg(windows)]
+pub mod service;
 pub mod system;
 #[cfg(any(target_os = "linux", windows))]
 pub mod transport;

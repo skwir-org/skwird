@@ -1,23 +1,16 @@
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use skwird_crawl::{Cancel, Exclusions, Options, Root, crawl_all};
 use skwird_index::Sight;
-use skwird_testkit::Scratch;
+use skwird_testkit::{Scratch, User};
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Security::{
-    DuplicateToken, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, LogonUserW,
-    SecurityIdentification,
-};
+use windows_sys::Win32::Security::{DuplicateToken, SecurityIdentification};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::{Access, Token};
 
 const TOKEN_QUERY_DUPLICATE: u32 = 0x0008 | 0x0002;
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
 
 /// An identification token of `token`, as a pipe's server holds one.
 fn identification(token: HANDLE) -> Token {
@@ -31,56 +24,6 @@ fn identification(token: HANDLE) -> Token {
     );
     // SAFETY: the copy the call made, ours alone.
     Token::of(unsafe { OwnedHandle::from_raw_handle(copy) }).unwrap()
-}
-
-/// A local user of the test's own, made and logged on: its token. Taken
-/// back when dropped.
-struct User {
-    name: &'static str,
-}
-
-impl User {
-    fn make(name: &'static str, password: &str) -> User {
-        let made = std::process::Command::new("net")
-            .args(["user", name, password, "/add"])
-            .output()
-            .unwrap();
-        assert!(
-            made.status.success(),
-            "{}",
-            String::from_utf8_lossy(&made.stdout)
-        );
-        User { name }
-    }
-
-    fn token(&self, password: &str) -> Token {
-        let mut token: HANDLE = std::ptr::null_mut();
-        // SAFETY: NUL-terminated strings alive for the call; the token
-        // ours, closed below.
-        let ok = unsafe {
-            LogonUserW(
-                wide(self.name).as_ptr(),
-                wide(".").as_ptr(),
-                wide(password).as_ptr(),
-                LOGON32_LOGON_NETWORK,
-                LOGON32_PROVIDER_DEFAULT,
-                &raw mut token,
-            )
-        };
-        assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
-        let judged = identification(token);
-        // SAFETY: the logon's token, ours, closed once.
-        drop(unsafe { OwnedHandle::from_raw_handle(token) });
-        judged
-    }
-}
-
-impl Drop for User {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("net")
-            .args(["user", self.name, "/delete"])
-            .output();
-    }
 }
 
 /// Each folder judged as Windows judges its asker's own open: a user of
@@ -97,17 +40,7 @@ fn each_asker_is_judged_by_its_own_token() {
     };
     let s = Scratch::under(&volume, "asker");
     s.dir(r"tree\open");
-    let closed = s.dir(r"tree\closed");
-    let granted = std::process::Command::new("icacls")
-        .arg(&closed)
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"])
-        .output()
-        .unwrap();
-    assert!(
-        granted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&granted.stdout)
-    );
+    skwird_testkit::administrators_alone(&s.dir(r"tree\closed"));
     let root = Root::open(&s.join("tree"), Exclusions::none()).unwrap();
     let opts = Options {
         threads: 2,
@@ -125,9 +58,8 @@ fn each_asker_is_judged_by_its_own_token() {
             .unwrap()
     };
     let dev = root.stat().id.dev;
-    let password = "Sk-1wird.test!";
-    let user = User::make("skwird-test", password);
-    let someone = user.token(password);
+    let user = User::make("skwird-test", "Sk-1wird.test!");
+    let someone = identification(user.logon().as_raw_handle());
     let mut admin: HANDLE = std::ptr::null_mut();
     // SAFETY: this process's pseudo-handle; the token ours, closed below.
     assert_ne!(

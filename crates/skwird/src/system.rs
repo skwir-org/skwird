@@ -288,13 +288,19 @@ pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::Fi
     }
 }
 
-// The system service elsewhere than Linux: none yet. Windows' comes with
-// phase 4's step 7, its users told by their SIDs, its folders owned as
-// their security descriptors say; until then it keeps no user's
-// exclusions, and no user owns a folder in its eyes.
+// The system service on Windows (phase 4, step 7): its roots the
+// machine's volumes, its users told by their SIDs and numbered, their
+// homes their profiles. Its users' own files of exclusions, and the
+// folders they own as their security descriptors say, come next: until
+// then no user's file is read, and no user owns a folder in its eyes.
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{keep_numbers, number_of, numbering, roots as volume_roots, sid_of, users};
 
-/// No user's exclusions are kept off Linux yet.
-#[cfg(not(target_os = "linux"))]
+/// No user's exclusions are kept on macOS yet: its system service comes
+/// with phase 5.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn users() -> Vec<(u32, PathBuf)> {
     Vec::new()
 }

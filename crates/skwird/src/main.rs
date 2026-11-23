@@ -15,6 +15,7 @@ usage: skwird serve [--system] [--root PATH]... [--idle SECONDS | --forever] [--
        skwird watch [--remove] FOLDER...
        skwird status
        skwird logon add|remove
+       skwird service add [--root PATH]... | remove
 
 serve     the user's engine: it indexes the roots (the home by default),
           answers on its socket, and goes once its last client has been
@@ -29,6 +30,9 @@ status    what the engine says of itself
 logon     on Windows, start the engine at your logon (add), or no more
           (remove): a task of yours, running skwirdw.exe, skwird with no
           console window
+service   on Windows, the system service (add, as an administrator): every
+          user's files indexed, each user answered what they could list,
+          started at boot as LocalSystem; remove stops it and takes it back
 
 The commands that ask start the engine where none answers, unless
 SKWIRD_NO_START is set. SKWIRD_WATCHES sets the most folders an engine
@@ -95,7 +99,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
             }
-            word if matches!(parsed.command.as_str(), "find" | "logon")
+            word if matches!(parsed.command.as_str(), "find" | "logon" | "service")
                 && parsed.term.is_none() =>
             {
                 parsed.term = Some(word.to_owned());
@@ -130,6 +134,37 @@ fn logon(what: Option<&str>) -> Result<(), String> {
     };
     println!("{said}");
     Ok(())
+}
+
+/// Register the system service and start it, or stop it and take it back
+/// (Windows): the roots named, if any, given to it.
+#[cfg(windows)]
+fn service(args: &Args) -> Result<(), String> {
+    let said = match args.term.as_deref() {
+        Some("add") => {
+            let mut given = Vec::new();
+            for root in &args.roots {
+                let root = skwird_crawl::canonical(root)
+                    .map_err(|e| format!("cannot reach a root: {e}"))?;
+                given.push("--root".to_owned());
+                given.push(root.to_string_lossy().into_owned());
+            }
+            skwird::service::add(&given)?
+        }
+        Some("remove") => skwird::service::remove()?,
+        _ => return Err("service takes add or remove".into()),
+    };
+    println!("{said}");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn service(_: &Args) -> Result<(), String> {
+    Err(
+        "service is Windows': elsewhere, the service manager's unit starts it \
+         (dist/systemd/skwird-system.service)"
+            .into(),
+    )
 }
 
 #[cfg(not(windows))]
@@ -184,6 +219,7 @@ fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
         "serve" => serve(args),
         "logon" => logon(args.term.as_deref()),
+        "service" => service(args),
         "find" => {
             let term = args.term.clone().ok_or("find takes a term")?;
             let root = folder(args)?;
@@ -256,13 +292,9 @@ fn serve(args: &Args) -> Result<(), String> {
         let _ = skwird::os::log_to(std::path::Path::new(&log));
     }
     // The system service's folders are its service manager's; its roots,
-    // unless named, every local filesystem that stores files (DESIGN 1).
+    // unless named, every local filesystem that stores files (DESIGN 1):
+    // on Windows, every volume of the machine's own that does.
     let dirs = if args.system {
-        if cfg!(windows) {
-            return Err(
-                "skwird's system service runs on Linux so far: Windows' comes with phase 4".into(),
-            );
-        }
         skwird::dirs::Dirs::system()
     } else {
         skwird::dirs::Dirs::from_env()?
@@ -270,6 +302,9 @@ fn serve(args: &Args) -> Result<(), String> {
     let roots = match (args.roots.is_empty(), args.system) {
         (false, _) => args.roots.clone(),
         (true, false) => vec![dirs.home.clone()],
+        #[cfg(windows)]
+        (true, true) => skwird::system::volume_roots(),
+        #[cfg(not(windows))]
         (true, true) => {
             let table = skwird_crawl::mounts::Table::read()
                 .map_err(|e| format!("cannot read the mount table: {e}"))?;
@@ -281,7 +316,7 @@ fn serve(args: &Args) -> Result<(), String> {
         .iter()
         .map(|r| skwird_crawl::canonical(r).map_err(|e| format!("cannot reach a root: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
-    skwird::serve::serve(&skwird::engine::Config {
+    let config = skwird::engine::Config {
         dirs,
         roots,
         idle: args.idle,
@@ -293,7 +328,14 @@ fn serve(args: &Args) -> Result<(), String> {
             .and_then(|v| v.parse().ok()),
         system: args.system,
         discovered: args.system && args.roots.is_empty(),
-    })
+    };
+    // On Windows, the system service as the service manager starts it; or
+    // in the foreground, run from a console.
+    #[cfg(windows)]
+    if args.system && skwird::service::dispatch(&config)? {
+        return Ok(());
+    }
+    skwird::serve::serve(&config)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

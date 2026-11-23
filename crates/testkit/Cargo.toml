@@ -12,11 +12,13 @@ rustix = { workspace = true, features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 # A file's identity, for the reference walk; whether Wine runs it
-# (phase 4).
+# (phase 4); a user of the tests' own, logged on and run as (step 7).
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
 ] }
 
 [lints]

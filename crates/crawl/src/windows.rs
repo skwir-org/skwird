@@ -33,6 +33,7 @@
 pub mod journal;
 pub mod mft;
 pub(crate) mod security;
+pub mod volumes;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -479,7 +480,7 @@ pub(crate) fn plain(path: &Path) -> PathBuf {
 }
 
 /// `path` in its verbatim form, which takes any length, NUL-terminated.
-pub(crate) fn verbatim(path: &Path) -> Vec<u16> {
+pub fn verbatim(path: &Path) -> Vec<u16> {
     let mut parts = path.components();
     let start = match parts.next() {
         Some(Component::Prefix(p)) => match p.kind() {

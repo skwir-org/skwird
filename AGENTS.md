@@ -161,8 +161,12 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   system (a task registered, a volume made) or needs an administrator
   runs only where `skwird_testkit::throwaway()` says so: a hosted runner
   the workflow marks with `SKWIRD_TEST_MACHINE`. It is skipped anywhere
-  else, as a root test is outside its machine. Work branches are pushed
-  freely; `main` only when the user says.
+  else, as a root test is outside its machine. A test that runs the
+  real system service there is in a test binary of its own
+  (`tests/windows_service.rs`): while it runs, the system's pipe answers
+  every client on the machine that names no pipe of its own, and cargo
+  runs one test binary at a time. Work branches are pushed freely;
+  `main` only when the user says.
 - Linux's packages are tried in distribution roots:
   `tools/package/try.sh debian|ubuntu|fedora|arch` builds one in a
   root under `~/.cache/skwird-tests/roots`, entered as its root in a

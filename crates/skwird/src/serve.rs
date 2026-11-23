@@ -78,10 +78,22 @@ pub fn serve(config: &Config) -> Result<(), String> {
     // The system service's socket is every user's to reach; a user's, its
     // user's alone.
     if config.system {
-        crate::dirs::make_shared(&config.dirs.runtime)?;
-        make_private(&config.dirs.state)?;
+        crate::dirs::make_system(&config.dirs)?;
     } else {
         make_private(&config.dirs.runtime)?;
+    }
+    // On Windows, the system service reads every folder whatever its
+    // descriptor says (the backup privilege), and numbers its users by
+    // their SIDs, as its state keeps them.
+    #[cfg(windows)]
+    if config.system {
+        if !skwird_crawl::read_anything() {
+            log(
+                "the backup privilege is not held: a folder whose descriptor denies the service \
+                 is a doubt, not covered",
+            );
+        }
+        crate::system::keep_numbers(&config.dirs.state);
     }
     let lock = crate::os::lock(&config.dirs.lock())?;
     let (listener, bound) = listen(config, &socket)?;
@@ -172,12 +184,20 @@ fn listen(config: &Config, socket: &Path) -> Result<(Listener, bool), String> {
 /// in four runs on a Windows runner. The name is asked for again for up to
 /// five seconds, while it is refused (`ERROR_ACCESS_DENIED`); a name held
 /// longer is another process's, and is refused.
+///
+/// The system service's pipe is every user's to reach, and its owner
+/// `LocalSystem`, which no other user can make it (DESIGN, Protocol).
 #[cfg(windows)]
-fn listen(_: &Config, pipe: &Path) -> Result<(Listener, bool), String> {
+fn listen(config: &Config, pipe: &Path) -> Result<(Listener, bool), String> {
     const DENIED: i32 = 5;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match Listener::bind(pipe) {
+        let bound = if config.system {
+            Listener::bind_system(pipe)
+        } else {
+            Listener::bind(pipe)
+        };
+        match bound {
             Ok(l) => return Ok((l, true)),
             Err(e) if e.raw_os_error() == Some(DENIED) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -202,7 +222,9 @@ fn sources(
     Option<Arc<skwird_crawl::Watcher>>,
     Option<Arc<skwird_crawl::fanotify::Group>>,
 ) {
-    let (watcher, group) = if config.system {
+    // On Windows, the system service's roots are each heard whole, through
+    // their volumes' journals, by the watcher a user's engine has.
+    let (watcher, group) = if config.system && cfg!(target_os = "linux") {
         (None, crate::live::group())
     } else {
         (crate::live::watcher(config.watches), None)
