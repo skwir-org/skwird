@@ -1742,6 +1742,40 @@ repositories, their versions their own.
 
     Both are false where the root is only checked: its events are every
     name change up to the check, as its coverage says, never to now;
+  - `totals {root}` (designed on 2026-11-24 with skwir's session, for
+    its Usage view, the treemap of what takes room; skwir's ADR-150,
+    step D): what the folder at `root` holds, from the index, with no
+    read of the disk.
+    - **Streamed:** each child of `root`, every one, files among them, in
+      batches as a query's results are (a folder of 100,000 files is
+      ordinary in Usage, which sorts them and folds the rest itself): its
+      path, kind and identity, and its totals (a file's own; a folder's,
+      its subtree's). Then `done`: `root`'s own totals, the journal token
+      as of the snapshot answered from, and a coverage.
+    - **Totals:** `size`, `alloc`, `files`, `folders`, `newest_mtime` (the
+      folders' own included), `by_extension: [{ext, files, alloc}]` (the
+      name's last dot on, lowercased; none for a name with none: the
+      client types files, rule 5), and `shared`.
+    - **Hard links:** a file of several names counts once in a subtree, by
+      its identity. `shared` is the alloc of its files with a name inside
+      and more names than the subtree holds: those deleting it would not
+      free. The index keeps each file's count of names (`nlink`) for it:
+      statx gives it on Linux, the file table's record on NTFS. Windows'
+      listings do not, so where a file's count is not known, `done` says
+      `shared` is at least what it says (`nlink: partial`), never more
+      than the truth.
+    - **Proof:** the coverage's `attrs` proof, the index's, and holes by
+      path for the folders not counted (excluded, private, denied, not
+      covered, not read): a client shows those as unknown, never empty.
+    - **Per asker,** at the system service: what they could list alone is
+      counted. A folder they may not list is a hole, denied, and nothing
+      below it counts, so no total says what it holds.
+    - **Computed on demand** from the snapshot published when it is
+      asked, never kept as running aggregates: an answer is as current as
+      the index, and the index's layout gains nlink alone.
+    - **Freshness:** the client keeps `done`'s token and asks `changes`
+      since it when it shows the folder again; no event means its totals
+      hold. skwird pushes nothing to clients.
   - `exclude {add, remove}`: folders the client keeps out of the index
     (5). A client removes only what it added.
   - `watch {add, remove}` (phase 2): folders the client wants live,

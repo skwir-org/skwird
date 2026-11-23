@@ -663,6 +663,26 @@ its ADR-050). Its sessions build them, in its repository:
   time. fsearch's recovery missed files that grew so (its `8e6db08`).
   Live events, from phase 2, hold them.
 
+  Asked by skwir's session on 2026-11-23, for its ADR-150's step D, and
+  done the same day: a query may take links unfiltered (`e8c14a6`), and
+  `changes` says how far its events are every change (`fd4334d`); the
+  fake engine answers changes from its script (`7947e9b`).
+- **E. Folder totals** for skwir's Usage view (DESIGN, Protocol,
+  `totals`, designed with skwir's session on 2026-11-24). Its steps:
+  1. **nlink kept** with each entry: the crawl gives it (statx on Linux,
+     the file table's record on NTFS, unknown from Windows' listings),
+     and the chunk's layout gains a column for it, so that every index
+     is built once again after the upgrade.
+  2. **The protocol:** `totals`, its batches and its `done`, in
+     `skwird-protocol`, the client's call, the fake engine's answer from
+     its script, and the transcript.
+  3. **The engine:** the totals computed from the snapshot, per asker at
+     the system service, streamed, the coverage and holes as `query`
+     gives them.
+  4. **Tested** against a walk of the tree: sizes, allocs, counts, the
+     newest time, extensions, a file of two names inside and one of a
+     name outside, a hole where a folder is excluded, private or denied.
+
 Kept alike in both: the four coverage words; name matching (DESIGN 7),
 so a change to one is a change to the other; and how a network mount
 is told (DESIGN 2).
