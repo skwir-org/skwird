@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use skwird_client::{Client, Find};
-use skwird_protocol::{Keeping, Match, NameTerm, NotLive, Proof, Query, Why, WirePath};
+use skwird_protocol::{Keeping, Links, Match, NameTerm, NotLive, Proof, Query, Why, WirePath};
 use skwird_testkit::{Scratch, in_namespace, reference_walk};
 
 /// A scratch home, its XDG folders, and the engines run in it.
@@ -129,6 +129,7 @@ fn everything(root: &Path) -> Query {
         size: None,
         mtime: None,
         limit: None,
+        links: Links::Own,
     }
 }
 
@@ -197,6 +198,42 @@ fn an_engine_answers_what_a_walk_finds() {
     assert_eq!(
         c.coverage(Path::new("/elsewhere")).unwrap().names,
         Proof::NotCovered(Why::Outside)
+    );
+}
+
+/// A query's size range takes a link by its own size, which a link to a
+/// large file misses; asked `links: unfiltered`, the link is answered
+/// whatever its size, for the client to stat, and nothing else changes:
+/// the file in range answers either way, a small file never.
+#[test]
+fn a_link_is_answered_whatever_its_size_when_asked() {
+    let mut env = Env::new("engine-links");
+    let home = env.home();
+    env.s.write(home.join("big.bin"), &vec![7u8; 1500]);
+    env.s.write(home.join("small.txt"), b"x");
+    env.s.link(home.join("to big"), "big.bin");
+    env.engine(30);
+    let mut c = env.client("a test");
+    let sized = Query {
+        size: Some([1000, 2000]),
+        ..everything(&home)
+    };
+    let own = answered(&mut c, &sized);
+    assert_eq!(
+        own,
+        BTreeSet::from([home.join("big.bin")]),
+        "a link by its own size"
+    );
+    let unfiltered = answered(
+        &mut c,
+        &Query {
+            links: Links::Unfiltered,
+            ..sized
+        },
+    );
+    assert_eq!(
+        unfiltered,
+        BTreeSet::from([home.join("big.bin"), home.join("to big")])
     );
 }
 

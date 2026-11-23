@@ -849,6 +849,7 @@ fn answer_query(
             .map(|[a, b]| convert::time_of(a)..=convert::time_of(b)),
         // One more than asked, to say whether there were more.
         limit: Some(limit.saturating_add(1)),
+        unfiltered_links: query.links == wire::Links::Unfiltered,
     };
     let (mut entries, mut coverage) = match answer_in(shared, i, &rel, &asked, who) {
         Ok(found) => found,

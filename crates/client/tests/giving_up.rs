@@ -79,6 +79,7 @@ fn everything() -> Query {
         size: None,
         mtime: None,
         limit: None,
+        links: skwird_client::protocol::Links::Own,
     }
 }
 

@@ -16,7 +16,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use skwird_client::Client;
-use skwird_protocol::{Match, NameTerm, Proof, Query, Scope, WirePath};
+use skwird_protocol::{Links, Match, NameTerm, Proof, Query, Scope, WirePath};
 use skwird_testkit::{Place, machine};
 
 /// The program: the machine's copy of it, or cargo's.
@@ -89,6 +89,7 @@ fn named(root: &Path, text: &str) -> Query {
         size: None,
         mtime: None,
         limit: None,
+        links: Links::Own,
     }
 }
 

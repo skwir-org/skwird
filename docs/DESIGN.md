@@ -1617,7 +1617,15 @@ repositories, their versions their own.
   - `sync {root}`: the barrier, or the check where nothing watches the
     root (2);
   - `query {root, names, kinds, sizes, times, limit, rank}`: streamed
-    batches of results, then `done` with the coverage that held;
+    batches of results, then `done` with the coverage that held. A link
+    meets sizes and times by its own, as the crawl never follows one
+    (`links: own`, the default, never written). With `links: unfiltered`
+    (2026-11-23, skwir's ask for its "recently changed"), a link the
+    name and kind terms hold is answered whatever sizes and times say,
+    for a client that judges a link by what it opens to stat it. skwird
+    will not take a link's target's attributes as its own: a target may
+    be outside every root, on a dead share, or change with no event on
+    the link, so no proof would hold for them;
   - `cancel {id}`;
   - `changes {root, since}`: what changed since a token, with each
     entry's identity and kind, then the token to resume from; or "too

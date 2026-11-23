@@ -58,6 +58,9 @@ pub struct Query {
     pub mtime: Option<RangeInclusive<Time>>,
     /// At most this many answers, in the index's order.
     pub limit: Option<usize>,
+    /// A link answers whatever `size` and `mtime` say (the protocol's
+    /// `links: unfiltered`): a client judges it by what it opens.
+    pub unfiltered_links: bool,
 }
 
 /// An entry that answers a query.
@@ -631,6 +634,9 @@ impl Filter<'_> {
     fn attrs_answer(&self, view: &View<'_>, j: usize) -> bool {
         let q = self.query;
         if q.size.is_none() && q.mtime.is_none() {
+            return true;
+        }
+        if q.unfiltered_links && view.item(j).kind == Kind::Link {
             return true;
         }
         let Some(attrs) = view.item(j).attrs else {

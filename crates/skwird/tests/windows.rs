@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use skwird_client::{Client, Find};
-use skwird_protocol::{Match, NameTerm, Proof, Query, Why, WirePath};
+use skwird_protocol::{Links, Match, NameTerm, Proof, Query, Why, WirePath};
 use skwird_testkit::{Scratch, reference_walk};
 
 /// The program. Built from Linux for Windows, cargo names it by the
@@ -190,6 +190,7 @@ fn everything(root: &Path) -> Query {
         size: None,
         mtime: None,
         limit: None,
+        links: Links::Own,
     }
 }
 

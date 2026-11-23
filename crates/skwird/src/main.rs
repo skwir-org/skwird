@@ -199,6 +199,7 @@ fn run(args: &Args) -> Result<(), String> {
                 size: None,
                 mtime: None,
                 limit: args.limit,
+                links: skwird_protocol::Links::Own,
             };
             let done = c
                 .query(&query, |batch| {

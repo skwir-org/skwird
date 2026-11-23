@@ -302,6 +302,7 @@ mod tests {
                     size: None,
                     mtime: None,
                     limit: None,
+                    links: skwird_protocol::Links::Own,
                 },
                 |batch| {
                     found.extend_from_slice(batch);
