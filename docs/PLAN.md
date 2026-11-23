@@ -1672,9 +1672,12 @@ above).
      - a junction that mounts a volume (`\??\Volume{`) is a mount, not
        covered;
      - a folder that any other filter driver gives (cloud files, a
-       projected file system) is not entered either, and not covered (a
-       mount). That keeps OneDrive's folders out: DESIGN's open question
-       11, the user's to decide.
+       projected file system) is read where its listing is on the
+       machine. It is left out, and not covered as a network mount is,
+       where Windows says its provider would fetch it. That is the user's
+       choice of 2026-11-23 (DESIGN's open question 11). Each check reads
+       such a folder again, so one brought onto the machine is listed
+       then.
    - **The check** opens each folder and compares its identity, volume
      and change time through its own handle. That is an open and three
      queries a folder. `NtQueryInformationByName` would take one, where

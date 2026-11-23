@@ -1250,8 +1250,9 @@ Linux, macOS and Windows:
 - A folder is opened relative to its root, through no reparse point,
   and must be, by its final path, the folder named. Wine's crossing of
   links in a path's middle is caught so.
-- Mounts are found where listings meet them, and a filter driver's
-  folders are not entered (open question 11).
+- Mounts are found where listings meet them. A filter driver's folder
+  (cloud files) is read where its listing is on the machine, and left
+  out where its provider would fetch it (open question 11).
 
 ### 10. Idle is idle, and nothing leaves the machine
 
@@ -1654,9 +1655,18 @@ machine alone, a third of before.
     the driver's kind: OneDrive's, with Files On-Demand, holds the
     user's Documents and Desktop wherever they are redirected there.
     Listing one that is not populated locally makes its provider fetch
-    it, from the network (decision 10). Until the user decides, the
-    crawl does not enter such a folder, and answers it not covered (a
-    mount): coverage lost, never overstated, nothing fetched. The other
-    way would list a folder whose listing is local (no
-    `FILE_ATTRIBUTE_RECALL_ON_OPEN`) and leave out the rest. It needs a
-    Windows machine with OneDrive to verify; Wine has no cloud files.
+    it, from the network (decision 10).
+
+    Answered on 2026-11-23, the user's choice: what is stored on the
+    machine is listed.
+    - A folder is read, whatever driver's it is, unless Windows says its
+      listing is not wholly on this machine
+      (`FILE_ATTRIBUTE_RECALL_ON_OPEN`, `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`,
+      `FILE_ATTRIBUTE_OFFLINE`).
+    - A folder Windows says so of is not entered, and is answered not
+      covered as a network mount is: never fetched. Each check reads it
+      again, so a folder brought onto the machine since is listed then.
+    - A file is a file, its data here or not: its name and size are the
+      listing's, and nothing of its content is read.
+    - Not verified on Windows: Wine has no cloud files. The rule is
+      tested on attributes and tags of the test's making.

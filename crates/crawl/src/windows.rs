@@ -16,9 +16,12 @@
 //!   opened in its verbatim form (`\\?\C:\Users\...`), which takes any
 //!   length.
 //! - **Mounts are found where the listing meets them:** a folder that is
-//!   a volume's mount point, or a reparse point of another kind (a filter
-//!   driver's: cloud files, projected file systems), is not entered, and
-//!   is not covered (a mount). There is no mount table to read.
+//!   a volume's mount point is not entered, and is not covered (a mount).
+//!   There is no mount table to read.
+//! - **What is on this machine is read:** a filter driver's folder (cloud
+//!   files, a projected file system) is read as any other, unless Windows
+//!   says its listing is not here; then it is not covered, as a network
+//!   mount is, and never fetched (DESIGN's open question 11).
 //!
 //! What Wine answers (`tools/wine-tests`) is not NTFS: its files are the
 //! host's, its links' reparse tags are blank, and it follows a link of
@@ -44,12 +47,12 @@ use windows_sys::Win32::Foundation::{
     STATUS_NAME_TOO_LONG, STATUS_NO_MORE_FILES, STATUS_UNSUCCESSFUL, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileBasicInfo, FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, SYNCHRONIZE,
-    VOLUME_NAME_NONE,
+    CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileBasicInfo, FileIdInfo,
+    GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 
@@ -307,10 +310,18 @@ impl Root {
             .collect()
     }
 
-    /// Nothing to read: mounts are found by listing their parents.
+    /// Forget the mounts found: there is no table to read, and what was
+    /// found is found again. Each check makes it so (`update::refresh`):
+    /// a folder not covered is stored to be read again, and read, it is
+    /// told again what it is. A folder whose listing has come to this
+    /// machine since is listed then.
     // The same call as on Linux, which reads its table and may fail.
     #[allow(clippy::unnecessary_wraps)]
     pub fn reread_mounts(&mut self) -> std::io::Result<()> {
+        self.below
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
@@ -336,11 +347,11 @@ impl Root {
     }
 
     /// A mount found at `rel`, listing its parent.
-    fn found_mount(&self, rel: PathBuf) {
+    fn found_mount(&self, rel: PathBuf, network: bool) {
         self.below
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(rel, false);
+            .insert(rel, network);
     }
 
     /// Whether `rel` or a folder above it, below the root, is excluded by
@@ -540,6 +551,17 @@ fn info<T>(handle: &Handle, class: i32) -> std::io::Result<T> {
     }
     // SAFETY: zeroed, then written by the call: initialized either way.
     Ok(unsafe { out.assume_init() })
+}
+
+/// What the folder open as `handle`, of these `attributes`, is: its
+/// reparse tag asked where it is a reparse point alone.
+fn opened_kind(handle: &Handle, attributes: u32) -> Folder {
+    let tag = if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        0
+    } else {
+        info::<FILE_ATTRIBUTE_TAG_INFO>(handle, FileAttributeTagInfo).map_or(0, |t| t.ReparseTag)
+    };
+    folder_kind(attributes, tag, || is_volume(handle))
 }
 
 /// A folder's own facts, through its handle, and its attributes.
@@ -762,22 +784,67 @@ fn record(bytes: &[u8], at: usize) -> Option<(Item, usize)> {
     Some((item, next as usize))
 }
 
-/// What an entry is, and whether it is a mount, not to be entered.
-fn classify(dir: &Handle, item: &Item) -> (Kind, bool) {
-    let folder = item.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if item.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-        return (if folder { Kind::Folder } else { Kind::File }, false);
+/// What a folder is to the crawl, by its attributes and its reparse tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Folder {
+    /// Read: a plain folder, or a filter driver's (cloud files, a
+    /// projected file system) whose listing is on this machine.
+    Entered,
+    /// A link of any kind: not followed.
+    Link,
+    /// Not entered, and not covered: a volume mounted there (a mount), or
+    /// a listing that is not on this machine, which its provider would
+    /// fetch to give (a network mount: decision 10, open question 11).
+    NotCovered(Why),
+}
+
+/// The attributes of a file or folder that is not wholly on this machine:
+/// opening it, or listing a folder, makes its provider fetch it
+/// (`winnt.h`).
+const RECALL: u32 = 0x0004_0000 // FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | 0x0040_0000 // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+    | 0x0000_1000; // FILE_ATTRIBUTE_OFFLINE
+
+/// What the folder of these `attributes` and reparse `tag` is: whether a
+/// mount point mounts a volume is asked of `volume` alone where it is one.
+fn folder_kind(attributes: u32, tag: u32, volume: impl FnOnce() -> bool) -> Folder {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        match tag {
+            // A junction, or a volume mounted there: its target tells.
+            TAG_MOUNT_POINT if volume() => return Folder::NotCovered(Why::Mount),
+            // A link of any kind; Wine gives no tag.
+            0 | TAG_MOUNT_POINT | TAG_SYMLINK | TAG_LX_SYMLINK | TAG_APPEXECLINK => {
+                return Folder::Link;
+            }
+            // A filter driver's: what it holds is told as any folder's.
+            _ => {}
+        }
     }
-    match item.tag {
-        // A junction, or a volume mounted there: its target tells.
-        TAG_MOUNT_POINT if folder && mounts_a_volume(dir, &item.name) => (Kind::Folder, true),
-        // A link of any kind; Wine gives no tag.
-        0 | TAG_MOUNT_POINT | TAG_SYMLINK | TAG_LX_SYMLINK | TAG_APPEXECLINK => (Kind::Link, false),
-        // A filter driver's folder (cloud files, a projected file system):
-        // what it holds is the driver's to give, not entered.
-        _ if folder => (Kind::Folder, true),
-        // A file of a filter's (deduplicated, compressed, a placeholder).
-        _ => (Kind::File, false),
+    // Listed where its listing is on this machine (the user's choice,
+    // 2026-11-23); never fetched.
+    if attributes & RECALL != 0 {
+        return Folder::NotCovered(Why::NetworkMount);
+    }
+    Folder::Entered
+}
+
+/// What an entry is, and why it is not covered if it is a folder not to
+/// be entered.
+fn classify(dir: &Handle, item: &Item) -> (Kind, Option<Why>) {
+    let folder = item.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if !folder {
+        // A link, or a file: a filter's file (deduplicated, compressed, a
+        // placeholder) is a file whatever holds its data.
+        let link = item.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            && folder_kind(item.attributes, item.tag, || false) == Folder::Link;
+        return (if link { Kind::Link } else { Kind::File }, None);
+    }
+    match folder_kind(item.attributes, item.tag, || {
+        mounts_a_volume(dir, &item.name)
+    }) {
+        Folder::Entered => (Kind::Folder, None),
+        Folder::Link => (Kind::Link, None),
+        Folder::NotCovered(why) => (Kind::Folder, Some(why)),
     }
 }
 
@@ -790,6 +857,11 @@ fn mounts_a_volume(dir: &Handle, name: &[u8]) -> bool {
         // What cannot be read is not entered either.
         return true;
     };
+    is_volume(&point)
+}
+
+/// Whether the mount point open as `point` mounts a volume, not a folder.
+fn is_volume(point: &Handle) -> bool {
     let mut buffer = vec![0u64; 2048];
     let mut written = 0u32;
     // SAFETY: the output buffer and its length in bytes; no input; the
@@ -865,9 +937,15 @@ pub(crate) fn read(
         Ok(stat) => stat,
         Err(e) => return not_covered(None, Why::Failed(e.raw_os_error().unwrap_or(0))),
     };
-    // A reparse point opened as itself: a link put where the folder was.
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return not_covered(Some(stat), Why::Replaced);
+    match opened_kind(&handle, attributes) {
+        Folder::Entered => {}
+        // A reparse point opened as itself: a link put where the folder
+        // was.
+        Folder::Link => return not_covered(Some(stat), Why::Replaced),
+        Folder::NotCovered(why) => {
+            root.found_mount(rel.to_path_buf(), why == Why::NetworkMount);
+            return not_covered(Some(stat), why);
+        }
     }
     if root.exclusions.holds(Some(stat.id), &root.path.join(rel)) {
         return not_covered(Some(stat), Why::Excluded);
@@ -886,13 +964,16 @@ pub(crate) fn read(
     items.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let mut listing = Listing::new(stat, read_at, again);
     for item in &items {
-        let (kind, mount) = classify(&handle, item);
+        let (kind, not_entered) = classify(&handle, item);
         let id = FileId {
             dev: stat.id.dev,
             ino: item.id,
         };
-        if mount {
-            root.found_mount(rel.join(crate::wtf8::path(&item.name)));
+        if let Some(why) = not_entered {
+            root.found_mount(
+                rel.join(crate::wtf8::path(&item.name)),
+                why == Why::NetworkMount,
+            );
             listing.push(
                 &item.name,
                 Entry {
@@ -955,16 +1036,23 @@ pub(crate) fn verdict(
             });
         }
     };
-    match stat_of(&handle) {
-        Err(e) => Some(Stale::Failed(e.raw_os_error().unwrap_or(0))),
-        Ok((_, attributes)) if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
-            Some(Stale::Replaced)
-        }
-        Ok((st, _)) if st.mount != root.stat.mount => Some(Stale::Mount),
-        Ok((st, _)) if st.id != stored.id => Some(Stale::Replaced),
-        Ok((st, _)) if st.ctime != stored.ctime => Some(Stale::Changed),
-        Ok(_) => None,
+    let (st, attributes) = match stat_of(&handle) {
+        Ok(stat) => stat,
+        Err(e) => return Some(Stale::Failed(e.raw_os_error().unwrap_or(0))),
+    };
+    match opened_kind(&handle, attributes) {
+        Folder::Entered => {}
+        Folder::Link => return Some(Stale::Replaced),
+        Folder::NotCovered(Why::NetworkMount) => return Some(Stale::NetworkMount),
+        Folder::NotCovered(_) => return Some(Stale::Mount),
     }
+    if st.mount != root.stat.mount {
+        return Some(Stale::Mount);
+    }
+    if st.id != stored.id {
+        return Some(Stale::Replaced);
+    }
+    (st.ctime != stored.ctime).then_some(Stale::Changed)
 }
 
 /// [`verdict`]: no watcher on Windows yet (phase 4, step 5).
@@ -1023,6 +1111,53 @@ mod tests {
             Some(false)
         );
         assert_eq!(target_is_volume(&data(volume)[..12]), None, "cut short");
+    }
+
+    /// A folder is entered where its listing is on this machine, whatever
+    /// filter driver it is a reparse point of (cloud files, a projected
+    /// file system); not where its provider would fetch it, nor where a
+    /// volume is mounted; and a link is a link.
+    #[test]
+    fn a_folder_is_entered_where_its_listing_is_on_this_machine() {
+        const CLOUD: u32 = 0x9000_701A;
+        const PROJFS: u32 = 0x9000_001C;
+        let dir = FILE_ATTRIBUTE_DIRECTORY;
+        let reparse = dir | FILE_ATTRIBUTE_REPARSE_POINT;
+        let on_open = 0x0004_0000;
+        let on_access = 0x0040_0000;
+        let offline = 0x0000_1000;
+        let never = || panic!("asked of a folder that mounts nothing");
+        assert_eq!(folder_kind(dir, 0, never), Folder::Entered);
+        // OneDrive's folder, its listing here: read.
+        assert_eq!(folder_kind(reparse, CLOUD, never), Folder::Entered);
+        assert_eq!(folder_kind(reparse, PROJFS, never), Folder::Entered);
+        // Its listing not here: fetched to be read, so not read.
+        for recall in [on_open, on_access, offline] {
+            assert_eq!(
+                folder_kind(reparse | recall, CLOUD, never),
+                Folder::NotCovered(Why::NetworkMount),
+                "{recall:#x}"
+            );
+            assert_eq!(
+                folder_kind(dir | recall, 0, never),
+                Folder::NotCovered(Why::NetworkMount),
+                "{recall:#x}, no reparse point"
+            );
+        }
+        assert_eq!(
+            folder_kind(reparse, TAG_MOUNT_POINT, || true),
+            Folder::NotCovered(Why::Mount),
+            "a volume mounted"
+        );
+        assert_eq!(
+            folder_kind(reparse, TAG_MOUNT_POINT, || false),
+            Folder::Link,
+            "a junction"
+        );
+        for tag in [0, TAG_SYMLINK, TAG_LX_SYMLINK, TAG_APPEXECLINK] {
+            // A link stays a link, its target fetched or not.
+            assert_eq!(folder_kind(reparse | on_open, tag, never), Folder::Link);
+        }
     }
 
     /// A file time is an instant since 1970, 100 ns at a time.
