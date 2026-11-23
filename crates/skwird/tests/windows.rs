@@ -465,13 +465,15 @@ fn skwirdw_serves_and_logs_with_no_console() {
 /// `skwird logon add` writes the task's definition, in UTF-16, its
 /// program skwirdw.exe and its user the one running it, and has
 /// `schtasks` register it; `remove` takes it back. Wine's `schtasks` keeps
-/// no task, so what is registered is proven on Windows alone, where this
-/// test would register one for the user running it: it runs under Wine,
-/// in the tests' own prefix, and is skipped on Windows.
+/// no task, so what is registered is proven on Windows, where this test
+/// registers one for the user running it: on a machine of the tests' own
+/// alone (`skwird_testkit::throwaway`), and under Wine, in the tests' own
+/// prefix. Skipped on any other Windows.
 #[test]
 fn the_logon_task_is_written_and_registered() {
-    if !skwird_testkit::under_wine() {
-        eprintln!("skipped on Windows: it would register a task of the user running it");
+    let throwaway = skwird_testkit::throwaway();
+    if !skwird_testkit::under_wine() && !throwaway {
+        eprintln!("skipped: it would register a task of the user running it (SKWIRD_TEST_MACHINE)");
         return;
     }
     let env = Env::new("win-logon");
@@ -500,7 +502,29 @@ fn the_logon_task_is_written_and_registered() {
     assert_eq!(xml.matches(&format!("<UserId>{sid}</UserId>")).count(), 2);
     assert!(xml.contains(r#"skwirdw.exe"</Command>"#), "{xml}");
     assert!(xml.contains("<Arguments>serve --forever</Arguments>"));
+    // Registered, where a system keeps tasks: run as its user, at logon.
+    let task = skwird::logon::name(&sid);
+    let query = || {
+        std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", &task, "/XML"])
+            .output()
+            .unwrap()
+    };
+    if throwaway {
+        let out = query();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let kept = String::from_utf8_lossy(&out.stdout);
+        assert!(kept.contains("<LogonTrigger>"), "{kept}");
+        assert!(kept.contains("skwirdw.exe"), "{kept}");
+    }
     run("remove");
+    if throwaway {
+        assert!(!query().status.success(), "the task is taken back");
+    }
 }
 
 /// One engine per user: a second waits on the lock while the first

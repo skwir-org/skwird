@@ -23,6 +23,10 @@ jobs:
       # rust-toolchain.toml's channel, components and targets.
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Every system's crates, as a developer's registry holds them: the
+      # client's copies are checked offline for Windows too (tests/vendored.rs).
+      - name: fetch
+        run: cargo fetch --locked
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy, this system
@@ -31,5 +35,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - name: clippy, macOS
         run: cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+      # Ubuntu lets no unprivileged process make a user namespace, which
+      # the tests of a mount made below a folder need (skwird_testkit's
+      # `in_namespace`): its AppArmor rule lifted, on this runner alone.
+      - name: user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast

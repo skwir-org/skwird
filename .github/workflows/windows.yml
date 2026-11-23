@@ -23,7 +23,14 @@ jobs:
       # rust-toolchain.toml's channel, for the runner's host (MSVC).
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Every system's crates, as a developer's registry holds them: the
+      # client's copies are checked offline for Windows too (tests/vendored.rs).
+      - name: fetch
+        run: cargo fetch --locked
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo test --workspace --no-fail-fast
+        env:
+          # A machine of the tests' own (skwird_testkit::throwaway).
+          SKWIRD_TEST_MACHINE: "1"

@@ -153,6 +153,25 @@ impl Drop for Scratch {
     }
 }
 
+/// Whether this is a Windows machine of the tests' own, thrown away
+/// after them: a runner GitHub hosts (`.github/workflows/windows.yml`),
+/// which sets `SKWIRD_TEST_MACHINE`. A test that changes the system (a
+/// task registered, a volume made) or needs an administrator runs there
+/// alone, as Linux's root tests run in their machine (AGENTS.md,
+/// Testing), and is skipped anywhere else: never on a developer's own
+/// system. `SKWIRD_TEST_MACHINE` set anywhere else stops the test.
+pub fn throwaway() -> bool {
+    let asked = std::env::var_os("SKWIRD_TEST_MACHINE").is_some();
+    // GitHub's own runners say so; a runner of someone's own says
+    // `self-hosted`, and may be their machine.
+    let hosted = std::env::var("RUNNER_ENVIRONMENT").is_ok_and(|v| v == "github-hosted");
+    assert!(
+        !asked || (hosted && !under_wine()),
+        "SKWIRD_TEST_MACHINE is set, but this is not a runner GitHub hosts"
+    );
+    asked
+}
+
 /// Whether this runs under Wine, not Windows (`tools/wine-tests`): what
 /// Wine cannot hold, a test does not ask of it, and says so.
 pub fn under_wine() -> bool {
