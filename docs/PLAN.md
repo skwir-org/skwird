@@ -1934,18 +1934,84 @@ above).
      Every record is held in memory while the table is built: to bound,
      and to measure, on a volume of millions.
 
+   **The journal followed** (2026-11-23, on the runners;
+   `Watcher::follow_root`, `windows::watch::follow`):
+   - **A root heard through its volume's journal,** read from its next
+     record on a thread of its own. It feeds the queue a folder's watch
+     feeds, with the same `Heard`, so the engine's live path, its barrier
+     and its watching again are the same.
+   - **From a position, not a moment:** what is made once the root is
+     followed is read whenever the thread reads, never lost before its
+     first read.
+   - **Idle is idle:** the read waits in the system
+     (`FSCTL_READ_USN_JOURNAL` for at least one byte, no time limit),
+     beside the thread's stop event. A test counts the reads.
+   - **Each record's folder** opened by its identity, once a batch, and
+     its path asked:
+     - an entry outside the root is not the root's;
+     - a folder gone is its own folder's record;
+     - one that cannot be opened is a doubt, and an overflow (rule 1);
+     - the volume's metadata (its first sixteen records, but the root
+       folder's) is passed over, never opened.
+   - **Records dropped past the position** are an overflow, read on from
+     the next; a journal deleted or made again ends the watch.
+   - **A volume with no journal** is given one (32 MiB, by 8 MiB), as
+     Everything gives one.
+   - **What a run taught:** on a fresh volume Windows writes in
+     `System Volume Information` at times of its own, which `LocalSystem`
+     alone may open: an overflow, once in five runs. With the backup
+     privilege (`skwird_crawl::read_anything`, as the service runs), it
+     is opened all the same. Three runs pass since.
+   - Proven on a second NTFS disk of the runner's (`T:`), for a test that
+     deletes its journal: what is made, written, renamed and removed
+     below a root is heard by its path, none of what is outside it, a
+     cookie after what came before it; an idle followed root reads
+     nothing for two seconds; its watch ends with its journal.
+
+   **What each folder is judged by** (2026-11-23, DESIGN 4, "On
+   Windows"), the crawl's side, with `Options::acls`:
+   - each folder's security id kept as its owner, from the table or from
+     its record read again (`FSCTL_GET_NTFS_FILE_RECORD`);
+   - the descriptor each id names fetched once, through a folder holding
+     it, where folders are read, never while a client waits; held by
+     volume and id (`descriptor_on`);
+   - FAT and exFAT, which have no security, listed by anyone
+     (`OPEN_TO_ALL`). ReFS is not a root yet.
+
+   Proven on the runner's disk: the ids are the same both ways, two
+   folders of the same access share one, a folder given its own access
+   another.
+
+   **The asker's token** (2026-11-23):
+   - the pipe client's token, taken by impersonating it for the one call
+     that opens it, then the server's own again (the process stops if it
+     cannot go back); at identification level, enough to judge, never to
+     act as it;
+   - each folder judged by `AccessCheck`, as Windows judges the asker's
+     own open: listing it, passing through it, traverse bypassed where
+     the token may (`SeChangeNotifyPrivilege`);
+   - judgements kept for the connection by volume, id and access; a
+     folder whose descriptor is not held is not known, never kept so;
+   - `LocalSystem` sees everything, as root does.
+
+   Proven on the runner with a user the test makes and logs on: it lists
+   a folder every user may list, not one the administrators alone may;
+   an administrator lists both.
+
    **Left of step 7:**
-   - **The journal followed:** read on a thread of its own, each record's
-     parent folder found by its id and gathered, its position kept with
-     the index, and the rule applied at each start.
-   - **The service:** Windows' service control, a service account that
-     may read every folder (backup privileges), the system's pipe
-     `\\.\pipe\skwird` open to every user who logs on, and clients
-     checking that its server is that account, never a pipe another
-     user made.
-   - **Answers per asker** (DESIGN 4): each folder's security descriptor
-     (by the security id the records carry), checked against the asker
-     while impersonating the pipe's client, kept per folder and asker.
+   - **The service:** Windows' service control, run as `LocalSystem`
+     with the backup privilege; the system's pipe `\\.\pipe\skwird` open
+     to every user who logs on; clients checking that its owner is that
+     account, never a pipe another user made.
+   - **Its roots:** every fixed volume that stores files (NTFS, FAT,
+     exFAT), not on a USB bus, each built from its file table on NTFS and
+     followed through its journal.
+   - **Its users:** each SID numbered, the number kept, so that what a
+     user registered stays theirs; every home's default private folders
+     left out (rule 3), and each user's own exclusions.
+   - **The journal's position kept with the index,** and DESIGN 2's rule
+     applied at each start: caught up where it holds, the table read
+     again where it does not.
 8. **Measured,** on a Windows machine when one is at hand: the user's
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.
