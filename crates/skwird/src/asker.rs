@@ -25,20 +25,36 @@ const LIST: u16 = 0o5;
 /// Search alone: a folder passed through.
 const SEARCH: u16 = 0o1;
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{Access, Token};
+
+/// An asker's token: Windows' alone ([`windows::Token`]); none is ever
+/// made elsewhere.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum Token {}
+
 /// Who asks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asker {
     pub uid: u32,
     pub gid: u32,
     pub groups: Vec<u32>,
+    /// On Windows, the token its pipe gave, which it is judged by.
+    pub token: Option<std::sync::Arc<Token>>,
 }
 
-/// A folder's owner, group and mode, the [`skwird_crawl::ACL`] bit in it.
+/// A folder's owner, group and mode, the [`skwird_crawl::ACL`] bit in it,
+/// and the volume it is on. On Windows its owner is its security id, its
+/// group and mode none (DESIGN 4, "On Windows").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Owned {
     pub owner: u32,
     pub group: u32,
     pub mode: u16,
+    pub dev: u64,
 }
 
 impl Asker {
@@ -50,22 +66,22 @@ impl Asker {
             uid: cred.uid.as_raw(),
             gid: cred.gid.as_raw(),
             groups: peer_groups(stream)?,
+            token: None,
         })
     }
 
-    /// The peer of a pipe: the engine's own user, whom its security
-    /// descriptor alone lets in (`skwird_client::pipe`). Its ids are none
-    /// a user has: no mode grants it anything, should it ever be
-    /// evaluated. The system service, which answers every user, comes
-    /// with phase 4's step 7.
+    /// The peer of a pipe: its token, taken as its server's end does
+    /// (`skwird_client::pipe::Stream::client_token`), which it is judged
+    /// by. Its ids are none a user has: no mode grants it anything, should
+    /// it ever be evaluated.
     #[cfg(windows)]
-    // The same call as on Unix, which may fail.
-    #[allow(clippy::unnecessary_wraps)]
-    pub fn of(_: &Stream) -> std::io::Result<Asker> {
+    pub fn of(stream: &Stream) -> std::io::Result<Asker> {
+        let token = Token::of(stream.client_token()?)?;
         Ok(Asker {
             uid: u32::MAX,
             gid: u32::MAX,
             groups: Vec::new(),
+            token: Some(std::sync::Arc::new(token)),
         })
     }
 
@@ -79,11 +95,18 @@ impl Asker {
     /// asker the pipe let in.
     #[cfg(windows)]
     pub fn is_engines_user(&self) -> bool {
-        true
+        match &self.token {
+            Some(token) => skwird_client::pipe::user_sid().is_ok_and(|me| me == token.sid),
+            None => true,
+        }
     }
 
+    /// Whether the asker may see everything: root; on Windows, `LocalSystem`.
     pub fn is_root(&self) -> bool {
-        self.uid == 0
+        #[cfg(windows)]
+        return self.token.as_ref().is_some_and(|t| t.is_system());
+        #[cfg(unix)]
+        return self.uid == 0;
     }
 
     /// Whether the asker may do all of `bits` (4 read, 1 search) in a
@@ -100,35 +123,51 @@ impl Asker {
         if self.is_root() {
             return Sight::Seen;
         }
-        if folder.mode & skwird_crawl::ACL != 0 {
-            return match acl {
-                Some(acl)
-                    if acl.allows(
-                        self.uid,
-                        self.gid,
-                        &self.groups,
-                        folder.owner,
-                        folder.group,
-                        bits,
-                    ) =>
-                {
-                    Sight::Seen
-                }
-                Some(_) => Sight::Hidden,
-                None => Sight::Unknown,
+        // Judged by its descriptor, as Windows judges an open (DESIGN 4).
+        #[cfg(windows)]
+        {
+            let _ = acl;
+            let access = if bits == SEARCH {
+                Access::Traverse
+            } else {
+                Access::List
             };
+            self.token
+                .as_ref()
+                .map_or(Sight::Hidden, |t| t.may(folder.dev, folder.owner, access))
         }
-        let granted = if self.uid == folder.owner {
-            folder.mode >> 6
-        } else if self.gid == folder.group || self.groups.contains(&folder.group) {
-            folder.mode >> 3
-        } else {
-            folder.mode
-        };
-        if granted & bits == bits {
-            Sight::Seen
-        } else {
-            Sight::Hidden
+        #[cfg(unix)]
+        {
+            if folder.mode & skwird_crawl::ACL != 0 {
+                return match acl {
+                    Some(acl)
+                        if acl.allows(
+                            self.uid,
+                            self.gid,
+                            &self.groups,
+                            folder.owner,
+                            folder.group,
+                            bits,
+                        ) =>
+                    {
+                        Sight::Seen
+                    }
+                    Some(_) => Sight::Hidden,
+                    None => Sight::Unknown,
+                };
+            }
+            let granted = if self.uid == folder.owner {
+                folder.mode >> 6
+            } else if self.gid == folder.group || self.groups.contains(&folder.group) {
+                folder.mode >> 3
+            } else {
+                folder.mode
+            };
+            if granted & bits == bits {
+                Sight::Seen
+            } else {
+                Sight::Hidden
+            }
         }
     }
 }
@@ -180,6 +219,7 @@ pub fn owned_at(path: &Path) -> Option<Owned> {
         owner: meta.uid(),
         group: meta.gid(),
         mode: (meta.mode() & 0o7777) as u16 | if acl { skwird_crawl::ACL } else { 0 },
+        dev: meta.dev(),
     })
 }
 
@@ -201,6 +241,7 @@ pub(crate) fn sight(
         owner: facts.owner,
         group: facts.group,
         mode: facts.mode,
+        dev: facts.id.dev,
     };
     asker.may_by(owned, index.acl_of(facts.id), LIST).and(reach(
         index,
@@ -237,6 +278,7 @@ fn reach(
                     owner: facts.owner,
                     group: facts.group,
                     mode: facts.mode,
+                    dev: facts.id.dev,
                 },
                 index.acl_of(facts.id),
                 SEARCH,
@@ -316,7 +358,8 @@ pub fn through(asker: &Asker, above: &[Option<Owned>]) -> Sight {
     })
 }
 
-#[cfg(test)]
+// Unix's modes and ACLs: Windows' judging is by token (`windows`).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -325,11 +368,17 @@ mod tests {
             uid,
             gid,
             groups: groups.to_vec(),
+            token: None,
         }
     }
 
     fn folder(owner: u32, group: u32, mode: u16) -> Owned {
-        Owned { owner, group, mode }
+        Owned {
+            owner,
+            group,
+            mode,
+            dev: 0,
+        }
     }
 
     /// The owner's bits for the owner, even where the group's or the

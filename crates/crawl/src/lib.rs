@@ -75,7 +75,7 @@ pub use windows::Root;
 #[cfg(windows)]
 pub use windows::watch::{Heard, Watcher};
 #[cfg(windows)]
-pub use windows::{journal, mft};
+pub use windows::{OPEN_TO_ALL, descriptor_on, journal, mft};
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod other;

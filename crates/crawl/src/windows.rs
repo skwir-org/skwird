@@ -150,6 +150,31 @@ impl Drop for Handle {
     }
 }
 
+/// A folder's owner, where the system service reads it (`Options::acls`),
+/// on a volume with no security of its own (FAT, exFAT): anyone may list
+/// it (DESIGN 4). Never a security id NTFS gives, which start at 256; 0
+/// is a folder whose id was not read, which is not known.
+pub const OPEN_TO_ALL: u32 = u32::MAX;
+
+/// The descriptors of every security id met, by volume and id: fetched
+/// where folders are read, judged where an asker is answered, by any root
+/// on the volume. A security id names one descriptor on its volume alone.
+static DESCRIPTORS: Mutex<Option<Descriptors>> = Mutex::new(None);
+
+/// Descriptors by volume and security id.
+type Descriptors = HashMap<(u64, u32), Arc<[u8]>>;
+
+/// The security descriptor of security id `id` on the volume `dev` (its
+/// serial), where a folder holding it was read: none otherwise.
+pub fn descriptor_on(dev: u64, id: u32) -> Option<Arc<[u8]>> {
+    DESCRIPTORS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()?
+        .get(&(dev, id))
+        .cloned()
+}
+
 /// A root, opened: the folder a crawl reads below and a check proves.
 ///
 /// Its folder is held open only while it is read ([`Root::let_go`]
@@ -168,9 +193,6 @@ pub struct Root {
     /// opened below it is held to ([`Root::open_folder`]).
     inside: Vec<u16>,
     exclusions: Exclusions,
-    /// The security descriptor of each security id met below it, fetched
-    /// once through a folder holding it (the system service's, DESIGN 4).
-    descriptors: Mutex<HashMap<u32, Arc<[u8]>>>,
     /// Its volume, open while a folder's record is read, let go of with its
     /// folder ([`Root::let_go`]).
     volume: Mutex<Option<Arc<Handle>>>,
@@ -211,34 +233,31 @@ impl Root {
             below: Mutex::new(HashMap::new()),
             inside,
             exclusions,
-            descriptors: Mutex::new(HashMap::new()),
             volume: Mutex::new(None),
         })
     }
 
-    /// The security descriptor of security id `id`, where a folder holding
-    /// it was read: none otherwise, and a folder holding it is not known.
+    /// The security descriptor of security id `id` on its volume, where a
+    /// folder holding it was read: none otherwise, and a folder holding it
+    /// is not known ([`descriptor_on`]).
     pub fn descriptor(&self, id: u32) -> Option<Arc<[u8]>> {
-        self.descriptors
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .cloned()
+        descriptor_on(self.stat.id.dev, id)
     }
 
     /// Fetch the descriptor of security id `id` through `folder` (its file
     /// reference), which holds it, unless it is held already. A descriptor
     /// that cannot be fetched is not held: its folders are not known.
     pub(crate) fn learn(&self, id: u32, folder: u64) {
-        if id == 0 || self.descriptor(id).is_some() {
+        if id == 0 || id == OPEN_TO_ALL || self.descriptor(id).is_some() {
             return;
         }
         let Ok(dir) = self.dir() else { return };
         if let Ok(descriptor) = security::descriptor_of(&dir, folder) {
-            self.descriptors
+            DESCRIPTORS
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(id, descriptor.into());
+                .get_or_insert_with(HashMap::new)
+                .insert((self.stat.id.dev, id), descriptor.into());
         }
     }
 
@@ -992,7 +1011,11 @@ pub(crate) fn read(
     };
     if opts.acls {
         // The system service's: what an asker is judged by (DESIGN 4).
-        stat.owner = root.security_of(stat.id.ino).unwrap_or(0);
+        stat.owner = if matches!(root.fs.as_str(), "FAT" | "FAT32" | "exFAT") {
+            OPEN_TO_ALL
+        } else {
+            root.security_of(stat.id.ino).unwrap_or(0)
+        };
         root.learn(stat.owner, stat.id.ino);
     }
     match opened_kind(&handle, attributes) {

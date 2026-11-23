@@ -30,9 +30,11 @@ rustix = { workspace = true, features = ["event", "net", "process", "time"] }
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The lock, a thread's processor time, the log (phase 4, step 4).
+# The lock, a thread's processor time, the log (phase 4, step 4); an
+# asker's token judged (step 7).
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_IO",

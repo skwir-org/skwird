@@ -352,6 +352,7 @@ fn above(shared: &Shared, i: usize, asker: &Asker) -> Sight {
                             owner: facts.owner,
                             group: facts.group,
                             mode: facts.mode,
+                            dev: facts.id.dev,
                         };
                         Some(asker.may_by(owned, index.acl_of(facts.id), 0o1))
                     }
@@ -984,15 +985,20 @@ mod tests {
             uid: 1000,
             gid: 1000,
             groups: Vec::new(),
+            token: None,
         };
         let root = Asker {
             uid: 0,
             gid: 0,
             groups: Vec::new(),
+            token: None,
         };
         assert!(!too_soon(&shared, &someone));
         assert!(too_soon(&shared, &someone), "again at once");
+        // Root as Unix names it; on Windows, LocalSystem's token alone.
+        #[cfg(unix)]
         assert!(!too_soon(&shared, &root) && !too_soon(&shared, &root));
+        let _ = root;
         let user = Shared::new(Vec::new(), false);
         assert!(!too_soon(&user, &someone) && !too_soon(&user, &someone));
     }
