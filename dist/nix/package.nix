@@ -22,7 +22,11 @@ rustPlatform.buildRustPackage {
 
   # The engine and its command line, one program; the measuring tool
   # (skwird-bench) is the repository's, not the package's.
-  cargoBuildFlags = [ "--package=skwird" ];
+  cargoBuildFlags = [
+    "--package=skwird"
+    # skwirdw is Windows' (skwird with no console window).
+    "--bin=skwird"
+  ];
   # The tests need a real filesystem's behaviour and a cache folder of
   # their own (tools/gate.sh); those that need root run in the flake's
   # virtual machines (`checks`), never in a build.

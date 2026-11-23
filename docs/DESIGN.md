@@ -59,6 +59,12 @@ It does none of these:
 | Login (a systemd user unit, a LaunchAgent, a Windows logon task) | The session | The user's files |
 | Its first client | While a client is connected, then a minute | The user's files |
 
+On Windows, the logon task (phase 4, step 6) is the user's own, named by
+their SID, registered by `skwird logon add`
+(`dist/windows/skwird-logon.xml`). It runs `skwirdw.exe`, skwird built
+for Windows' GUI subsystem: a console program a task starts opens a
+window.
+
 How clients find an engine, in this order:
 
 1. the system service's socket;

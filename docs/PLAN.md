@@ -1829,6 +1829,40 @@ above).
      again.
 6. **A logon task** (DESIGN 1): the user's engine started at logon by a
    task of the user's, its definition in `dist/windows/`.
+
+   Done on 2026-11-23:
+   - **The task.** `dist/windows/skwird-logon.xml` runs `serve
+     --forever` at the user's logon, as the user, in their session, with
+     no time limit, below normal priority, one instance, restarted on
+     failure. `skwird logon add` registers it for the user running it,
+     named by their SID (a task's name is the machine's), with
+     `schtasks`; `remove` takes it back.
+   - **No console window.** A console program a task starts opens a
+     window. The task runs `skwirdw.exe`, skwird built for Windows' GUI
+     subsystem, as `pythonw` is: the same command line, taken as a
+     module, its log in the engine's state folder. The package builds
+     `skwird` alone; `skwirdw` is Windows'.
+   - **Watched again.** A root whose watch ended is watched again before
+     its next check, and heard whole once the check proves it current. A
+     watch whose check fails is let go of, to be tried again.
+   - **A race closed.** `watch_root` now asks for the first changes
+     before it returns. Its thread asked first, so a change made in
+     between was heard by no one, while the root was said heard from
+     before it.
+   - **Under Wine:**
+     - `skwirdw` serves and logs with no console;
+     - `logon add` writes the definition (UTF-16, its program and its
+       user) and `schtasks` takes it;
+     - a root's tree is heard by its paths, three folders deep.
+
+     Not provable there:
+     - Wine's `schtasks` keeps no task, and a test that registered one on
+       Windows would register it for the user running it: registration
+       itself is tried by hand on Windows;
+     - Wine keeps a removed root's watch going, so a watch's end is proven
+       on Windows alone, and with it the watching again;
+     - Wine watches a folder of the tree only once something opened it,
+       as the engine's crawl does at once.
 7. **The service.**
    - The file table is read whole (`FSCTL_ENUM_USN_DATA`).
    - The change journal is followed (`FSCTL_READ_USN_JOURNAL`) and

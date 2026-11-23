@@ -1218,10 +1218,8 @@ impl Writing<'_> {
         }
         if self.gather.recheck_due(now) {
             let start = thread_time();
-            for (i, keeper) in self.keepers.iter_mut().enumerate() {
-                if let Some(keeper) = keeper {
-                    refresh(keeper, i, self.shared, &self.cancel);
-                }
+            for i in 0..self.keepers.len() {
+                self.check_root(i);
             }
             // Charged, not held: it is what makes the roots live again.
             self.gather
@@ -1492,10 +1490,51 @@ impl Writing<'_> {
         let (readmitting, refused) = self.hold_to_exclusions();
         log_refused(refused);
         for i in readmitting {
-            if let Some(keeper) = self.keepers[i].as_mut() {
-                refresh(keeper, i, self.shared, &self.cancel);
+            self.check_root(i);
+        }
+    }
+
+    /// Root `i` checked. On Windows, where its watch ended, its tree is
+    /// watched again first, and heard whole once the check proves it
+    /// current: a root on a drive taken away and given back, or whose
+    /// watch failed, is live again, not checked until the engine starts
+    /// again. A watch whose check fails is let go of, to be tried again.
+    fn check_root(&mut self, i: usize) {
+        #[cfg(windows)]
+        let since = self.rewatch(i);
+        let Some(keeper) = self.keepers[i].as_mut() else {
+            return;
+        };
+        let current = refresh(keeper, i, self.shared, &self.cancel);
+        #[cfg(windows)]
+        if let Some(since) = since {
+            if current {
+                keeper.heard_whole(since);
+                self.publish(i);
+                log(&format!("root {i}: watched again, live"));
+            } else {
+                if let Some(w) = &self.watcher {
+                    w.unwatch_root(i);
+                }
+                self.marked[i] = None;
             }
         }
+        #[cfg(not(windows))]
+        let _ = current;
+    }
+
+    /// Root `i`'s tree watched again where its watch ended (Windows): since
+    /// when, if it is.
+    #[cfg(windows)]
+    fn rewatch(&mut self, i: usize) -> Option<Time> {
+        if self.marked.get(i).copied().flatten().is_some() {
+            return None;
+        }
+        let watcher = self.watcher.as_ref()?;
+        let path = self.keepers.get(i)?.as_ref()?.root().path().to_path_buf();
+        let since = Time::now();
+        self.marked[i] = watch_whole(watcher, i, &path);
+        self.marked[i].map(|_| since)
     }
 }
 
@@ -1538,9 +1577,11 @@ fn theirs(all: &[Registration], client: &str, uid: Option<u32>) -> Vec<PathBuf> 
         .collect()
 }
 
-fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) {
+/// Check root `root`, save what changed, publish it: whether it was
+/// proven current.
+fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) -> bool {
     let start = Instant::now();
-    match keeper.refresh(cancel) {
+    let current = match keeper.refresh(cancel) {
         Ok(done) => {
             if !done.records.is_empty() {
                 log(&format!(
@@ -1554,14 +1595,19 @@ fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) {
                     log("a save failed: the index is kept in memory, the log on disk");
                 }
             }
+            true
         }
-        Err(e) => log(&format!("root {root} cannot be refreshed: {e}")),
-    }
+        Err(e) => {
+            log(&format!("root {root} cannot be refreshed: {e}"));
+            false
+        }
+    };
     shared.publish(root, Published::Ready(Arc::new(keeper.snapshot())));
     // What the check and the rereads freed, given back before the engine
     // waits again: an engine idle after a sync holds what one at rest
     // holds (DESIGN 10).
     crate::memory::give_back();
+    current
 }
 
 /// How long a sync waits for its cookie before the check serves it.
@@ -1681,9 +1727,7 @@ impl Writing<'_> {
     fn check_now(&mut self, root: usize, replies: Vec<Sender<()>>) {
         let heard = self.gather.take(root);
         self.apply_heard(root, &heard);
-        if let Some(keeper) = self.keepers[root].as_mut() {
-            refresh(keeper, root, self.shared, &self.cancel);
-        }
+        self.check_root(root);
         self.gather.checked(Instant::now());
         for reply in replies {
             let _ = reply.send(());

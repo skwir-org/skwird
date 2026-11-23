@@ -22,7 +22,10 @@ use skwird_testkit::{Scratch, reference_walk};
 /// The program. Built from Linux for Windows, cargo names it by the
 /// host's path; under Wine, the host's root is drive `Z:`.
 fn program() -> PathBuf {
-    let built = env!("CARGO_BIN_EXE_skwird");
+    windows_path(env!("CARGO_BIN_EXE_skwird"))
+}
+
+fn windows_path(built: &str) -> PathBuf {
     if built.starts_with('/') {
         PathBuf::from(format!("Z:{}", built.replace('/', "\\")))
     } else {
@@ -74,7 +77,12 @@ impl Env {
 
     /// The program, with every folder it may reach this test's own.
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(program());
+        self.command_of(program(), args)
+    }
+
+    /// `program`, with every folder it may reach this test's own.
+    fn command_of(&self, program: PathBuf, args: &[&str]) -> Command {
+        let mut c = Command::new(program);
         c.args(args)
             .env("USERPROFILE", self.home())
             .env("LOCALAPPDATA", &self.local)
@@ -428,6 +436,71 @@ fn a_sync_is_a_barrier_where_the_cookies_are_heard() {
         "{synced:?}"
     );
     assert!(answered(&mut c, &named(&home, "just before")).contains(&made));
+}
+
+/// skwirdw, skwird with no console window, serves as skwird does, and
+/// logs to the engine's log in its state folder, having no console.
+#[test]
+fn skwirdw_serves_and_logs_with_no_console() {
+    let env = Env::new("win-skwirdw");
+    tree(&env);
+    let home = env.home();
+    let mut child = env
+        .command_of(
+            windows_path(env!("CARGO_BIN_EXE_skwirdw")),
+            &["serve", "--root", home.to_str().unwrap(), "--idle", "30"],
+        )
+        .spawn()
+        .unwrap();
+    let mut c = env.client();
+    assert!(!answered(&mut c, &named(&home, "notes")).is_empty());
+    drop(c);
+    let log = env.local.join(r"skwird\state\engine.log");
+    let said = std::fs::read_to_string(&log).unwrap();
+    assert!(said.contains("serving 1 roots"), "{said}");
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `skwird logon add` writes the task's definition, in UTF-16, its
+/// program skwirdw.exe and its user the one running it, and has
+/// `schtasks` register it; `remove` takes it back. Wine's `schtasks` keeps
+/// no task, so what is registered is proven on Windows alone, where this
+/// test would register one for the user running it: it runs under Wine,
+/// in the tests' own prefix, and is skipped on Windows.
+#[test]
+fn the_logon_task_is_written_and_registered() {
+    if !skwird_testkit::under_wine() {
+        eprintln!("skipped on Windows: it would register a task of the user running it");
+        return;
+    }
+    let env = Env::new("win-logon");
+    let run = |what: &str| {
+        let out = env.command(&["logon", what]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run("add");
+    let bytes = std::fs::read(env.local.join(r"skwird\state\logon.xml")).unwrap();
+    assert_eq!(
+        &bytes[..2],
+        &[0xFF, 0xFE],
+        "UTF-16, its byte order mark first"
+    );
+    let units: Vec<u16> = bytes[2..]
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    let xml = String::from_utf16(&units).unwrap();
+    let sid = skwird_client::pipe::user_sid().unwrap();
+    assert_eq!(xml.matches(&format!("<UserId>{sid}</UserId>")).count(), 2);
+    assert!(xml.contains(r#"skwirdw.exe"</Command>"#), "{xml}");
+    assert!(xml.contains("<Arguments>serve --forever</Arguments>"));
+    run("remove");
 }
 
 /// One engine per user: a second waits on the lock while the first

@@ -61,6 +61,7 @@
           ./crates
           ./dist/systemd
           ./dist/sysusers
+          ./dist/windows
           ./LICENSE-MIT
           ./LICENSE-APACHE
         ];

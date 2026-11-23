@@ -152,7 +152,20 @@ impl Watcher {
         if dir == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error());
         }
-        let dir = Handle(dir);
+        // The first read asked before this returns: what changes from now
+        // on is heard, never lost before the thread first asks. A root
+        // heard from now is read after, so that what it holds is either
+        // read or heard (AGENTS.md, "Watch, then open, then list").
+        let mut reading = Reading {
+            dir: Handle(dir),
+            done: event()?,
+            // SAFETY: an all-zero structure is a valid one, before its event.
+            ov: Box::new(unsafe { std::mem::zeroed() }),
+            buffer: vec![0u64; 32 * 1024],
+        };
+        if !reading.ask() {
+            return Err(std::io::Error::last_os_error());
+        }
         let stop = Arc::new(event()?);
         let (queue, cookies, root) = (
             Arc::clone(&self.queue),
@@ -163,7 +176,7 @@ impl Watcher {
             let stop = Arc::clone(&stop);
             std::thread::Builder::new()
                 .name("skwird-heard".into())
-                .spawn(move || listen(&dir, &stop, scope, &root, &queue, &cookies))?
+                .spawn(move || listen(reading, &stop, scope, &root, &queue, &cookies))?
         };
         let watched = Watched {
             stop,
@@ -252,46 +265,57 @@ const CHANGES: u32 = FILE_NOTIFY_CHANGE_FILE_NAME
     | FILE_NOTIFY_CHANGE_LAST_WRITE
     | FILE_NOTIFY_CHANGE_CREATION;
 
-/// Read what changes below the root open as `dir` until `stop` is set,
-/// each batch put in `queue`.
+/// A root's folder being read for changes: the read pending, its
+/// structure and its buffer at places of their own until it is done.
+struct Reading {
+    dir: Handle,
+    done: Handle,
+    ov: Box<OVERLAPPED>,
+    buffer: Vec<u64>,
+}
+
+// SAFETY: moved once, to the thread that reads, and used by it alone
+// after; the structure and the buffer stay at their places, boxed.
+unsafe impl Send for Reading {}
+
+impl Reading {
+    /// Ask for the next changes: whether the read is pending.
+    fn ask(&mut self) -> bool {
+        // SAFETY: an all-zero structure is a valid one, given its event.
+        *self.ov = unsafe { std::mem::zeroed() };
+        self.ov.hEvent = self.done.0;
+        let len = u32::try_from(self.buffer.len() * 8).unwrap_or(u32::MAX);
+        // SAFETY: the buffer, aligned for the records, and its length; it
+        // and the structure stay in place until the call is done or its
+        // cancel has landed, which `listen` waits for.
+        unsafe {
+            ReadDirectoryChangesW(
+                self.dir.0,
+                self.buffer.as_mut_ptr().cast::<c_void>(),
+                len,
+                1,
+                CHANGES,
+                std::ptr::null_mut(),
+                &raw mut *self.ov,
+                None,
+            ) != 0
+        }
+    }
+}
+
+/// Read what changes below the root `reading` reads, its first read
+/// asked, until `stop` is set, each batch put in `queue`.
 fn listen(
-    dir: &Handle,
+    mut reading: Reading,
     stop: &Handle,
     scope: usize,
     root: &Path,
     queue: &Queue,
     cookies: &Mutex<Option<PathBuf>>,
 ) {
-    let mut buffer = vec![0u64; 32 * 1024];
-    let Ok(done) = event() else {
-        queue.push([Heard::Lost { scope }]);
-        return;
-    };
+    let dir = reading.dir.0;
     loop {
-        // SAFETY: an all-zero structure is a valid one, before its event.
-        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
-        ov.hEvent = done.0;
-        let len = u32::try_from(buffer.len() * 8).unwrap_or(u32::MAX);
-        // SAFETY: the buffer, aligned for the records, and its length; the
-        // structure stays in place until the call is done or cancelled,
-        // which is waited for below.
-        let asked = unsafe {
-            ReadDirectoryChangesW(
-                dir.0,
-                buffer.as_mut_ptr().cast::<c_void>(),
-                len,
-                1,
-                CHANGES,
-                std::ptr::null_mut(),
-                &raw mut ov,
-                None,
-            )
-        };
-        if asked == 0 {
-            queue.push([Heard::Lost { scope }]);
-            return;
-        }
-        let waits: [HANDLE; 2] = [stop.0, done.0];
+        let waits: [HANDLE; 2] = [stop.0, reading.done.0];
         // SAFETY: two events of ours, alive for the wait.
         let woken = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, INFINITE) };
         let mut moved = 0u32;
@@ -299,37 +323,35 @@ fn listen(
             // SAFETY: the pending call's own structure, alive until its
             // cancel has landed, which the wait for its result waits for.
             unsafe {
-                CancelIoEx(dir.0, &raw const ov);
-                GetOverlappedResult(dir.0, &raw const ov, &raw mut moved, 1);
+                CancelIoEx(dir, &raw const *reading.ov);
+                GetOverlappedResult(dir, &raw const *reading.ov, &raw mut moved, 1);
             }
             return;
         }
         // SAFETY: the call's own structure, done.
-        if unsafe { GetOverlappedResult(dir.0, &raw const ov, &raw mut moved, 1) } == 0 {
+        let ok = unsafe { GetOverlappedResult(dir, &raw const *reading.ov, &raw mut moved, 1) };
+        if ok == 0 {
             // SAFETY: no argument.
-            if unsafe { GetLastError() } == ERROR_NOTIFY_ENUM_DIR {
-                queue.push([Heard::Overflow { scope }]);
-                continue;
+            if unsafe { GetLastError() } != ERROR_NOTIFY_ENUM_DIR {
+                queue.push([Heard::Lost { scope }]);
+                return;
             }
+            queue.push([Heard::Overflow { scope }]);
+        } else if moved == 0 {
+            // More than the buffer held: dropped.
+            queue.push([Heard::Overflow { scope }]);
+        } else {
+            let cookies = cookies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let bytes = &super::bytemuck(&reading.buffer)[..moved as usize];
+            queue.push(records(bytes, scope, root, cookies.as_deref()));
+        }
+        if !reading.ask() {
             queue.push([Heard::Lost { scope }]);
             return;
         }
-        if moved == 0 {
-            // More than the buffer held: dropped.
-            queue.push([Heard::Overflow { scope }]);
-            continue;
-        }
-        let bytes = super::bytemuck(&buffer);
-        let cookies = cookies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        queue.push(records(
-            &bytes[..moved as usize],
-            scope,
-            root,
-            cookies.as_deref(),
-        ));
     }
 }
 
@@ -442,5 +464,89 @@ mod tests {
         // Cut short: what is whole is said, nothing past the buffer read.
         let cut = &bytes[..bytes.len() - 6];
         assert_eq!(records(cut, 3, root, Some(&cookies)).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod watched {
+    use std::time::Duration;
+
+    use skwird_testkit::Scratch;
+
+    use super::*;
+
+    /// What the watcher hears, read on one thread of its own for as long
+    /// as the receiver is kept: each batch sent as it comes.
+    fn hearing(w: &Arc<Watcher>) -> std::sync::mpsc::Receiver<Vec<Heard>> {
+        let (send, got) = std::sync::mpsc::channel();
+        let w = Arc::clone(w);
+        std::thread::spawn(move || {
+            loop {
+                let mut heard = Vec::new();
+                if w.read(&mut heard).is_err() || send.send(heard).is_err() {
+                    return;
+                }
+            }
+        });
+        got
+    }
+
+    /// Everything heard until `done` holds of it, up to 5 s.
+    fn heard_until(w: &Arc<Watcher>, done: impl Fn(&[Heard]) -> bool) -> Vec<Heard> {
+        let got = hearing(w);
+        let mut all = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(&all) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "{all:?}");
+            if let Ok(heard) = got.recv_timeout(left) {
+                all.extend(heard);
+            }
+        }
+        all
+    }
+    /// A root's tree is heard: an entry made deep in it is named by its
+    /// path below the root.
+    #[test]
+    fn an_entry_made_below_a_root_is_heard_by_its_path() {
+        let s = Scratch::new("watch-root");
+        s.dir(r"root\a\b");
+        let w = Arc::new(Watcher::new(1, 0).unwrap());
+        w.watch_root(4, &s.join("root")).unwrap();
+        // Wine watches a folder of the tree, on its host's inotify, a while
+        // after the first read is asked, and only once the folder was opened
+        // (as the engine's crawl opens each, right after the watch).
+        // Windows records every change in the tree from the first read on,
+        // which `watch_root` asks before it returns.
+        if skwird_testkit::under_wine() {
+            std::thread::sleep(Duration::from_millis(500));
+            for rel in [r"root\a", r"root\a\b"] {
+                let _ = std::fs::read_dir(s.join(rel)).map(Iterator::count);
+            }
+        }
+        s.file(r"root\a\b\made.txt");
+        heard_until(&w, |all| {
+            all.iter().any(
+                |h| matches!(h, Heard::Entry { scope: 4, rel } if rel == Path::new(r"a\b\made.txt")),
+            )
+        });
+    }
+
+    /// A root whose folder is removed says its watch ended: it is heard no
+    /// more, and its root is checked until it is watched again.
+    #[test]
+    fn a_root_removed_says_its_watch_ended() {
+        let s = Scratch::new("watch-lost");
+        s.file(r"root\a\file");
+        let w = Arc::new(Watcher::new(1, 0).unwrap());
+        w.watch_root(2, &s.join("root")).unwrap();
+        s.remove("root");
+        // Wine keeps a removed folder's watch, hearing its entries go and
+        // nothing after: the end is proven on Windows alone.
+        if skwird_testkit::under_wine() {
+            eprintln!("not proven under Wine: a removed root's watch ends");
+            return;
+        }
+        heard_until(&w, |all| all.contains(&Heard::Lost { scope: 2 }));
     }
 }

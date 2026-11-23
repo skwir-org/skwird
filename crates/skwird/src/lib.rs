@@ -21,6 +21,7 @@ pub mod dirs;
 pub mod engine;
 #[cfg(any(target_os = "linux", windows))]
 pub mod live;
+pub mod logon;
 #[cfg(any(target_os = "linux", windows))]
 pub mod memory;
 #[cfg(any(target_os = "linux", windows))]

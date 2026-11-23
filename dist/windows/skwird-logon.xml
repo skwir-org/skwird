@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  skwird, a user's engine for the session on Windows (docs/PLAN.md, phase
+  4, step 6): started at the user's logon by a task of the user's own, as
+  the systemd user unit starts it on Linux (dist/systemd/skwird.service).
+
+  `skwird logon add` registers it for the user running it: its program the
+  skwirdw.exe beside skwird.exe (skwird with no console window, which a
+  task would otherwise open), its user that user's SID, written in UTF-16
+  as Task Scheduler reads it. `skwird logon remove` takes it back. A
+  package may register it the same way.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>skwird, an index of file names kept current: the user's engine for the session.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <!-- In the user's session, as the user, with no more rights. -->
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <!-- One engine per user: a second start does nothing. -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <!-- The session's engine: no time limit ends it. -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <!-- Below normal, as Nice=10 on Linux: a crawl yields to the user. -->
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"{program}"</Command>
+      <Arguments>serve --forever</Arguments>
+    </Exec>
+  </Actions>
+</Task>

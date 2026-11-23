@@ -14,6 +14,7 @@ usage: skwird serve [--system] [--root PATH]... [--idle SECONDS | --forever] [--
        skwird sync [PATH]
        skwird watch [--remove] FOLDER...
        skwird status
+       skwird logon add|remove
 
 serve     the user's engine: it indexes the roots (the home by default),
           answers on its socket, and goes once its last client has been
@@ -25,6 +26,9 @@ sync      prove PATH current now, then say how far it can be trusted
 watch     keep FOLDER live: changes in it heard and applied as they come,
           within the engine's share of watches (--remove: take it back)
 status    what the engine says of itself
+logon     on Windows, start the engine at your logon (add), or no more
+          (remove): a task of yours, running skwirdw.exe, skwird with no
+          console window
 
 The commands that ask start the engine where none answers, unless
 SKWIRD_NO_START is set. SKWIRD_WATCHES sets the most folders an engine
@@ -91,7 +95,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
             }
-            word if parsed.command == "find" && parsed.term.is_none() => {
+            word if matches!(parsed.command.as_str(), "find" | "logon")
+                && parsed.term.is_none() =>
+            {
                 parsed.term = Some(word.to_owned());
             }
             word if parsed.command == "watch" => parsed.folders.push(PathBuf::from(word)),
@@ -102,7 +108,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
     Ok(parsed)
 }
 
-fn main() -> ExitCode {
+// Also `skwirdw.exe`'s, which takes this file as a module on Windows.
+pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse(&args).and_then(|a| run(&a)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -111,6 +118,27 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Start the engine at the user's logon, or no more (Windows).
+#[cfg(windows)]
+fn logon(what: Option<&str>) -> Result<(), String> {
+    let said = match what {
+        Some("add") => skwird::logon::add()?,
+        Some("remove") => skwird::logon::remove()?,
+        _ => return Err("logon takes add or remove".into()),
+    };
+    println!("{said}");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn logon(_: Option<&str>) -> Result<(), String> {
+    Err(
+        "logon is Windows': elsewhere, a service manager starts the engine \
+         (dist/systemd/skwird.service)"
+            .into(),
+    )
 }
 
 /// The folder a command asks about: as given, made absolute and resolved.
@@ -155,6 +183,7 @@ fn print_coverage(c: &Coverage) {
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
         "serve" => serve(args),
+        "logon" => logon(args.term.as_deref()),
         "find" => {
             let term = args.term.clone().ok_or("find takes a term")?;
             let root = folder(args)?;
