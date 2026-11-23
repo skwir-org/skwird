@@ -38,14 +38,17 @@
 #![allow(clippy::cast_possible_truncation)] // Offsets read from a record are bounded by its length, checked.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, ReadFile};
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
 
 use super::journal::{Volume, control};
+use super::{Folder, Item, Root, folder_kind, listed};
 use crate::Time;
+use crate::walk::mount_why;
+use crate::{FileId, FolderStat, Options, Outcome, Watch, Why};
 
 /// A file's reference: its record's number (48 bits) and that record's
 /// sequence number (16), which changes when the record is reused.
@@ -114,6 +117,13 @@ pub struct Decoded {
     /// The unnamed `$DATA`'s size and allocation, where its first part is.
     pub data: Option<(u64, u64)>,
     pub tag: Option<u32>,
+    /// Its reparse tag as a name's attribute keeps it, for a reparse point
+    /// whose data is too large for its record.
+    pub name_tag: Option<u32>,
+    /// For a mount point, whether it mounts a volume (not a folder, as a
+    /// junction does), as its reparse data says: none where the data is not
+    /// in the record, and a mount point is then taken to, and not entered.
+    pub volume: Option<bool>,
     /// Whether it has an `$ATTRIBUTE_LIST`: other records hold some of its
     /// attributes.
     pub listed: bool,
@@ -157,6 +167,8 @@ pub struct Record {
     pub alloc: u64,
     /// Its reparse tag, 0 for none.
     pub tag: u32,
+    /// A mount point that mounts a volume ([`Decoded::volume`]).
+    pub volume: bool,
 }
 
 impl Record {
@@ -259,6 +271,11 @@ fn attribute_into(kind: u32, attribute: &[u8], out: &mut Decoded) -> Result<(), 
                     .map(|b| u16::from_le_bytes([b[0], b[1]])),
                 &mut name,
             );
+            // A reparse point's tag, in the field that holds a file's
+            // extended attributes' size otherwise.
+            if u32_at(v, 0x38).is_some_and(|a| a & FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+                out.name_tag = u32_at(v, 0x3C);
+            }
             out.names.push(Name {
                 parent: u64_at(v, 0).ok_or(Bad::Malformed)?,
                 name,
@@ -284,8 +301,12 @@ fn attribute_into(kind: u32, attribute: &[u8], out: &mut Decoded) -> Result<(), 
             let at = usize::from(u16_at(attribute, 0x20).ok_or(Bad::Malformed)?);
             out.runs = Some(runs(attribute.get(at..).ok_or(Bad::Malformed)?)?);
         }
+        // Its data is what FSCTL_GET_REPARSE_POINT gives: the tag first.
         REPARSE_POINT if resident => {
-            out.tag = Some(u32_at(value()?, 0).ok_or(Bad::Malformed)?);
+            let data = value()?;
+            let tag = u32_at(data, 0).ok_or(Bad::Malformed)?;
+            out.tag = Some(tag);
+            out.volume = Some(super::target_is_volume(data).unwrap_or(true));
         }
         _ => {}
     }
@@ -348,6 +369,11 @@ pub struct Table {
     /// The records not read: torn, or malformed. What they hold is not
     /// known, so the folders holding them are not covered by the table.
     pub unread: Vec<u64>,
+    /// When its read began: a folder changed within a tick of it is read
+    /// again at the next check, as one listed so is.
+    pub read_at: Time,
+    /// Its volume's serial number, every identity's first half.
+    pub serial: u64,
 }
 
 impl Table {
@@ -379,7 +405,10 @@ impl Table {
                     ctime: super::time(standard.ctime),
                     size,
                     alloc,
-                    tag: d.tag.unwrap_or(0),
+                    tag: d.tag.or(d.name_tag).unwrap_or(0),
+                    volume: d
+                        .volume
+                        .unwrap_or(d.tag.or(d.name_tag) == Some(super::TAG_MOUNT_POINT)),
                 },
             );
         }
@@ -396,6 +425,7 @@ impl Table {
             }
             if let Some(tag) = e.tag {
                 base.tag = tag;
+                base.volume = e.volume.unwrap_or(tag == super::TAG_MOUNT_POINT);
             }
         }
         let mut children: HashMap<u64, Vec<(u64, usize)>> = HashMap::new();
@@ -421,6 +451,8 @@ impl Table {
             records,
             children,
             unread,
+            read_at: Time::default(),
+            serial: 0,
         }
     }
 
@@ -460,6 +492,130 @@ impl Table {
             }
         }
         out
+    }
+}
+
+impl Table {
+    /// The entries of the folder `folder`, as a listing gives them.
+    fn items(&self, folder: Reference) -> Vec<Item> {
+        let Some(entries) = self.children.get(&number(folder)) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .map(|(n, i)| {
+                let r = &self.records[n];
+                Item {
+                    name: r.names[*i].name.clone(),
+                    attributes: r.attributes,
+                    tag: r.tag,
+                    id: r.reference,
+                    size: r.size,
+                    alloc: r.alloc,
+                    ctime: r.ctime,
+                    mtime: r.mtime,
+                }
+            })
+            .collect()
+    }
+
+    /// A folder's own facts, as its stat gives them.
+    fn stat_of(&self, record: &Record) -> FolderStat {
+        FolderStat {
+            id: FileId {
+                dev: self.serial,
+                ino: record.reference,
+            },
+            mount: self.serial,
+            ctime: record.ctime,
+            mtime: record.mtime,
+            owner: 0,
+            group: 0,
+            mode: 0,
+        }
+    }
+}
+
+/// Folders read from a volume's file table for a crawl
+/// ([`crate::crawl_by`]), as `windows::read` reads them from their own
+/// listings: the same exclusions, mounts and links, a listing built by the
+/// same `listed`. A folder is found by the identity its parent's listing
+/// gave it, the root by its own.
+///
+/// What the table could not read (its torn records, [`Table::unread`])
+/// is in no listing: the system service follows the volume's journal from
+/// before the table's read, and a record torn by a change being written
+/// is read again once the journal says so.
+pub struct TableReader<'a> {
+    pub table: &'a Table,
+}
+
+impl TableReader<'_> {
+    /// The folder at `rel` below the root, its identity `id` where its
+    /// parent's listing gave it.
+    pub fn read(
+        &self,
+        root: &Root,
+        rel: &Path,
+        id: Option<FileId>,
+        opts: &Options,
+    ) -> (Option<FolderStat>, Outcome, Watch) {
+        let (stat, outcome) = self.folder(root, rel, id, opts);
+        (stat, outcome, Watch::Unasked)
+    }
+
+    fn folder(
+        &self,
+        root: &Root,
+        rel: &Path,
+        id: Option<FileId>,
+        opts: &Options,
+    ) -> (Option<FolderStat>, Outcome) {
+        let not_covered = |stat, why| (stat, Outcome::NotCovered(why));
+        if root.excluded_by_path(rel) {
+            return not_covered(None, Why::Excluded);
+        }
+        if let Some(network) = root.mount_at(rel) {
+            return not_covered(None, mount_why(network));
+        }
+        let id = match id {
+            Some(id) => id,
+            None if rel.as_os_str().is_empty() => root.stat.id,
+            None => return not_covered(None, Why::Gone),
+        };
+        if id.dev != self.table.serial {
+            return not_covered(None, Why::Mount);
+        }
+        let Some(record) = self.table.get(id.ino) else {
+            return not_covered(None, Why::Gone);
+        };
+        let stat = self.table.stat_of(record);
+        if !record.folder {
+            return not_covered(Some(stat), Why::Replaced);
+        }
+        match folder_kind(record.attributes, record.tag, || record.volume) {
+            Folder::Entered => {}
+            Folder::Link => return not_covered(Some(stat), Why::Replaced),
+            Folder::NotCovered(why) => {
+                root.found_mount(rel.to_path_buf(), why == Why::NetworkMount);
+                return not_covered(Some(stat), why);
+            }
+        }
+        if root.exclusions.holds(Some(stat.id), &root.path.join(rel)) {
+            return not_covered(Some(stat), Why::Excluded);
+        }
+        let items = self.table.items(record.reference);
+        let outcome = listed(
+            root,
+            rel,
+            stat,
+            self.table.read_at,
+            items,
+            opts,
+            None,
+            &|item| self.table.get(item.id).is_some_and(|r| r.volume),
+        );
+        (Some(stat), outcome)
     }
 }
 
@@ -529,6 +685,7 @@ impl Volume {
 
     /// Its file table, read whole from the disk.
     pub fn table(&self) -> std::io::Result<Table> {
+        let read_at = Time::now();
         let layout = self.layout()?;
         let record =
             usize::try_from(layout.bytes_per_record).map_err(|_| invalid("a record too large"))?;
@@ -580,7 +737,10 @@ impl Volume {
                 at += len as u64;
             }
         }
-        Ok(Table::of(decoded, unread))
+        let mut table = Table::of(decoded, unread);
+        table.read_at = read_at;
+        table.serial = layout.serial;
+        Ok(table)
     }
 }
 

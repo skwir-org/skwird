@@ -61,12 +61,24 @@ pub(crate) fn mount_why(network: bool) -> Why {
     }
 }
 
-/// A folder waiting to be read.
+/// A folder waiting to be read: its identity where its parent's listing
+/// gave it (none for the folder a crawl starts at, unless given).
 struct Job {
     slot: usize,
     rel: PathBuf,
+    id: Option<FileId>,
     parent: Option<usize>,
 }
+
+/// What reads a folder for a crawl: the system's own read
+/// ([`read_folder_watched`]) unless another is given, as the system
+/// service gives its volume's file table on NTFS (`mft::TableReader`).
+/// Given the folder's path below the root, and its identity where its
+/// parent's listing gave it.
+pub type Reader<'a> = &'a (
+        dyn Fn(&Root, &Path, Option<FileId>, &Options) -> (Option<FolderStat>, Outcome, Watch)
+            + Sync
+    );
 
 /// Folders waiting to be read, and how many are being read: a crawl ends
 /// when none waits and none is read.
@@ -111,6 +123,28 @@ pub fn crawl(
     cancel: &Cancel,
     sink: &(dyn Fn(usize, Crawled) + Sync),
 ) -> Result<Duration, Error> {
+    crawl_by(
+        root,
+        from,
+        None,
+        opts,
+        cancel,
+        sink,
+        &|root, rel, _, opts| read_folder_watched(root, rel, opts),
+    )
+}
+
+/// [`crawl`], each folder read by `reader`, the folder at `from` known as
+/// `id` where given.
+pub fn crawl_by(
+    root: &Root,
+    from: &Path,
+    id: Option<FileId>,
+    opts: &Options,
+    cancel: &Cancel,
+    sink: &(dyn Fn(usize, Crawled) + Sync),
+    reader: Reader<'_>,
+) -> Result<Duration, Error> {
     let start = Instant::now();
     let next_slot = AtomicUsize::new(1);
     let stopped = AtomicBool::new(false);
@@ -119,6 +153,7 @@ pub fn crawl(
             vec![Job {
                 slot: 0,
                 rel: from.to_path_buf(),
+                id,
                 parent: None,
             }],
             0,
@@ -134,7 +169,7 @@ pub fn crawl(
                         queue.done(Vec::new());
                         continue;
                     }
-                    let found = visit(root, job, opts, &next_slot, sink);
+                    let found = visit(root, job, opts, &next_slot, sink, reader);
                     queue.done(found);
                 }
             });
@@ -154,8 +189,9 @@ fn visit(
     opts: &Options,
     next_slot: &AtomicUsize,
     sink: &(dyn Fn(usize, Crawled) + Sync),
+    reader: Reader<'_>,
 ) -> Vec<Job> {
-    let (stat, outcome, watch) = read_folder_watched(root, &job.rel, opts);
+    let (stat, outcome, watch) = reader(root, &job.rel, job.id, opts);
     let mut found = Vec::new();
     if let Outcome::Listed(listing) = &outcome {
         for (name, entry) in listing.iter() {
@@ -182,6 +218,7 @@ fn visit(
                 found.push(Job {
                     slot,
                     rel,
+                    id: Some(entry.id),
                     parent: Some(job.slot),
                 });
             }
@@ -220,14 +257,30 @@ pub fn crawl_below(
     opts: &Options,
     cancel: &Cancel,
 ) -> Result<Crawl, Error> {
+    crawl_below_by(root, from, None, opts, cancel, &|root, rel, _, opts| {
+        read_folder_watched(root, rel, opts)
+    })
+}
+
+/// [`crawl_below`], each folder read by `reader` ([`crawl_by`]), the
+/// folder at `from` known as `id` where given.
+pub fn crawl_below_by(
+    root: &Root,
+    from: &Path,
+    id: Option<FileId>,
+    opts: &Options,
+    cancel: &Cancel,
+    reader: Reader<'_>,
+) -> Result<Crawl, Error> {
     let slots: Mutex<Vec<Option<Crawled>>> = Mutex::new(Vec::new());
-    let took = crawl(root, from, opts, cancel, &|slot, crawled| {
+    let sink = |slot: usize, crawled| {
         let mut slots = slots.lock().unwrap();
         if slots.len() <= slot {
             slots.resize_with(slot + 1, || None);
         }
         slots[slot] = Some(crawled);
-    })?;
+    };
+    let took = crawl_by(root, from, id, opts, cancel, &sink, reader)?;
     let folders = slots
         .into_inner()
         .unwrap()

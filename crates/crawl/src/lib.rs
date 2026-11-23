@@ -52,8 +52,9 @@ pub mod wtf8;
 // (`sys`): opening, listing and stat-ing a folder.
 mod walk;
 pub use walk::{
-    Checked, Crawl, Reuse, Stale, Stored, StoredFolder, check, check_watched, crawl, crawl_all,
-    crawl_below, read_folder, read_folder_reusing, read_folder_watched,
+    Checked, Crawl, Reader, Reuse, Stale, Stored, StoredFolder, check, check_watched, crawl,
+    crawl_all, crawl_below, crawl_below_by, crawl_by, read_folder, read_folder_reusing,
+    read_folder_watched,
 };
 
 #[cfg(target_os = "linux")]

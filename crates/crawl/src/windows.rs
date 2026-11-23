@@ -72,7 +72,7 @@ const DRIVE_REMOTE: u32 = 4;
 /// The reparse tags of what is a link: a symbolic link, a junction or a
 /// volume's mount point (told apart by their target), a link made by
 /// Linux's subsystem, an app's alias.
-const TAG_MOUNT_POINT: u32 = 0xA000_0003;
+pub(crate) const TAG_MOUNT_POINT: u32 = 0xA000_0003;
 const TAG_SYMLINK: u32 = 0xA000_000C;
 const TAG_LX_SYMLINK: u32 = 0xA000_001D;
 const TAG_APPEXECLINK: u32 = 0x8000_001B;
@@ -659,17 +659,17 @@ fn filesystem(handle: &Handle) -> String {
 }
 
 /// An entry as a listing gave it.
-struct Item {
+pub(crate) struct Item {
     /// Its WTF-8.
-    name: Vec<u8>,
-    attributes: u32,
+    pub(crate) name: Vec<u8>,
+    pub(crate) attributes: u32,
     /// Its reparse tag, if it is a reparse point: none on Wine.
-    tag: u32,
-    id: u64,
-    size: u64,
-    alloc: u64,
-    ctime: Time,
-    mtime: Time,
+    pub(crate) tag: u32,
+    pub(crate) id: u64,
+    pub(crate) size: u64,
+    pub(crate) alloc: u64,
+    pub(crate) ctime: Time,
+    pub(crate) mtime: Time,
 }
 
 /// The entries of the folder open as `dir`, `.` and `..` left out. A
@@ -833,8 +833,8 @@ fn folder_kind(attributes: u32, tag: u32, volume: impl FnOnce() -> bool) -> Fold
 }
 
 /// What an entry is, and why it is not covered if it is a folder not to
-/// be entered.
-fn classify(dir: &Handle, item: &Item) -> (Kind, Option<Why>) {
+/// be entered: whether a mount point mounts a volume asked of `volume`.
+fn classify(item: &Item, volume: impl FnOnce() -> bool) -> (Kind, Option<Why>) {
     let folder = item.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     if !folder {
         // A link, or a file: a filter's file (deduplicated, compressed, a
@@ -843,9 +843,7 @@ fn classify(dir: &Handle, item: &Item) -> (Kind, Option<Why>) {
             && folder_kind(item.attributes, item.tag, || false) == Folder::Link;
         return (if link { Kind::Link } else { Kind::File }, None);
     }
-    match folder_kind(item.attributes, item.tag, || {
-        mounts_a_volume(dir, &item.name)
-    }) {
+    match folder_kind(item.attributes, item.tag, volume) {
         Folder::Entered => (Kind::Folder, None),
         Folder::Link => (Kind::Link, None),
         Folder::NotCovered(why) => (Kind::Folder, Some(why)),
@@ -891,7 +889,7 @@ fn is_volume(point: &Handle) -> bool {
 
 /// Whether a mount point's reparse data names a volume (`\??\Volume{`),
 /// not a folder: none if the data cannot be read.
-fn target_is_volume(data: &[u8]) -> Option<bool> {
+pub(crate) fn target_is_volume(data: &[u8]) -> Option<bool> {
     // The tag, the data's length and a reserved field, then the
     // substitute name's offset and length, in bytes from the path buffer
     // at 16.
@@ -957,18 +955,40 @@ pub(crate) fn read(
     if stat.mount != root.stat.mount {
         return not_covered(Some(stat), Why::Mount);
     }
-    let mut items = match list(&handle) {
+    let items = match list(&handle) {
         Ok(items) => items,
         Err(fail) => return not_covered(Some(stat), Why::CutShort(fail.number())),
     };
+    let outcome = listed(root, rel, stat, read_at, items, opts, reuse, &|item| {
+        mounts_a_volume(&handle, &item.name)
+    });
+    (Some(stat), outcome)
+}
+
+/// A folder's listing, of `items` as its read gave them (a listing of its
+/// own, or its volume's file table, `mft`): a folder holding `.private`
+/// not covered; its entries in the order of their names, each classified,
+/// a mount point mounting a volume where `volume` says. Shared by every
+/// way a folder is read, so that each gives the same.
+#[allow(clippy::too_many_arguments)] // What a read knows of its folder, each part distinct.
+pub(crate) fn listed(
+    root: &Root,
+    rel: &Path,
+    stat: FolderStat,
+    read_at: Time,
+    mut items: Vec<Item>,
+    opts: &Options,
+    reuse: Option<Reuse<'_>>,
+    volume: &dyn Fn(&Item) -> bool,
+) -> Outcome {
     if items.iter().any(|i| i.name == b".private") {
-        return not_covered(Some(stat), Why::Private);
+        return Outcome::NotCovered(Why::Private);
     }
     let again = read_at < stat.ctime.plus(opts.tick);
     items.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let mut listing = Listing::new(stat, read_at, again);
     for item in &items {
-        let (kind, not_entered) = classify(&handle, item);
+        let (kind, not_entered) = classify(item, || volume(item));
         let id = FileId {
             dev: stat.id.dev,
             ino: item.id,
@@ -1007,7 +1027,7 @@ pub(crate) fn read(
             },
         );
     }
-    (Some(stat), Outcome::Listed(listing))
+    Outcome::Listed(listing)
 }
 
 /// Whether the stored folder at `rel` is current: opened beneath the

@@ -474,3 +474,100 @@ fn flush(letter: &str) {
         CloseHandle(handle);
     }
 }
+
+/// What a crawl found, folder by folder, in terms both ways of reading a
+/// folder must agree on: each folder's identity and times, or why it is
+/// not covered; each entry's name, kind and identity, and each file's size
+/// and last write.
+type Summary = BTreeMap<PathBuf, (Option<(FileId, Time, Time)>, Result<Vec<Seen>, Why>)>;
+type Seen = (Vec<u8>, crate::Kind, FileId, Option<(u64, Time)>);
+
+fn summary(crawl: &crate::Crawl) -> Summary {
+    crawl
+        .folders
+        .iter()
+        .map(|f| {
+            let stat = f.stat.map(|s| (s.id, s.ctime, s.mtime));
+            let outcome = match &f.outcome {
+                Outcome::NotCovered(why) => Err(*why),
+                Outcome::Listed(listing) => Ok(listing
+                    .iter()
+                    .map(|(name, e)| {
+                        let file = e
+                            .attrs
+                            .filter(|_| e.kind == crate::Kind::File)
+                            .map(|a| (a.size, a.mtime));
+                        (name.to_vec(), e.kind, e.id, file)
+                    })
+                    .collect()),
+            };
+            (f.rel.clone(), (stat, outcome))
+        })
+        .collect()
+}
+
+/// A crawl of a folder read from its volume's file table is the crawl
+/// read from its folders' own listings, on a real NTFS volume: the same
+/// folders, the same identities and times, the same left out and why (a
+/// `.private` folder, an exclusion, a junction and links not entered), the
+/// same entries. On a test machine's volume alone (`skwird_testkit::ntfs`).
+#[test]
+fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    let s = Scratch::under(&volume, "mft-crawl");
+    s.write(r"tree\a b\été 2026\notes 1.txt", b"hello");
+    s.write(r"tree\a b\big.bin", &vec![7u8; 300_000]);
+    s.hard_link(
+        r"tree\a b\second name.txt",
+        r"tree\a b\été 2026\notes 1.txt",
+    );
+    s.link(r"tree\a b\lien", "été 2026");
+    s.link(r"tree\a b\lien vers big", "big.bin");
+    s.file(r"tree\journal intime\.private");
+    s.file(r"tree\journal intime\entrée.txt");
+    s.write(r"tree\clés\key.pem", b"k");
+    s.deep(r"tree\deep", 12, "un dossier");
+    let made = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+                s.join(r"tree\jonction").display(),
+                s.join(r"tree\a b").display()
+            ),
+        ])
+        .status()
+        .unwrap();
+    assert!(made.success(), "the junction");
+    let (exclusions, refused) = crate::Exclusions::resolve([s.join(r"tree\clés")]);
+    assert!(refused.is_empty(), "{refused:?}");
+    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
+    flush(&letter);
+    let root = crate::Root::open(&s.join("tree"), exclusions).unwrap();
+    let opts = Options {
+        threads: 2,
+        ..Options::default()
+    };
+    let cancel = crate::Cancel::default();
+    let walked = crate::crawl_all(&root, &opts, &cancel).unwrap();
+    let table = Volume::open(OsStr::new(&letter)).unwrap().table().unwrap();
+    let reader = TableReader { table: &table };
+    let read = crate::crawl_below_by(
+        &root,
+        Path::new(""),
+        None,
+        &opts,
+        &cancel,
+        &|r, rel, id, o| reader.read(r, rel, id, o),
+    )
+    .unwrap();
+    let (walked, read) = (summary(&walked), summary(&read));
+    let why = |p: &str| read.get(Path::new(p)).map(|f| f.1.clone().err());
+    assert_eq!(why("journal intime"), Some(Some(Why::Private)));
+    assert_eq!(why("clés"), Some(Some(Why::Excluded)));
+    assert!(read.len() > 12, "{read:?}");
+    assert_eq!(read, walked);
+}
