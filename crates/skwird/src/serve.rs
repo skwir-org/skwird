@@ -611,9 +611,7 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                 // cancelled.
                 continue;
             }
-            // The system service hears every folder already: nothing to
-            // keep, and the folders asked are said kept.
-            Ask::Watch { add, .. } if shared.system => Answer::Watching { folders: add },
+            Ask::Watch { add, .. } if shared.system => watching_all(shared, add, who),
             Ask::Changes { root, since } => changes(shared, commands, &root, since, who),
             Ask::Exclude { add, remove } => {
                 let (reply, answer) = channel();
@@ -642,9 +640,7 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
                     reply,
                 });
                 match asked.ok().and_then(|()| answer.recv().ok()) {
-                    Some(folders) => Answer::Watching {
-                        folders: folders.iter().map(|p| WirePath::of(p)).collect(),
-                    },
+                    Some(watching) => Answer::Watching(watching),
                     None => failure("internal", "the engine is going"),
                 }
             }
@@ -656,6 +652,32 @@ fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Comman
     for q in queries {
         let _ = q.join();
     }
+}
+
+/// `watch` at the system service, which hears every folder already:
+/// nothing kept, no share, and each of `folders` said as its coverage is,
+/// to this asker.
+fn watching_all(shared: &Shared, folders: Vec<WirePath>, asker: &Asker) -> Answer {
+    let kept = |path: WirePath| {
+        let state = match coverage(shared, &path, asker).map(|c| c.names) {
+            Ok(wire::Proof::Live(since)) => wire::Keeping::Live(since),
+            Ok(wire::Proof::NotCovered(why)) => {
+                wire::Keeping::NotLive(wire::NotLive::NotCovered(why))
+            }
+            Ok(_) => wire::Keeping::NotLive(wire::NotLive::Pending),
+            Err(_) => wire::Keeping::NotLive(wire::NotLive::Missing),
+        };
+        wire::Kept {
+            path,
+            state,
+            folders: None,
+            within: None,
+        }
+    };
+    Answer::Watching(wire::Watching {
+        folders: folders.into_iter().map(kept).collect(),
+        share: None,
+    })
 }
 
 fn sync(shared: &Shared, commands: &Sender<Command>, root: &WirePath, asker: &Asker) -> Answer {

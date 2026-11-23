@@ -189,7 +189,8 @@ fn an_overflow_ends_live_and_the_check_after_brings_it_back() {
 }
 
 /// A subtree with a folder past the budget of watches is short of live,
-/// says why, and is never claimed live.
+/// says why, is never claimed live, and takes none of the budget: what it
+/// got is let go of, for the subtrees kept after it.
 #[test]
 fn a_budget_reached_keeps_a_subtree_from_live() {
     let s = Scratch::new("live-budget");
@@ -197,7 +198,7 @@ fn a_budget_reached_keeps_a_subtree_from_live() {
         s.dir(f);
     }
     let (k, w) = watching(&s, &["docs"], 2);
-    assert_eq!(w.watching(), 2);
+    assert_eq!(w.watching(), 0);
     let live = &k.live()[0];
     assert_eq!(live.short, Some(Watch::Budget));
     assert_eq!(live.since, None);

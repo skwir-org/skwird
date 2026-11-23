@@ -221,6 +221,10 @@ impl Watcher {
         match self.never {}
     }
 
+    pub fn budget(&self) -> usize {
+        match self.never {}
+    }
+
     pub fn set_scopes(&self, _: Vec<PathBuf>) {
         match self.never {}
     }

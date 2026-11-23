@@ -262,7 +262,7 @@ pub enum Command {
         client: String,
         add: Vec<PathBuf>,
         remove: Vec<PathBuf>,
-        reply: Sender<Vec<PathBuf>>,
+        reply: Sender<skwird_protocol::Watching>,
     },
     /// The mount table changed ([`crate::live::listen`]).
     Mounts,
@@ -704,13 +704,14 @@ pub fn writer(
 /// The folders registered, as the system resolves them; one not there yet
 /// is left out until it is registered again.
 fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = registrations
+    // In the order they were registered, the first of each kept: the
+    // share of watches fills in that order.
+    let mut seen = std::collections::HashSet::new();
+    registrations
         .iter()
         .filter_map(|r| std::fs::canonicalize(r.path.to_path()).ok())
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// Open root `i`, at `path`: its index read back, or crawled; published
@@ -946,7 +947,7 @@ impl Writing<'_> {
                     self.unfound.clear();
                     self.apply_scopes();
                 }
-                let _ = reply.send(theirs(&self.kept_live, &client, None));
+                let _ = reply.send(self.watching(&client));
             }
             // What finding what was heard takes is charged to the account
             // (`live::DUTY`), as applying it is.
@@ -1204,6 +1205,100 @@ impl Writing<'_> {
         }
     }
 
+    /// What `client` keeps live, in the order it kept it, each folder live
+    /// or why not, and the share of watches every client's folders fill.
+    fn watching(&self, client: &str) -> skwird_protocol::Watching {
+        use skwird_protocol::{Keeping, Kept, Share, Watching};
+        // Every client's folders, as resolved, each with the path it was
+        // first kept by: what may hold one of this client's.
+        let mut seen = std::collections::HashSet::new();
+        let all: Vec<(PathBuf, WirePath)> = self
+            .kept_live
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    std::fs::canonicalize(r.path.to_path()).ok()?,
+                    r.path.clone(),
+                ))
+            })
+            .filter(|(p, _)| seen.insert(p.clone()))
+            .collect();
+        let folders = self
+            .kept_live
+            .iter()
+            .filter(|r| r.client == client && r.uid.is_none())
+            .map(|r| {
+                let resolved = std::fs::canonicalize(r.path.to_path()).ok();
+                let (state, folders) = match &resolved {
+                    Some(p) => self.keeping(p),
+                    None => (Keeping::NotLive(skwird_protocol::NotLive::Missing), None),
+                };
+                // Held by another folder kept live: it takes no watch of
+                // its own.
+                let within = resolved.as_ref().and_then(|p| {
+                    all.iter()
+                        .filter(|(o, _)| o != p && p.starts_with(o))
+                        .filter(|(o, _)| matches!(self.keeping(o).0, Keeping::Live(_)))
+                        .max_by_key(|(o, _)| o.components().count())
+                        .map(|(_, path)| path.clone())
+                });
+                Kept {
+                    path: r.path.clone(),
+                    state,
+                    folders,
+                    within,
+                }
+            })
+            .collect();
+        let (used, size) = self
+            .watcher
+            .as_ref()
+            .map_or((0, 0), |w| (w.watching(), w.budget()));
+        Watching {
+            folders,
+            share: Some(Share {
+                used: used as u64,
+                size: size as u64,
+            }),
+        }
+    }
+
+    /// Whether the folder at `path`, as resolved, kept live, is, or why
+    /// not, and the folders its watches take.
+    fn keeping(&self, path: &Path) -> (skwird_protocol::Keeping, Option<u64>) {
+        use skwird_crawl::Watch;
+        use skwird_protocol::{Keeping, NotLive, Proof, Why};
+        let Some((i, rel)) = self.shared.locate(path) else {
+            return (Keeping::NotLive(NotLive::NotCovered(Why::Outside)), None);
+        };
+        let Some(keeper) = self.keepers.get(i).and_then(Option::as_ref) else {
+            return (Keeping::NotLive(NotLive::Pending), None);
+        };
+        let index = keeper.index();
+        let folders = index.folder_at(&rel).map(|f| index.folders_below(f));
+        if self.watcher.is_none() {
+            // No watcher to be had: the system's limit of instances.
+            return (Keeping::NotLive(NotLive::WatchLimit), folders);
+        }
+        let live = keeper.live().iter().find(|l| l.scope == rel);
+        let not_live = match live.map(|l| (l.since, l.short)) {
+            Some((Some(since), None)) => {
+                return (Keeping::Live(crate::convert::time(since)), folders);
+            }
+            Some((_, Some(Watch::Budget))) => NotLive::Share,
+            Some((_, Some(Watch::Limit))) => NotLive::WatchLimit,
+            Some((_, Some(Watch::Failed(errno)))) => NotLive::Failed(errno),
+            _ => match crate::coverage::coverage_at(index, keeper.root().path(), &rel) {
+                None => NotLive::Missing,
+                Some(c) => match c.names {
+                    Proof::NotCovered(why) => NotLive::NotCovered(why),
+                    _ => NotLive::Pending,
+                },
+            },
+        };
+        (Keeping::NotLive(not_live), folders)
+    }
+
     /// Every root made to hold to the exclusions as they are now: the
     /// defaults, the user's file read again, what clients registered. A
     /// folder they name is purged at once. Gives back the roots whose
@@ -1284,7 +1379,14 @@ fn changed(
     add: &[PathBuf],
     remove: &[PathBuf],
 ) -> bool {
-    let mut changed = false;
+    // What is taken back first, then what is added, after what is kept:
+    // a client puts a folder ahead of others by taking them back and
+    // adding them again after it.
+    let before = all.len();
+    all.retain(|r| {
+        !(r.client == client && r.uid == uid && remove.iter().any(|p| WirePath::of(p) == r.path))
+    });
+    let mut changed = all.len() != before;
     for path in add.iter().filter(|p| p.is_absolute()) {
         let r = Registration {
             client: client.to_owned(),
@@ -1296,11 +1398,7 @@ fn changed(
             changed = true;
         }
     }
-    let before = all.len();
-    all.retain(|r| {
-        !(r.client == client && r.uid == uid && remove.iter().any(|p| WirePath::of(p) == r.path))
-    });
-    changed | (all.len() != before)
+    changed
 }
 
 /// What `client` registered, for user `uid` at the system service.

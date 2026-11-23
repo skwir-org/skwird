@@ -631,6 +631,22 @@ its ADR-050). Its sessions build them, in its repository:
 
   The fifth is phase 4's: on Windows, an engine started opens no
   console window.
+
+  The same day, skwir's settings gained a list of the folders kept live
+  and a meter of the share, and asked `watching` to say more. It now
+  says, for each folder, live or why not, the folders its watches take,
+  and what holds it; and the share's use and size (DESIGN's open
+  question 2). Three things changed in how the share fills:
+  - it fills in the order folders were kept, where it went by path;
+  - a folder that does not fit lets go of what it got, where it kept
+    it, starving the folders kept after it;
+  - a folder left short is tried again once room is let go of, where
+    it waited for a restart.
+
+  The test of it found a bug from phase 2. With the share spent, a
+  folder watched already, read again on an event, was refused its
+  watch, so the folder it was kept for was no longer live. A folder
+  watched keeps its watch now, the share spent or not.
 - **D. The harvest's enumeration and journal** (skwir's ADR-089):
   `changes` from step 4, live from phase 2. A `changes` that a check
   found holds no write made in place: such a write changes no folder's

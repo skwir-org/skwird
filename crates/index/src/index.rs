@@ -478,6 +478,21 @@ impl Index {
         out
     }
 
+    /// The folders read below `folder`, itself among them: the watches its
+    /// subtree takes. A folder not covered is not read, so not watched.
+    pub fn folders_below(&self, folder: FolderId) -> u64 {
+        let mut count = 0;
+        let mut next = vec![folder];
+        while let Some(f) = next.pop() {
+            if matches!(self.state_of(f), Some(crate::block::State::NotCovered(_))) {
+                continue;
+            }
+            count += 1;
+            next.extend(self.subfolders(f));
+        }
+        count
+    }
+
     /// The folders `folder` holds, from its block alone.
     pub fn subfolders(&self, folder: FolderId) -> Vec<FolderId> {
         let Some(loc) = self.tree.loc(folder) else {

@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use skwird_client::{Client, Find};
-use skwird_protocol::{Match, NameTerm, Proof, Query, Why, WirePath};
+use skwird_protocol::{Keeping, Match, NameTerm, NotLive, Proof, Query, Why, WirePath};
 use skwird_testkit::{Scratch, in_namespace, reference_walk};
 
 /// A scratch home, its XDG folders, and the engines run in it.
@@ -573,7 +573,12 @@ fn a_watched_folder_is_answered_live_without_a_sync() {
     let home = env.home();
     let docs = home.join("docs");
     let mut c = env.client("a test");
-    assert_eq!(c.watch(&[&docs], &[]).unwrap(), vec![docs.clone()]);
+    let watching = c.watch(&[&docs], &[]).unwrap();
+    let kept: Vec<PathBuf> = watching.folders.iter().map(|k| k.path.to_path()).collect();
+    assert_eq!(kept, vec![docs.clone()]);
+    // 41 folders: docs and its 40.
+    assert_eq!(watching.folders[0].folders, Some(41));
+    assert!(matches!(watching.folders[0].state, Keeping::Live(_)));
     assert!(is_live(&mut c, &docs));
     assert!(is_live(&mut c, &docs.join("d05")));
     assert!(!is_live(&mut c, &home), "the home is checked only");
@@ -690,6 +695,91 @@ fn a_folder_past_the_budget_is_checked_not_live() {
     assert!(is_live(&mut c, &few), "a folder within the budget is live");
 }
 
+/// `watching` says of each folder a client keeps, in the order it kept
+/// them, whether it is live or why not, the folders its watches take, and
+/// what holds it; and the share. The share fills in that order: a folder
+/// that does not fit is checked and takes none of it, so one kept after
+/// it may fit; and once room is let go of, it is tried again.
+#[test]
+fn watching_says_each_folder_live_or_why_and_the_share() {
+    let mut env = Env::new("engine-watching");
+    let home = env.home();
+    // 3, 11 and 2 folders; a share of 13 holds the first and the last,
+    // then, once the first is let go of, the second and the last.
+    for f in ["small/a/x", "small/b/x", "later/a/x"] {
+        env.s.file(home.join(f));
+    }
+    for i in 0..10 {
+        env.s.file(home.join(format!("big/f{i}/x")));
+    }
+    env.engine_with(30, &[("SKWIRD_WATCHES", "13")]);
+    let (small, big, later) = (home.join("small"), home.join("big"), home.join("later"));
+    let mut c = env.client("a test");
+    let states = |w: &skwird_protocol::Watching| -> Vec<(PathBuf, Keeping, Option<u64>)> {
+        w.folders
+            .iter()
+            .map(|k| (k.path.to_path(), k.state, k.folders))
+            .collect()
+    };
+    let w = c.watch(&[&small, &big, &later], &[]).unwrap();
+    let s = states(&w);
+    assert_eq!(
+        s.iter().map(|(p, ..)| p.clone()).collect::<Vec<_>>(),
+        vec![small.clone(), big.clone(), later.clone()],
+        "in the order kept"
+    );
+    assert!(matches!(s[0].1, Keeping::Live(_)), "{s:?}");
+    assert_eq!(s[1].1, Keeping::NotLive(NotLive::Share), "{s:?}");
+    assert!(matches!(s[2].1, Keeping::Live(_)), "it fits: {s:?}");
+    assert_eq!(
+        (s[0].2, s[1].2, s[2].2),
+        (Some(3), Some(11), Some(2)),
+        "{s:?}"
+    );
+    let share = w.share.unwrap();
+    assert_eq!(
+        (share.used, share.size),
+        (5, 13),
+        "big holds none: {share:?}"
+    );
+    assert!(!is_live(&mut c, &big), "checked");
+
+    // Within a folder kept live: no watch of its own.
+    let inner = small.join("a");
+    let w = c.watch(&[&inner], &[]).unwrap();
+    let kept = w
+        .folders
+        .iter()
+        .find(|k| k.path.to_path() == inner)
+        .unwrap();
+    assert!(matches!(kept.state, Keeping::Live(_)), "{kept:?}");
+    assert_eq!(
+        kept.within.as_ref().map(WirePath::to_path),
+        Some(small.clone())
+    );
+    assert_eq!(w.share.unwrap().used, 5);
+
+    // Room let go of: what was left short is tried again, and fits.
+    let w = c.watch(&[], &[&small, &inner]).unwrap();
+    let s = states(&w);
+    assert!(matches!(s[0].1, Keeping::Live(_)), "big fits now: {s:?}");
+    assert_eq!(s[0].0, big);
+    assert_eq!(w.share.unwrap().used, 13);
+    assert!(is_live(&mut c, &big));
+
+    // Outside every root, and no folder at all.
+    let outside = env.s.dir("elsewhere");
+    let missing = home.join("not there");
+    let w = c.watch(&[&outside, &missing], &[]).unwrap();
+    let s = states(&w);
+    assert_eq!(
+        s[2].1,
+        Keeping::NotLive(NotLive::NotCovered(Why::Outside)),
+        "{s:?}"
+    );
+    assert_eq!(s[3].1, Keeping::NotLive(NotLive::Missing), "{s:?}");
+}
+
 /// What a client watches is kept across a restart: the next engine
 /// watches it before any client asks again. Taken back, it is checked.
 #[test]
@@ -707,7 +797,7 @@ fn watched_folders_are_kept_across_a_restart() {
     env.engine(30);
     let mut c = env.client("a test");
     wait_for(5, "live after the restart", || is_live(&mut c, &docs));
-    assert_eq!(c.watch(&[], &[&docs]).unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(c.watch(&[], &[&docs]).unwrap().folders, Vec::new());
     assert!(!is_live(&mut c, &docs));
 }
 

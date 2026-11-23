@@ -278,9 +278,27 @@ fn watch(args: &Args) -> Result<(), String> {
         (&named, &[])
     };
     let watching = c.watch(add, remove).map_err(|e| e.to_string())?;
-    for folder in &watching {
-        let coverage = c.coverage(folder).map_err(|e| e.to_string())?;
-        println!("{}: {}", folder.display(), said(coverage.names));
+    for kept in &watching.folders {
+        let state = match kept.state {
+            skwird_protocol::Keeping::Live(since) => said(Proof::Live(since)),
+            skwird_protocol::Keeping::NotLive(why) => format!("not live: {why:?}"),
+        };
+        let folders = kept
+            .folders
+            .map(|n| format!(", {n} folders"))
+            .unwrap_or_default();
+        let within = kept
+            .within
+            .as_ref()
+            .map(|w| format!(", within {}", w.to_path().display()))
+            .unwrap_or_default();
+        println!(
+            "{}: {state}{folders}{within}",
+            kept.path.to_path().display()
+        );
+    }
+    if let Some(share) = watching.share {
+        println!("watches: {} of {}", share.used, share.size);
     }
     Ok(())
 }

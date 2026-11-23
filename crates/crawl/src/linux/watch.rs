@@ -139,6 +139,11 @@ impl Watcher {
         self.lock().watching.len()
     }
 
+    /// The most folders it watches.
+    pub fn budget(&self) -> usize {
+        self.lock().budget
+    }
+
     /// Watch, from now on, the folders read within these subtrees, given
     /// as the system resolves them. Watches made stay until taken back.
     pub fn set_scopes(&self, scopes: Vec<PathBuf>) {
@@ -164,15 +169,22 @@ impl Watcher {
         if !state.scopes.iter().any(|s| path.starts_with(s)) {
             return Watch::Unasked;
         }
-        if state.watching.len() >= state.budget {
-            return Watch::Budget;
-        }
         let handle = format!("/proc/self/fd/{}", rustix::fd::AsRawFd::as_raw_fd(&dir));
+        let full = state.watching.len() >= state.budget;
         match inotify::add_watch(&self.fd, handle.as_str(), mask()) {
+            // Watched already, it costs nothing more, the budget spent or
+            // not: a folder read again keeps its watch. Refused so, a live
+            // folder read again once the budget was spent was no longer.
+            Ok(wd) if state.watching.contains(&wd) => Watch::Watched(wd),
+            Ok(wd) if full => {
+                let _ = inotify::remove_watch(&self.fd, wd);
+                Watch::Budget
+            }
             Ok(wd) => {
                 state.watching.insert(wd);
                 Watch::Watched(wd)
             }
+            Err(Errno::NOSPC) if full => Watch::Budget,
             Err(Errno::NOSPC) => Watch::Limit,
             Err(e) => Watch::Failed(e.raw_os_error()),
         }
@@ -508,6 +520,18 @@ mod tests {
             .count();
         let over = all.values().filter(|w| **w == Watch::Budget).count();
         assert_eq!((watched, over), (3, 2), "{all:?}");
+        assert_eq!(w.watching(), 3);
+        // Read again, the budget spent, a folder watched keeps its watch,
+        // and one not watched is still refused.
+        let again = watches(&crawled(&s, &w, &[""], &[]));
+        for (rel, watch) in &all {
+            assert_eq!(
+                matches!(again[rel], Watch::Watched(_)),
+                matches!(watch, Watch::Watched(_)),
+                "{rel:?}: {watch:?}, then {:?}",
+                again[rel]
+            );
+        }
         assert_eq!(w.watching(), 3);
     }
 

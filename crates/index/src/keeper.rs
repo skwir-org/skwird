@@ -88,6 +88,18 @@ pub struct Live {
     pub short: Option<Watch>,
     /// Whether every folder in it has been watched and compared.
     installed: bool,
+    /// Left short, the watches the watcher held once it let go of its
+    /// own: tried again once it holds fewer ([`Keeper::retry_short`]).
+    short_at: Option<usize>,
+}
+
+/// What `more` did, added to what `done` says.
+fn absorb(done: &mut Refreshed, more: Refreshed) {
+    done.records.extend(more.records);
+    done.watches.extend(more.watches);
+    done.checked += more.checked;
+    done.reread += more.reread;
+    done.crawled += more.crawled;
 }
 
 /// The index of one root, its log, and where they are kept.
@@ -369,8 +381,12 @@ impl Keeper {
             .collect();
         for scope in pending {
             self.install(&scope, cancel)?;
+            self.release_short();
         }
         self.prune();
+        // Folders gone let go of their watches: room, maybe, for what was
+        // left short.
+        self.retry_short(cancel)?;
         self.publish_live();
         Ok(done)
     }
@@ -392,23 +408,81 @@ impl Keeper {
         self.live.retain(|l| scopes.contains(&l.scope));
         let held: Vec<PathBuf> = self.live.iter().map(|l| l.scope.clone()).collect();
         self.unwatch_where(|path| !held.iter().any(|s| path.starts_with(s)));
-        let mut done = Refreshed::default();
+        // Before what is new: what was kept before it comes first.
+        let mut done = self.retry_short(cancel)?;
         for scope in scopes.iter().filter(|s| !held.contains(s)) {
             self.live.push(Live {
                 scope: scope.clone(),
                 since: None,
                 short: None,
                 installed: false,
+                short_at: None,
             });
             let installed = self.install(scope, cancel)?;
-            done.records.extend(installed.records);
-            done.watches.extend(installed.watches);
-            done.checked += installed.checked;
-            done.reread += installed.reread;
-            done.crawled += installed.crawled;
+            absorb(&mut done, installed);
+            self.release_short();
         }
         self.prune();
         self.publish_live();
+        Ok(done)
+    }
+
+    /// Let go of the watches the subtrees left short hold alone: the
+    /// share goes to the subtrees kept after them, a subtree that does not
+    /// fit taking none of it. Each is noted with the watches held after,
+    /// to be tried again once fewer are.
+    fn release_short(&mut self) {
+        let Some(watcher) = self.opts.watcher.clone() else {
+            return;
+        };
+        let fresh = |l: &Live| l.short.is_some() && l.short_at.is_none();
+        let short: Vec<PathBuf> = self
+            .live
+            .iter()
+            .filter(|l| fresh(l))
+            .map(|l| l.scope.clone())
+            .collect();
+        if short.is_empty() {
+            return;
+        }
+        let whole: Vec<PathBuf> = self
+            .live
+            .iter()
+            .filter(|l| l.short.is_none())
+            .map(|l| l.scope.clone())
+            .collect();
+        self.unwatch_where(|path| {
+            short.iter().any(|s| path.starts_with(s)) && !whole.iter().any(|w| path.starts_with(w))
+        });
+        let held = watcher.watching();
+        for live in self.live.iter_mut().filter(|l| fresh(l)) {
+            live.short_at = Some(held);
+        }
+    }
+
+    /// Try again, in their order, the subtrees left short, where watches
+    /// were let go of since: by a subtree no longer kept, here or in
+    /// another root, or by folders gone.
+    fn retry_short(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
+        let mut done = Refreshed::default();
+        let Some(watcher) = self.opts.watcher.clone() else {
+            return Ok(done);
+        };
+        let again: Vec<PathBuf> = self
+            .live
+            .iter()
+            .filter(|l| l.short_at.is_some_and(|at| watcher.watching() < at))
+            .map(|l| l.scope.clone())
+            .collect();
+        for scope in again {
+            if let Some(live) = self.live.iter_mut().find(|l| l.scope == scope) {
+                live.short = None;
+                live.short_at = None;
+                live.since = None;
+            }
+            absorb(&mut done, self.install(&scope, cancel)?);
+            self.release_short();
+        }
         Ok(done)
     }
 
@@ -442,6 +516,7 @@ impl Keeper {
             since: Some(since),
             short: None,
             installed: true,
+            short_at: None,
         }];
         self.publish_live();
     }

@@ -1496,6 +1496,8 @@ machine alone, a third of before.
     kept as its exclusions are (open question 2). An event in one is
     applied by reading its folder again: every name its listing holds,
     stat-ing the entries its events named and what is new (DESIGN 8).
+    It is answered `watching {folders, share}`: each folder kept, live
+    or why not, and the share of watches (open question 2).
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
@@ -1573,6 +1575,27 @@ machine alone, a third of before.
      past the share is checked, not live (a watch limit reached). A
      watch per folder for a whole home does not fit: phase 1 counted
      866,584 folders against a limit of 524,288.
+
+     How the share fills (asked by skwir's session on 2026-11-23, for a
+     meter of it in skwir's settings):
+     - in the order folders were kept, every client's, the earliest
+       first. A `watch` takes back what it removes first, then keeps what
+       it adds, in its order, after the rest. So a client puts a folder
+       ahead of others by removing them and adding them again after it;
+     - a folder that does not fit takes none of the share: the watches
+       it got are let go of, so a folder kept after it may still fit;
+     - once watches are let go of, by a folder no longer kept in any
+       root or by folders removed, the folders left short are tried
+       again, in their order;
+     - a folder watched already keeps its watch when read again, the
+       share spent or not;
+     - `watching` says of each of the client's folders, in that order,
+       whether it is live or why not (the share spent, the system's
+       limit, a watch that failed, not covered and why, no folder
+       there, pending); the folders its watches take; the folder kept
+       live that holds it, if any; and the share's use and size. At the
+       system service, which keeps no folder and has no share, it says
+       of each folder asked whether its coverage is live.
 3. **A user's exclusions:** answered on 2026-11-11 (5). The user's
    client registers folders over the socket, with the user's
    credentials, and the service keeps them per user, each applying only
