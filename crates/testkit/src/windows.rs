@@ -346,11 +346,16 @@ pub struct User {
 }
 
 impl User {
-    /// The user `name`, made with `password`.
+    /// The user `name`, made with `password`: of 14 characters at most,
+    /// past which `net user` asks whether to go on, and fails unanswered.
     pub fn make(name: &'static str, password: &'static str) -> User {
         assert!(
             throwaway(),
             "a user is made on a machine of the tests' own alone"
+        );
+        assert!(
+            password.chars().count() <= 14,
+            "net user would ask: a shorter password"
         );
         let made = std::process::Command::new("net")
             .args(["user", name, password, "/add"])

@@ -671,7 +671,7 @@ fn a_pipe_another_user_made_is_refused() {
         return;
     }
     let s = Scratch::new("win-squat");
-    let user = skwird_testkit::User::make("skwird-squat", "Sk-1wird.squat!");
+    let user = skwird_testkit::User::make("skwird-squat", "Sk-1wird.sq!");
     let folder = s.dir("squatter");
     skwird_testkit::grant(&folder, user.name);
     let name = format!("skwird-test-squat-{}", std::process::id());

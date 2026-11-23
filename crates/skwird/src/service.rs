@@ -8,9 +8,10 @@
 //!   started again after a failure, and keeps only the privileges it
 //!   uses, as `CapabilityBoundingSet` keeps a Linux service's.
 //! - **Run** under the manager's dispatcher: running once its pipe is
-//!   made; told to stop, it says it stopped and ends, as a Linux service
-//!   ends on `SIGTERM`. Run from a console, it serves in the foreground:
-//!   by hand, or in a test, as an administrator.
+//!   made; told to stop, it says it stopped, and the process ends once the
+//!   dispatcher gives back, as a Linux service ends on `SIGTERM`. Run from
+//!   a console, it serves in the foreground: by hand, or in a test, as an
+//!   administrator.
 //! - **Its folders**, in the machine's program data, are its alone and
 //!   the administrators' ([`make_own`]): any user may make a folder there,
 //!   and one another user made is refused.
@@ -212,15 +213,18 @@ unsafe extern "system" fn service_main(_: u32, _: *mut windows_sys::core::PWSTR)
 }
 
 /// What the manager asks of the service: to stop, as the machine shuts
-/// down or an administrator asks, it says it stopped and ends. Its index
+/// down or an administrator asks, it says it stopped. The dispatcher then
+/// gives back ([`dispatch`]), and the process ends with `main`: its index
 /// is saved as each change is, and read back at the next start, as after
-/// a Linux service's `SIGTERM`.
+/// a Linux service's `SIGTERM`. Ended here, the process would end before
+/// the manager's call returned, which then fails (`ERROR_BROKEN_PIPE`),
+/// as a runner's first stop did.
 unsafe extern "system" fn control(code: u32, _: u32, _: *mut c_void, _: *mut c_void) -> u32 {
     match code {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             log("stopped by the service manager");
             report(SERVICE_STOPPED, 0);
-            std::process::exit(0);
+            NO_ERROR
         }
         SERVICE_CONTROL_INTERROGATE => NO_ERROR,
         _ => ERROR_CALL_NOT_IMPLEMENTED,
