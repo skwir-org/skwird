@@ -6,9 +6,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
 
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir, ResolveFlags, Statx, StatxFlags};
@@ -17,10 +14,11 @@ use rustix::io::Errno;
 mod btrfs;
 pub mod watch;
 
-use crate::mounts::{self, Mount, Table, component};
+use crate::mounts::{self, Mount, Table};
+use crate::walk::{Reuse, Stale, StoredFolder, mount_why};
 use crate::{
-    Attrs, Cancel, Crawled, Entry, Error, Exclusions, FileId, FolderStat, Kind, Listing, Options,
-    Outcome, Time, Watch, Why,
+    Attrs, Entry, Error, Exclusions, FileId, FolderStat, Kind, Listing, Options, Outcome, Time,
+    Watch, Why,
 };
 
 /// The longest path the system resolves at once, its final NUL included.
@@ -217,11 +215,17 @@ impl Root {
 
     /// Whether a mount starts at `rel`, and if so whether it reaches a
     /// network.
-    fn mount_at(&self, rel: &Path) -> Option<bool> {
+    pub(crate) fn mount_at(&self, rel: &Path) -> Option<bool> {
         if self.below.is_empty() {
             return None;
         }
         self.below.get(rel).copied()
+    }
+
+    /// Where mounts start below it, and whether each reaches a network:
+    /// what the check stats no folder at or below.
+    pub(crate) fn points(&self) -> Vec<(PathBuf, bool)> {
+        self.below.iter().map(|(p, &n)| (p.clone(), n)).collect()
     }
 
     /// Whether `rel` or a folder above it, below the root, is excluded by
@@ -429,15 +433,7 @@ fn names_of(fd: impl AsFd) -> Result<Names, i32> {
     Ok(names)
 }
 
-/// Read the folder at `rel` below the root: its stat first, then its
-/// entries, each stat-ed through its handle (all of them with
-/// [`Options::attrs`], folders alone without). Gives its stat where it
-/// was taken, and what came of it.
-pub fn read_folder(root: &Root, rel: &Path, opts: &Options) -> (Option<FolderStat>, Outcome) {
-    read(root, rel, opts, &mut Watch::Unasked, None)
-}
-
-fn read(
+pub(crate) fn read(
     root: &Root,
     rel: &Path,
     opts: &Options,
@@ -565,339 +561,9 @@ fn read(
     (Some(stat), Outcome::Listed(listing))
 }
 
-/// An entry kept from what was read before, by its name and the inode
-/// and kind a listing gives it: none to stat it.
-pub type Reuse<'a> = &'a dyn Fn(&[u8], u64, Kind) -> Option<Entry>;
-
-/// [`read_folder_watched`], every entry `reuse` gives taken as it is, not
-/// stat-ed: a live folder read again stats what an event named, and what
-/// is new, alone (DESIGN 8). Its names are still every name its listing
-/// holds.
-pub fn read_folder_reusing(
+pub(crate) fn verdict(
     root: &Root,
-    rel: &Path,
-    opts: &Options,
-    reuse: Reuse<'_>,
-) -> (Option<FolderStat>, Outcome, Watch) {
-    let mut watch = Watch::Unasked;
-    let (stat, outcome) = read(root, rel, opts, &mut watch, Some(reuse));
-    (stat, outcome, watch)
-}
-
-/// [`read_folder`], and what came of watching the folder: with
-/// [`Options::watcher`], a folder within its subtrees is watched through
-/// its handle before its entries are read.
-pub fn read_folder_watched(
-    root: &Root,
-    rel: &Path,
-    opts: &Options,
-) -> (Option<FolderStat>, Outcome, Watch) {
-    let mut watch = Watch::Unasked;
-    let (stat, outcome) = read(root, rel, opts, &mut watch, None);
-    (stat, outcome, watch)
-}
-
-fn mount_why(network: bool) -> Why {
-    if network {
-        Why::NetworkMount
-    } else {
-        Why::Mount
-    }
-}
-
-/// A folder waiting to be read.
-struct Job {
-    slot: usize,
-    rel: PathBuf,
-    parent: Option<usize>,
-}
-
-/// Folders waiting to be read, and how many are being read: a crawl ends
-/// when none waits and none is read.
-struct Queue {
-    state: Mutex<(Vec<Job>, usize)>,
-    turn: Condvar,
-}
-
-impl Queue {
-    fn next(&self) -> Option<Job> {
-        let mut state = self.state.lock().unwrap();
-        loop {
-            if let Some(job) = state.0.pop() {
-                state.1 += 1;
-                return Some(job);
-            }
-            if state.1 == 0 {
-                return None;
-            }
-            state = self.turn.wait(state).unwrap();
-        }
-    }
-
-    fn done(&self, found: Vec<Job>) {
-        let mut state = self.state.lock().unwrap();
-        state.1 -= 1;
-        state.0.extend(found);
-        self.turn.notify_all();
-    }
-}
-
-/// Read the folder at `from` below the root, and every folder below it,
-/// on [`Options::threads`] threads. Each folder reached is handed to
-/// `sink` with its slot, once: the folder at `from` has slot 0, and every
-/// other names its parent's. A folder not read (excluded, a mount, a
-/// failed read) is handed as not covered, with why. Gives how long it
-/// took.
-pub fn crawl(
-    root: &Root,
-    from: &Path,
-    opts: &Options,
-    cancel: &Cancel,
-    sink: &(dyn Fn(usize, Crawled) + Sync),
-) -> Result<Duration, Error> {
-    let start = Instant::now();
-    let next_slot = AtomicUsize::new(1);
-    let stopped = AtomicBool::new(false);
-    let queue = Queue {
-        state: Mutex::new((
-            vec![Job {
-                slot: 0,
-                rel: from.to_path_buf(),
-                parent: None,
-            }],
-            0,
-        )),
-        turn: Condvar::new(),
-    };
-    std::thread::scope(|scope| {
-        for _ in 0..opts.threads.max(1) {
-            scope.spawn(|| {
-                while let Some(job) = queue.next() {
-                    if cancel.is_cancelled() {
-                        stopped.store(true, Ordering::Relaxed);
-                        queue.done(Vec::new());
-                        continue;
-                    }
-                    let found = visit(root, job, opts, &next_slot, sink);
-                    queue.done(found);
-                }
-            });
-        }
-    });
-    if stopped.into_inner() {
-        return Err(Error::Cancelled);
-    }
-    Ok(start.elapsed())
-}
-
-/// Read one folder, hand it to the sink, and give the folders below it
-/// to read next. Those not to be read are handed to the sink at once.
-fn visit(
-    root: &Root,
-    job: Job,
-    opts: &Options,
-    next_slot: &AtomicUsize,
-    sink: &(dyn Fn(usize, Crawled) + Sync),
-) -> Vec<Job> {
-    let (stat, outcome, watch) = read_folder_watched(root, &job.rel, opts);
-    let mut found = Vec::new();
-    if let Outcome::Listed(listing) = &outcome {
-        for (name, entry) in listing.iter() {
-            if entry.kind != Kind::Folder {
-                continue;
-            }
-            let rel = job.rel.join(component(name));
-            let slot = next_slot.fetch_add(1, Ordering::Relaxed);
-            let not_read = |why| Crawled {
-                rel: rel.clone(),
-                parent: Some(job.slot),
-                stat: None,
-                outcome: Outcome::NotCovered(why),
-                watch: Watch::Unasked,
-            };
-            if let Some(network) = root.mount_at(&rel) {
-                sink(slot, not_read(mount_why(network)));
-            } else if root.exclusions.holds(Some(entry.id), &root.path.join(&rel)) {
-                sink(slot, not_read(Why::Excluded));
-            } else {
-                found.push(Job {
-                    slot,
-                    rel,
-                    parent: Some(job.slot),
-                });
-            }
-        }
-    }
-    sink(
-        job.slot,
-        Crawled {
-            rel: job.rel,
-            parent: job.parent,
-            stat,
-            outcome,
-            watch,
-        },
-    );
-    found
-}
-
-/// Every folder a crawl of the whole root reached, by slot: the root
-/// first.
-pub struct Crawl {
-    pub folders: Vec<Crawled>,
-    pub took: Duration,
-}
-
-/// Crawl the whole root, and keep every folder reached.
-pub fn crawl_all(root: &Root, opts: &Options, cancel: &Cancel) -> Result<Crawl, Error> {
-    crawl_below(root, Path::new(""), opts, cancel)
-}
-
-/// Crawl the folder at `from` below the root and every folder below it,
-/// and keep every folder reached, by slot: `from` first.
-pub fn crawl_below(
-    root: &Root,
-    from: &Path,
-    opts: &Options,
-    cancel: &Cancel,
-) -> Result<Crawl, Error> {
-    let slots: Mutex<Vec<Option<Crawled>>> = Mutex::new(Vec::new());
-    let took = crawl(root, from, opts, cancel, &|slot, crawled| {
-        let mut slots = slots.lock().unwrap();
-        if slots.len() <= slot {
-            slots.resize_with(slot + 1, || None);
-        }
-        slots[slot] = Some(crawled);
-    })?;
-    let folders = slots
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .map(|c| c.expect("a crawl hands every slot it gives"))
-        .collect();
-    Ok(Crawl { folders, took })
-}
-
-/// A folder as the index stored it, for the check: its path is kept in
-/// [`Stored`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StoredFolder {
-    pub id: FileId,
-    pub ctime: Time,
-    /// Read it again whatever its times say: it was read within a tick of
-    /// its last change, or its read failed.
-    pub again: bool,
-}
-
-/// The folders an index stored, for the check, numbered as they were
-/// given. Their paths below the root are kept end to end in one buffer:
-/// a check of a million folders makes no allocation for each, which the
-/// allocator would keep once freed (`docs/DESIGN.md`, decision 10).
-#[derive(Clone, Debug, Default)]
-pub struct Stored {
-    paths: Vec<u8>,
-    /// Each folder, with where its path ends.
-    folders: Vec<(usize, StoredFolder)>,
-}
-
-impl Stored {
-    /// Room for `folders` folders whose paths take about `bytes` in all,
-    /// made at once: one large allocation, which the allocator gives back
-    /// whole once freed, where a buffer grown by doubling leaves the
-    /// smaller ones behind in the heap.
-    pub fn with_capacity(folders: usize, bytes: usize) -> Stored {
-        Stored {
-            paths: Vec::with_capacity(bytes),
-            folders: Vec::with_capacity(folders),
-        }
-    }
-
-    /// The folder at `rel` below the root.
-    pub fn push(&mut self, rel: &Path, folder: StoredFolder) {
-        self.paths.extend_from_slice(rel.as_os_str().as_bytes());
-        self.folders.push((self.paths.len(), folder));
-    }
-
-    pub fn len(&self) -> usize {
-        self.folders.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.folders.is_empty()
-    }
-
-    /// The `i`th folder's path below the root.
-    pub fn rel(&self, i: usize) -> &Path {
-        let start = if i == 0 { 0 } else { self.folders[i - 1].0 };
-        Path::new(OsStr::from_bytes(&self.paths[start..self.folders[i].0]))
-    }
-
-    pub fn folder(&self, i: usize) -> StoredFolder {
-        self.folders[i].1
-    }
-}
-
-/// Why the check says a folder is to be read again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stale {
-    /// Its change time is not the one stored: its entries changed.
-    Changed,
-    /// Its path leads to another folder, or to no folder (a link, a file).
-    Replaced,
-    Gone,
-    /// It was stored to be read again.
-    Again,
-    /// A folder above it may no longer be searched.
-    Denied,
-    /// A mount starts at it or above it now.
-    Mount,
-    /// A network mount starts at it or above it now.
-    NetworkMount,
-    Failed(i32),
-}
-
-/// What a check found.
-pub struct Checked {
-    /// The folders to read again, by their place in what was checked, in
-    /// that order.
-    pub stale: Vec<(usize, Stale)>,
-    pub took: Duration,
-}
-
-/// Prove the stored folders current where nothing watched: each folder
-/// stat-ed by its path, its identity, mount and change time compared with
-/// what was stored, on [`Options::threads`] threads. A folder at or below
-/// a mount point the root's table holds is not stat-ed: read the table
-/// again first ([`Root::reread_mounts`]). A path longer than the system
-/// resolves is stat-ed through its parent's handle.
-pub fn check(
-    root: &Root,
-    stored: &Stored,
-    opts: &Options,
-    cancel: &Cancel,
-) -> Result<Checked, Error> {
-    let start = Instant::now();
-    let points: Vec<(&PathBuf, bool)> = root.below.iter().map(|(p, &n)| (p, n)).collect();
-    let stale = Mutex::new(Vec::new());
-    shared(stored.len(), opts.threads, cancel, |i| {
-        if let Some(why) = verdict(root, &points, stored.rel(i), stored.folder(i)) {
-            stale.lock().unwrap().push((i, why));
-        }
-    });
-    if cancel.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-    let mut stale = stale.into_inner().unwrap();
-    stale.sort_unstable_by_key(|&(i, _)| i);
-    Ok(Checked {
-        stale,
-        took: start.elapsed(),
-    })
-}
-
-fn verdict(
-    root: &Root,
-    points: &[(&PathBuf, bool)],
+    points: &[(PathBuf, bool)],
     rel: &Path,
     stored: StoredFolder,
 ) -> Option<Stale> {
@@ -924,46 +590,9 @@ fn verdict(
     }
 }
 
-/// The check, each folder watched first ([`Options::watcher`]): opened
-/// by its path beneath the root, watched through its handle, then its
-/// identity, mount and change time compared through that same handle. A
-/// change made before the watch moves its change time; one made after is
-/// heard. Gives each folder's watch beside the verdicts. Slower than
-/// [`check`], which stats by path: an install pays it once.
-pub fn check_watched(
+pub(crate) fn verdict_watched(
     root: &Root,
-    stored: &Stored,
-    opts: &Options,
-    cancel: &Cancel,
-) -> Result<(Checked, Vec<Watch>), Error> {
-    let start = Instant::now();
-    let points: Vec<(&PathBuf, bool)> = root.below.iter().map(|(p, &n)| (p, n)).collect();
-    let stale = Mutex::new(Vec::new());
-    let watches = Mutex::new(vec![Watch::Unasked; stored.len()]);
-    shared(stored.len(), opts.threads, cancel, |i| {
-        let (why, watch) = verdict_watched(root, &points, stored.rel(i), stored.folder(i), opts);
-        if let Some(why) = why {
-            stale.lock().unwrap().push((i, why));
-        }
-        watches.lock().unwrap()[i] = watch;
-    });
-    if cancel.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-    let mut stale = stale.into_inner().unwrap();
-    stale.sort_unstable_by_key(|&(i, _)| i);
-    Ok((
-        Checked {
-            stale,
-            took: start.elapsed(),
-        },
-        watches.into_inner().unwrap(),
-    ))
-}
-
-fn verdict_watched(
-    root: &Root,
-    points: &[(&PathBuf, bool)],
+    points: &[(PathBuf, bool)],
     rel: &Path,
     stored: StoredFolder,
     opts: &Options,
@@ -1017,26 +646,17 @@ fn stat_path(root: &Root, rel: &Path) -> rustix::io::Result<Statx> {
         .and_then(|fd| rustix::fs::statx(&fd, name, AtFlags::SYMLINK_NOFOLLOW, mask()))
 }
 
-/// Run `each` on every index below `len`, shared by `threads` threads in
-/// runs of 256, until done or cancelled.
-fn shared(len: usize, threads: usize, cancel: &Cancel, each: impl Fn(usize) + Sync) {
-    const RUN: usize = 256;
-    let next = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..threads.max(1) {
-            scope.spawn(|| {
-                while !cancel.is_cancelled() {
-                    let from = next.fetch_add(RUN, Ordering::Relaxed);
-                    if from >= len {
-                        break;
-                    }
-                    for i in from..(from + RUN).min(len) {
-                        each(i);
-                    }
-                }
-            });
-        }
-    });
+/// A name's bytes as a path component, as the listing gave them.
+pub(crate) use crate::mounts::component;
+
+/// `path`'s bytes, put at the end of `buf`: as the system names it.
+pub(crate) fn push_path(buf: &mut Vec<u8>, path: &Path) {
+    buf.extend_from_slice(path.as_os_str().as_bytes());
+}
+
+/// The path `bytes` name, as [`push_path`] put them.
+pub(crate) fn path_of(bytes: &[u8]) -> std::borrow::Cow<'_, Path> {
+    std::borrow::Cow::Borrowed(Path::new(OsStr::from_bytes(bytes)))
 }
 
 /// A filesystem's name by its `statfs` magic.

@@ -46,24 +46,38 @@ pub mod acl;
 pub mod exclude;
 pub mod fanotify;
 pub mod mounts;
+pub mod wtf8;
+
+// What every system does alike (`walk`), and what each does its own way
+// (`sys`): opening, listing and stat-ing a folder.
+mod walk;
+pub use walk::{
+    Checked, Crawl, Reuse, Stale, Stored, StoredFolder, check, check_watched, crawl, crawl_all,
+    crawl_below, read_folder, read_folder_reusing, read_folder_watched,
+};
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+use linux as sys;
+#[cfg(target_os = "linux")]
 pub use linux::watch::{Heard, Watcher};
 #[cfg(target_os = "linux")]
-pub use linux::{
-    Checked, Crawl, Reuse, Root, Stale, Stored, StoredFolder, check, check_watched, crawl,
-    crawl_all, crawl_below, filesystem_name, read_folder, read_folder_reusing, read_folder_watched,
-};
+pub use linux::{Root, filesystem_name};
 
 #[cfg(not(target_os = "linux"))]
 mod other;
 #[cfg(not(target_os = "linux"))]
-pub use other::{
-    Checked, Crawl, Heard, Reuse, Root, Stale, Stored, StoredFolder, Watcher, check, check_watched,
-    crawl, crawl_all, crawl_below, read_folder, read_folder_reusing, read_folder_watched,
-};
+use other as sys;
+#[cfg(not(target_os = "linux"))]
+pub use other::Root;
+
+// No watcher but Linux's yet (rule 7): Windows' comes with phase 4,
+// macOS's with phase 5.
+#[cfg(not(target_os = "linux"))]
+mod unwatched;
+#[cfg(not(target_os = "linux"))]
+pub use unwatched::{Heard, Watcher};
 
 pub use exclude::Exclusions;
 

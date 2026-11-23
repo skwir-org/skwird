@@ -799,9 +799,9 @@ fn apply(
                 let kept = Cell::new(0);
                 let (found, outcome, watch) = match named.get(i).copied().flatten() {
                     Some(touched) => {
-                        read_named(index, &old, root, stored.rel(i), opts, touched, &kept)
+                        read_named(index, &old, root, &stored.rel(i), opts, touched, &kept)
                     }
-                    None => read_folder_watched(root, stored.rel(i), opts),
+                    None => read_folder_watched(root, &stored.rel(i), opts),
                 };
                 if watch != Watch::Unasked {
                     done.watches.push((folder, watch));

@@ -11,6 +11,7 @@ use std::time::Duration;
 use skwird_testkit::{Scratch, in_namespace, reference_walk};
 
 use super::*;
+use crate::{Cancel, Crawl, Stale, Stored, StoredFolder, check, crawl_all, read_folder};
 
 /// Every entry a crawl listed, by its path below the root: its kind, its
 /// identity and, for a file, its size.
