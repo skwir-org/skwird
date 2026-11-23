@@ -33,8 +33,10 @@ if [ ! -d "$base/prefix" ]; then
   tools/wine-run wineserver --wait
 fi
 # Every link Wine made in it leads into the tests' folder.
-outside=$(find "$base/prefix/drive_c" -type l -printf '%l\n' |
-  grep -v "^$base/" | grep -vc '^\.\./' || true)
+# Each resolved from its own folder: a relative link is judged by where
+# it leads.
+outside=$(find "$base/prefix/drive_c" -type l -print0 | xargs -0 -r readlink -m |
+  grep -vc "^$base/" || true)
 if [ "$outside" != 0 ]; then
   echo "tools/wine-tests: $outside links in Wine's prefix lead out of $base: remove it and run again" >&2
   exit 1
