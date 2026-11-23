@@ -555,9 +555,12 @@ mod tests {
         assert_eq!(absolute(Some(OsString::new())), None);
         assert_eq!(absolute(Some("state".into())), None);
         assert_eq!(absolute(Some("./state".into())), None);
-        assert_eq!(
-            absolute(Some("/home/someone/.local/state".into())),
-            Some(PathBuf::from("/home/someone/.local/state"))
-        );
+        // Absolute as each system has it.
+        let state = if cfg!(windows) {
+            r"C:\Users\someone\state"
+        } else {
+            "/home/someone/.local/state"
+        };
+        assert_eq!(absolute(Some(state.into())), Some(PathBuf::from(state)));
     }
 }

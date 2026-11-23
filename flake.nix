@@ -93,20 +93,36 @@
         '';
         doCheck = false;
       };
+
+      # Windows' tests, built with MinGW and run under Wine
+      # (tools/wine-tests, docs/PLAN.md phase 4): Wine is x86_64 Linux's
+      # alone in nixpkgs.
+      mingw = pkgs.pkgsCross.mingwW64;
+      withWine = stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isx86_64;
     in {
       # The C compiler that links comes with mkShell's stdenv.
-      devShells.default = pkgs.mkShell {
-        nativeBuildInputs = [
-          rustToolchain
-          pkgs.shellcheck # tools/measure.sh
-          pkgs.jq # tools/vm/root-tests
-        ];
-        RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-        RUST_BACKTRACE = "1";
-        shellHook = ''
-          echo "skwird dev shell: $(rustc --version)"
-        '';
-      };
+      devShells.default = pkgs.mkShell ({
+          nativeBuildInputs =
+            [
+              rustToolchain
+              pkgs.shellcheck # tools/measure.sh
+              pkgs.jq # tools/vm/root-tests
+            ]
+            ++ lib.optionals withWine [
+              mingw.stdenv.cc
+              pkgs.wineWow64Packages.stable
+            ];
+          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          RUST_BACKTRACE = "1";
+          shellHook = ''
+            echo "skwird dev shell: $(rustc --version)"
+          '';
+        }
+        // lib.optionalAttrs withWine {
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "x86_64-w64-mingw32-gcc";
+          # Rust's std for windows-gnu links MinGW's winpthreads.
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw.windows.pthreads}/lib";
+        });
 
       formatter = pkgs.nixpkgs-fmt;
 

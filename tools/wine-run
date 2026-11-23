@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run a Windows program under Wine as tools/wine-tests sets it up:
+# cargo's runner for the Windows tests, never run by hand.
+#
+# Wine is given a HOME of its own and no XDG folders, so the links it
+# makes for Documents, Desktop and the like lead into the tests' folder,
+# never to its user's own; no display, so it shows nothing; and neither
+# of its installers (Mono, Gecko), which would ask.
+set -euo pipefail
+base=${SKWIRD_WINE:?tools/wine-run is run by tools/wine-tests}
+
+exec env -u DISPLAY -u WAYLAND_DISPLAY \
+  -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_CACHE_HOME -u XDG_STATE_HOME \
+  HOME="$base/home" WINEPREFIX="$base/prefix" WINEDEBUG=-all \
+  WINEDLLOVERRIDES="winemenubuilder.exe=d;mscoree=d;mshtml=d" \
+  wine "$@"

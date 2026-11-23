@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# The workspace's tests, built for Windows and run under Wine
+# (docs/PLAN.md, phase 4, step 1). Run it in the flake's development
+# shell, which gives MinGW's linker, Wine, and what cargo needs of them.
+#
+#   tools/wine-tests [cargo test's arguments]
+#
+# Wine runs in a prefix of the tests' own (~/.cache/skwird-tests/wine)
+# through tools/wine-run, cargo's runner here, which gives it a HOME and
+# XDG folders of its own: Wine links a prefix's Documents, Desktop and
+# the like to its HOME's, and no test may reach its user's own (AGENTS.md).
+# Whatever Wine made, a link out of that folder stops the tests.
+#
+# What passes here passes against Wine's answers, not Windows': Wine's
+# files are the host's, never NTFS (docs/PLAN.md, phase 4).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+for tool in wine x86_64-w64-mingw32-gcc; do
+  if ! command -v "$tool" > /dev/null; then
+    echo "tools/wine-tests: no $tool: run it in the flake's development shell (nix develop)" >&2
+    exit 2
+  fi
+done
+
+base="$HOME/.cache/skwird-tests/wine"
+mkdir -p "$base/home"
+export SKWIRD_WINE="$base"
+
+# The prefix, made once, before any test runs in it.
+if [ ! -d "$base/prefix" ]; then
+  tools/wine-run wineboot --init
+  tools/wine-run wineserver --wait
+fi
+# Every link Wine made in it leads into the tests' folder.
+outside=$(find "$base/prefix/drive_c" -type l -printf '%l\n' |
+  grep -v "^$base/" | grep -vc '^\.\./' || true)
+if [ "$outside" != 0 ]; then
+  echo "tools/wine-tests: $outside links in Wine's prefix lead out of $base: remove it and run again" >&2
+  exit 1
+fi
+
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER="$PWD/tools/wine-run" \
+  cargo test --workspace --target x86_64-pc-windows-gnu "$@"

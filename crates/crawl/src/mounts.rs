@@ -223,16 +223,19 @@ pub fn network(fstype: &str, source: &OsStr) -> bool {
 }
 
 /// `path` as the system names it, told from its spelling alone: doubled
-/// and trailing slashes and `.` dropped. `None` if it is not absolute or
-/// holds `..`, which only reading the path could resolve.
+/// and trailing separators and `.` dropped, a Windows path's prefix (its
+/// drive or share) kept. `None` if it is not absolute or holds `..`, which
+/// only reading the path could resolve.
 pub fn lexical(path: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
-            Component::RootDir => out.push("/"),
+            // The first component alone, as `components` gives it.
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(c),
             Component::Normal(name) => out.push(name),
             Component::CurDir => {}
-            Component::ParentDir | Component::Prefix(_) => return None,
+            Component::ParentDir => return None,
         }
     }
     path.is_absolute().then_some(out)
@@ -348,6 +351,7 @@ this line is not a mount
         assert_eq!(id("/etc"), Some(22));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_is_named_as_the_system_names_it() {
         let p = |s: &str| lexical(Path::new(s));
@@ -355,5 +359,23 @@ this line is not a mount
         assert_eq!(p("/a/./b"), Some(PathBuf::from("/a/b")));
         assert_eq!(p("/a/../b"), None);
         assert_eq!(p("a/b"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_is_named_as_the_system_names_it() {
+        let p = |s: &str| lexical(Path::new(s));
+        assert_eq!(p(r"C:\a\\b\"), Some(PathBuf::from(r"C:\a\b")));
+        assert_eq!(p(r"C:\a\.\b"), Some(PathBuf::from(r"C:\a\b")));
+        assert_eq!(p("C:/a/b"), Some(PathBuf::from(r"C:\a\b")));
+        assert_eq!(
+            p(r"\\server\share\a\"),
+            Some(PathBuf::from(r"\\server\share\a"))
+        );
+        assert_eq!(p(r"C:\a\..\b"), None);
+        assert_eq!(p(r"a\b"), None);
+        // Below the current drive's root: which drive, only the process
+        // knows.
+        assert_eq!(p(r"\a"), None);
     }
 }

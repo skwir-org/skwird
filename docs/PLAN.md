@@ -1573,6 +1573,100 @@ it; phase 4, under Wine, if nothing of phase 3 is left.
   (`FSCTL_QUERY_USN_JOURNAL`). Otherwise the check runs (DESIGN 2).
 - Tried under Wine as far as Wine answers.
 
+### Steps
+
+Begun on 2026-11-23, while skwir's session builds its provider (step B,
+above).
+
+1. **Wine, for the tests** (done on 2026-11-23).
+   - The development shell gains MinGW's cross compiler and Wine (from
+     nixpkgs). `tools/wine-tests` builds the workspace's tests for
+     `x86_64-pc-windows-gnu` and runs them under Wine. The gate runs it.
+   - At first, 37 tests run there and pass, the protocol's, the index's,
+     the crawl's and the client's: whatever needs no folder read yet.
+     Two had taken Unix's paths for every system's:
+     - the client's test of XDG folders named `/home/...` as absolute;
+     - `mounts::lexical` refused every path with a prefix (`C:`), so
+       every Windows path. It now keeps the prefix, tested on both.
+
+     The rest is `cfg(target_os = "linux")` until steps 2 to 5 give it
+     Windows' code.
+   - Wine runs in a prefix of its own under `~/.cache/skwird-tests/wine`,
+     with a `HOME` of its own there. Wine links a prefix's Documents,
+     Desktop and the like to its user's home folders, and no test may
+     reach the user's own.
+   - What Wine is not, so what its tests cannot prove:
+     - it is not NTFS: its files are the host's;
+     - its file ids are the host's inodes;
+     - its `ReadDirectoryChangesW` runs over the host's inotify;
+     - it has no change journal and no file table to read.
+
+     Those wait for a Windows machine (DESIGN's open question 7).
+2. **The walk** (`skwird_crawl`, Windows).
+   - A folder is opened by a handle relative to its parent's
+     (`NtCreateFile` with the parent as its root directory), never
+     through a reparse point. A link, a junction and a volume mounted in
+     a folder are not crossed, as a link or a mount is not on Linux.
+   - It is listed in batches through that handle
+     (`GetFileInformationByHandleEx`, `FileIdExtdDirectoryInfo`): each
+     entry's name, kind, file id, size and times, with no open per
+     entry.
+   - A file's identity is its volume's serial and its file id.
+   - Paths of any length (`\\?\`).
+   - Private folders and exclusions as on Linux.
+   - The test kit runs on Windows (`Scratch` under the user's local
+     application data, the reference walk), and the crawl's tests run
+     on both systems against it.
+3. **The check.** Each folder's identity and change time are compared
+   with what was stored, the time read through the folder's own handle:
+   on NTFS, the copy in its parent's listing may lag. Whether NTFS's
+   folder times can serve so is open question 7. Wine answers it for
+   its own files only.
+4. **The engine on Windows.** The engine's modules are compiled on
+   every system, what is Linux's behind `cfg`:
+   - its folders (`%LOCALAPPDATA%\skwird`);
+   - one engine per user (a lock);
+   - the transport: a named pipe, `\\.\pipe\skwird-<SID>`, whose
+     security descriptor is the user's alone (DESIGN, Protocol);
+   - the client finding it, and starting `skwird.exe` with no console
+     window, from a folder it holds nothing busy in;
+   - `skwird find`, `coverage`, `sync` and `status`.
+
+   It is tested under Wine as the Linux engine's tests test it.
+5. **Live** (`ReadDirectoryChangesW`).
+   - One handle per root watches its whole tree, read on a thread of
+     its own.
+   - Unlike inotify, it needs no watch per folder. So a user's engine on
+     Windows answers every root live, not only the folders its clients
+     register (DESIGN 2 is to say so).
+   - A notification whose buffer overflowed (`ERROR_NOTIFY_ENUM_DIR`, or
+     no entries) lowers the root's coverage at once. A check after it
+     brings live back.
+   - The sync barrier's cookie, as on Linux.
+   - The handle holds the root's folder open, which AGENTS.md's "Hold
+     nothing of a filesystem between reads" forbids elsewhere. Opened to
+     share reading, writing and deletion, it stops no rename or
+     removal. It is let go of when its volume is about to be removed
+     (`RegisterDeviceNotification`'s query to remove), then opened
+     again.
+6. **A logon task** (DESIGN 1): the user's engine started at logon by a
+   task of the user's, its definition in `dist/windows/`.
+7. **The service.**
+   - The file table is read whole (`FSCTL_ENUM_USN_DATA`).
+   - The change journal is followed (`FSCTL_READ_USN_JOURNAL`) and
+     caught up after a restart. Its position is used only where the
+     journal's id is the same and the position within its bounds
+     (DESIGN 2).
+   - Each asker is answered what they could list, checked while
+     impersonating the pipe's client (DESIGN 4).
+   - A service account.
+
+   Wine has no journal. Its parsing is tested on records of the test's
+   making, and the whole on a Windows machine.
+8. **Measured,** on a Windows machine when one is at hand: the user's
+   choice of which. Until then, Wine's figures are labelled as Wine's,
+   never as Windows'.
+
 ## Phase 5: macOS
 
 - `getattrlistbulk` and FSEvents, from fsearch:

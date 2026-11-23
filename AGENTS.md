@@ -124,6 +124,15 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   them there in about 15 s; the gate runs it (`--no-machine` skips it).
   The machine gives them an ext4 filesystem and a btrfs one mounted
   through a subvolume (`m.ext4`, `m.btrfs`, its subvolumes `a` and `b`).
+- Windows' tests run under Wine. `tools/wine-tests`, run in the flake's
+  development shell, builds the workspace's tests for
+  `x86_64-pc-windows-gnu` and runs them in a Wine prefix of their own,
+  under `~/.cache/skwird-tests/wine`, with a `HOME` of its own there.
+  The gate runs it (`--no-wine` skips it). Never run `wine` by hand
+  with the user's `HOME`: Wine links a prefix's Documents, Desktop and
+  Downloads to the user's own folders. A test that passes there passes
+  against Wine's answers, not NTFS's. A path in a test is absolute as
+  its system has it: `/home/...` is not absolute on Windows.
 - Assert what an answer holds, not merely that it parses.
 
 ## Shell hygiene

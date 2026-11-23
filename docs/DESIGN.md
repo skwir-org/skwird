@@ -1233,6 +1233,15 @@ Linux, macOS and Windows:
 - Windows is tried under Wine as far as Wine goes.
 - macOS is compiled only, until someone with a Mac helps.
 
+**As built** (phase 4, step 1):
+- The gate lints the workspace for Windows and macOS, and runs its
+  tests for Windows under Wine (`tools/wine-tests`). MinGW links them,
+  in a prefix of the tests' own whose links lead nowhere else.
+- Wine's files are the host's, never NTFS. So what the tests prove
+  under Wine is skwird's code against Wine's answers. NTFS's folder
+  times, its file ids and its change journal wait for a Windows
+  machine (open question 7).
+
 ### 10. Idle is idle, and nothing leaves the machine
 
 There is no polling loop: the engine sleeps until the system notifies
