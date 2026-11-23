@@ -72,9 +72,9 @@ use windows as sys;
 #[cfg(windows)]
 pub use windows::Root;
 #[cfg(windows)]
-pub use windows::journal;
-#[cfg(windows)]
 pub use windows::watch::{Heard, Watcher};
+#[cfg(windows)]
+pub use windows::{journal, mft};
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod other;

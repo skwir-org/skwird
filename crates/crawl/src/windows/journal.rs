@@ -235,7 +235,7 @@ impl Table {
 }
 
 /// A volume, opened itself: administrators alone may open one.
-pub struct Volume(Handle);
+pub struct Volume(pub(crate) Handle);
 
 impl Volume {
     /// The volume at `volume` (`C:`, or a volume's GUID path).
@@ -290,7 +290,12 @@ fn open_volume(volume: &OsStr) -> std::io::Result<Handle> {
 
 /// One control call on the volume: `input` given, the bytes written to
 /// `output` given back.
-fn control<T>(volume: &Handle, code: u32, input: &T, output: &mut [u64]) -> std::io::Result<usize> {
+pub(super) fn control<T>(
+    volume: &Handle,
+    code: u32,
+    input: &T,
+    output: &mut [u64],
+) -> std::io::Result<usize> {
     let mut written = 0u32;
     // SAFETY: the input, its size; the output buffer, aligned, and its
     // length in bytes; the count written ours. Nothing pending: the call

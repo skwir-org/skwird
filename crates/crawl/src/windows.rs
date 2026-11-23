@@ -31,6 +31,7 @@
 #![allow(unsafe_code)] // Windows' calls have no safe binding; each block says why it is sound.
 
 pub mod journal;
+pub mod mft;
 pub mod watch;
 
 use std::collections::HashMap;

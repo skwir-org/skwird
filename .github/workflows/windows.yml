@@ -29,8 +29,29 @@ jobs:
         run: cargo fetch --locked
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # An NTFS volume of the tests' own, S:, on a virtual disk: what reads
+      # a volume whole (the file table, the journal) never reads the
+      # runner's own (skwird_testkit::ntfs).
+      - name: a test volume
+        shell: pwsh
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP "skwird-tests.vhdx"
+          $script = Join-Path $env:RUNNER_TEMP "skwird-tests.diskpart"
+          @"
+          create vdisk file="$vhd" maximum=512 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          convert mbr
+          create partition primary
+          format fs=ntfs quick label=skwird-tests
+          assign letter=S
+          "@ | Set-Content -Path $script -Encoding ascii
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Volume -DriveLetter S
       - name: tests
         run: cargo test --workspace --no-fail-fast
         env:
           # A machine of the tests' own (skwird_testkit::throwaway).
           SKWIRD_TEST_MACHINE: "1"
+          SKWIRD_TEST_NTFS: 'S:\'

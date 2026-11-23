@@ -1,0 +1,476 @@
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::Path;
+
+use skwird_testkit::{Kind, Scratch};
+
+use super::*;
+
+const RECORD: usize = 1024;
+/// 1970, as a file time.
+const EPOCH: i64 = 116_444_736_000_000_000;
+
+/// A resident attribute of `kind`, named `name`, holding `value`.
+fn resident(kind: u32, name: &str, value: &[u8]) -> Vec<u8> {
+    let wide: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let value_at = (0x18 + wide.len()).next_multiple_of(8);
+    let mut a = vec![0u8; value_at];
+    a[0..4].copy_from_slice(&kind.to_le_bytes());
+    a[9] = u8::try_from(name.encode_utf16().count()).unwrap();
+    a[0x0A..0x0C].copy_from_slice(&0x18u16.to_le_bytes());
+    a[0x10..0x14].copy_from_slice(&u32::try_from(value.len()).unwrap().to_le_bytes());
+    a[0x14..0x16].copy_from_slice(&u16::try_from(value_at).unwrap().to_le_bytes());
+    a[0x18..0x18 + wide.len()].copy_from_slice(&wide);
+    a.extend_from_slice(value);
+    a.resize(a.len().next_multiple_of(8), 0);
+    let len = u32::try_from(a.len()).unwrap();
+    a[4..8].copy_from_slice(&len.to_le_bytes());
+    a
+}
+
+/// The unnamed `$DATA`, non-resident from `vcn`, its runs `runs`.
+fn nonresident(vcn: u64, size: u64, alloc: u64, runs: &[u8]) -> Vec<u8> {
+    let mut a = vec![0u8; 0x40];
+    a[0..4].copy_from_slice(&DATA.to_le_bytes());
+    a[8] = 1;
+    a[0x0A..0x0C].copy_from_slice(&0x40u16.to_le_bytes());
+    a[0x10..0x18].copy_from_slice(&vcn.to_le_bytes());
+    a[0x20..0x22].copy_from_slice(&0x40u16.to_le_bytes());
+    a[0x28..0x30].copy_from_slice(&alloc.to_le_bytes());
+    a[0x30..0x38].copy_from_slice(&size.to_le_bytes());
+    a[0x38..0x40].copy_from_slice(&size.to_le_bytes());
+    a.extend_from_slice(runs);
+    a.push(0);
+    a.resize(a.len().next_multiple_of(8), 0);
+    let len = u32::try_from(a.len()).unwrap();
+    a[4..8].copy_from_slice(&len.to_le_bytes());
+    a
+}
+
+fn standard(mtime: i64, ctime: i64, attributes: u32, security: u32) -> Vec<u8> {
+    let mut v = vec![0u8; 0x48];
+    v[0x08..0x10].copy_from_slice(&mtime.to_le_bytes());
+    v[0x10..0x18].copy_from_slice(&ctime.to_le_bytes());
+    v[0x20..0x24].copy_from_slice(&attributes.to_le_bytes());
+    v[0x34..0x38].copy_from_slice(&security.to_le_bytes());
+    resident(STANDARD_INFORMATION, "", &v)
+}
+
+fn file_name(parent: Reference, name: &str, namespace: u8) -> Vec<u8> {
+    let wide: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut v = vec![0u8; 0x42];
+    v[0..8].copy_from_slice(&parent.to_le_bytes());
+    v[0x40] = u8::try_from(name.encode_utf16().count()).unwrap();
+    v[0x41] = namespace;
+    v.extend_from_slice(&wide);
+    resident(FILE_NAME, "", &v)
+}
+
+/// A record as NTFS writes it: its head, its attributes, then each
+/// sector's last two bytes moved into its update sequence array and
+/// replaced by its update number.
+fn record(sequence: u16, flags: u16, base: Reference, attributes: &[Vec<u8>]) -> Vec<u8> {
+    let mut r = vec![0u8; RECORD];
+    r[0..4].copy_from_slice(b"FILE");
+    let sectors = RECORD / STRIDE;
+    r[4..6].copy_from_slice(&0x30u16.to_le_bytes());
+    r[6..8].copy_from_slice(&u16::try_from(sectors + 1).unwrap().to_le_bytes());
+    r[0x10..0x12].copy_from_slice(&sequence.to_le_bytes());
+    let first = (0x30 + 2 * (sectors + 1)).next_multiple_of(8);
+    r[0x14..0x16].copy_from_slice(&u16::try_from(first).unwrap().to_le_bytes());
+    r[0x16..0x18].copy_from_slice(&flags.to_le_bytes());
+    r[0x20..0x28].copy_from_slice(&base.to_le_bytes());
+    let mut at = first;
+    for a in attributes {
+        r[at..at + a.len()].copy_from_slice(a);
+        at += a.len();
+    }
+    r[at..at + 4].copy_from_slice(&END.to_le_bytes());
+    let used = u32::try_from(at + 8).unwrap();
+    r[0x18..0x1C].copy_from_slice(&used.to_le_bytes());
+    r[0x1C..0x20].copy_from_slice(&u32::try_from(RECORD).unwrap().to_le_bytes());
+    let usn = [0x2A, 0x00];
+    r[0x30..0x32].copy_from_slice(&usn);
+    for i in 0..sectors {
+        let end = (i + 1) * STRIDE;
+        let hidden = [r[end - 2], r[end - 1]];
+        r[0x32 + 2 * i..0x34 + 2 * i].copy_from_slice(&hidden);
+        r[end - 2..end].copy_from_slice(&usn);
+    }
+    r
+}
+
+const IN_USE: u16 = 1;
+const FOLDER: u16 = 3;
+
+fn reference(number: u64, sequence: u16) -> Reference {
+    number | (u64::from(sequence) << 48)
+}
+
+fn wtf8(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    crate::wtf8::encode(name.encode_utf16(), &mut out);
+    out
+}
+
+/// A record reads back as written: its times, attributes and security id;
+/// its long names, not its short one; its data's size, resident; and a
+/// sector's last bytes restored, where one of its names crosses it.
+#[test]
+fn a_record_reads_back_as_written() {
+    let long = "un nom assez long pour couvrir la fin du premier secteur, été 東京";
+    let mut padding = String::new();
+    // 160 characters: its attribute ends past the first sector's end.
+    for _ in 0..5 {
+        padding.push_str("0123456789abcdef0123456789abcdef");
+    }
+    let mut r = record(
+        7,
+        IN_USE,
+        0,
+        &[
+            standard(EPOCH + 10_000_000, EPOCH + 20_000_000, 0x20, 261),
+            file_name(reference(40, 2), &padding, 1),
+            file_name(reference(40, 2), long, 1),
+            file_name(reference(40, 2), "UNNOMA~1", DOS),
+            resident(DATA, "", b"hello"),
+        ],
+    );
+    let d = decode(41, &mut r).unwrap();
+    assert_eq!((d.number, d.sequence, d.base, d.folder), (41, 7, 0, false));
+    let s = d.standard.unwrap();
+    assert_eq!((s.mtime, s.ctime), (EPOCH + 10_000_000, EPOCH + 20_000_000));
+    assert_eq!((s.attributes, s.security), (0x20, Some(261)));
+    let names: Vec<_> = d.names.iter().map(|n| (n.parent, n.name.clone())).collect();
+    assert_eq!(
+        names,
+        vec![
+            (reference(40, 2), wtf8(&padding)),
+            (reference(40, 2), wtf8(long))
+        ],
+        "the short name left out"
+    );
+    assert_eq!(d.data, Some((5, 8)));
+}
+
+/// A sector written apart from the others is torn, never read; a record
+/// NTFS marked bad likewise; zeroes are no record, and one deleted is in
+/// no use.
+#[test]
+fn a_torn_record_is_never_read() {
+    let attributes = [standard(EPOCH, EPOCH, 0x20, 0)];
+    let mut torn = record(1, IN_USE, 0, &attributes);
+    torn[STRIDE * 2 - 1] ^= 0xFF;
+    assert_eq!(decode(30, &mut torn), Err(Bad::Torn));
+    let mut bad = record(1, IN_USE, 0, &attributes);
+    bad[0..4].copy_from_slice(b"BAAD");
+    assert_eq!(decode(30, &mut bad), Err(Bad::Torn));
+    assert_eq!(decode(30, &mut vec![0u8; RECORD]), Err(Bad::Empty));
+    let mut deleted = record(1, 0, 0, &attributes);
+    assert_eq!(decode(30, &mut deleted), Err(Bad::Unused));
+    // An attribute that says it is longer than the record.
+    let mut long = record(1, IN_USE, 0, &attributes);
+    let first = usize::from(u16_at(&long, 0x14).unwrap());
+    long[first + 4..first + 8].copy_from_slice(&5000u32.to_le_bytes());
+    assert_eq!(decode(30, &mut long), Err(Bad::Malformed));
+}
+
+/// Runs read back: lengths and offsets of several sizes, an offset going
+/// back (negative), a sparse run, and the end.
+#[test]
+fn runs_read_back() {
+    let bytes = [
+        0x21, 0x10, 0x00, 0x01, // 16 clusters at 256
+        0x32, 0x00, 0x01, 0x00, 0x00, 0x01, // 256 clusters at 256 + 65536
+        0x01, 0x08, // 8 sparse clusters
+        0x11, 0x04, 0xF0, // 4 clusters, 16 back
+        0x00,
+    ];
+    let read = runs(&bytes).unwrap();
+    assert_eq!(
+        read,
+        vec![
+            Run {
+                lcn: Some(256),
+                clusters: 16
+            },
+            Run {
+                lcn: Some(256 + 65_536),
+                clusters: 256
+            },
+            Run {
+                lcn: None,
+                clusters: 8
+            },
+            Run {
+                lcn: Some(256 + 65_536 - 16),
+                clusters: 4
+            },
+        ]
+    );
+    assert_eq!(runs(&[0x21, 0x10]), Err(Bad::Malformed), "cut short");
+    assert_eq!(
+        runs(&[0x11, 0x01, 0x80, 0x00]),
+        Err(Bad::Malformed),
+        "before the volume"
+    );
+}
+
+/// The records of [`the_table_is_the_tree_its_names_make`], by number.
+fn tree_records() -> Vec<(u64, Vec<u8>)> {
+    let root = reference(ROOT, 5);
+    vec![
+        (
+            ROOT,
+            record(
+                5,
+                FOLDER,
+                0,
+                &[standard(EPOCH, EPOCH, 0x16, 0), file_name(root, ".", 3)],
+            ),
+        ),
+        (
+            0,
+            record(
+                1,
+                IN_USE,
+                0,
+                &[standard(EPOCH, EPOCH, 0x06, 0), file_name(root, "$MFT", 3)],
+            ),
+        ),
+        (
+            30,
+            record(
+                1,
+                FOLDER,
+                0,
+                &[
+                    standard(EPOCH, EPOCH, 0x10, 0),
+                    file_name(root, "Projets", 1),
+                ],
+            ),
+        ),
+        (
+            31,
+            record(
+                4,
+                IN_USE,
+                0,
+                &[
+                    standard(EPOCH + 1, EPOCH + 2, 0x20, 0),
+                    file_name(reference(30, 1), "notes 1.txt", 1),
+                    file_name(root, "second name.txt", 0),
+                ],
+            ),
+        ),
+        // 31's data, in a record of its own.
+        (
+            32,
+            record(
+                1,
+                IN_USE,
+                reference(31, 4),
+                &[nonresident(0, 300_000, 303_104, &[0x21, 0x4A, 0x00, 0x02])],
+            ),
+        ),
+        // Its parent was record 33 at sequence 1; 33 is another file now.
+        (
+            33,
+            record(
+                2,
+                FOLDER,
+                0,
+                &[
+                    standard(EPOCH, EPOCH, 0x10, 0),
+                    file_name(root, "reused", 1),
+                ],
+            ),
+        ),
+        (
+            34,
+            record(
+                1,
+                IN_USE,
+                0,
+                &[
+                    standard(EPOCH, EPOCH, 0x20, 0),
+                    file_name(reference(33, 1), "stale", 1),
+                ],
+            ),
+        ),
+        // Its parent is a file.
+        (
+            35,
+            record(
+                1,
+                IN_USE,
+                0,
+                &[
+                    standard(EPOCH, EPOCH, 0x20, 0),
+                    file_name(reference(31, 4), "inside a file", 1),
+                ],
+            ),
+        ),
+    ]
+}
+
+/// The tree the records' names make: a file of two names in both its
+/// folders; an extension record's size given to its base; a record whose
+/// parent's record was reused for another file, and the volume's metadata,
+/// in no folder; a folder's link to a parent that is a file, in none.
+#[test]
+fn the_table_is_the_tree_its_names_make() {
+    let root = reference(ROOT, 5);
+    let mut made = tree_records();
+    let decoded = made
+        .iter_mut()
+        .map(|(n, r)| decode(*n, r).unwrap())
+        .collect::<Vec<_>>();
+    let table = Table::of(decoded, vec![99]);
+    assert_eq!(table.unread, vec![99]);
+    let below: BTreeMap<PathBuf, (u64, u64, Time)> = table
+        .below(root)
+        .into_iter()
+        .map(|(p, r)| (p, (number(r.reference), r.size, r.mtime)))
+        .collect();
+    let notes = (31, 300_000, super::super::time(EPOCH + 1));
+    let expected = BTreeMap::from([
+        (PathBuf::from("Projets"), (30, 0, Time::default())),
+        (PathBuf::from(r"Projets\notes 1.txt"), notes),
+        (PathBuf::from("second name.txt"), notes),
+        (PathBuf::from("reused"), (33, 0, Time::default())),
+    ]);
+    assert_eq!(below, expected);
+    assert!(
+        table.get(reference(33, 1)).is_none(),
+        "the reused record is another file"
+    );
+    assert_eq!(table.get(reference(31, 4)).unwrap().alloc, 303_104);
+}
+
+/// The table's first record says where the table is: its data's runs.
+#[test]
+fn the_first_record_says_where_the_table_is() {
+    let mut r = record(
+        1,
+        IN_USE,
+        0,
+        &[
+            standard(EPOCH, EPOCH, 0x06, 0),
+            file_name(reference(ROOT, 5), "$MFT", 3),
+            nonresident(
+                0,
+                262_144,
+                262_144,
+                &[0x21, 0x40, 0x00, 0x0C, 0x11, 0x20, 0x40],
+            ),
+        ],
+    );
+    let d = decode(0, &mut r).unwrap();
+    assert!(!d.listed);
+    assert_eq!(
+        d.runs,
+        Some(vec![
+            Run {
+                lcn: Some(0xC00),
+                clusters: 0x40
+            },
+            Run {
+                lcn: Some(0xC40),
+                clusters: 0x20
+            },
+        ])
+    );
+}
+
+/// What a walk of a folder finds on a real NTFS volume, its file table
+/// holds below that folder, read from the disk: each entry's path, kind,
+/// identity and size. A name with spaces and accents, a file past what a
+/// record holds, a file of two names, a link to a folder, an empty folder,
+/// a path past 260 characters. On a test machine's volume alone
+/// (`skwird_testkit::ntfs`), as only an administrator may read a volume.
+#[test]
+fn a_volumes_table_holds_what_a_walk_finds() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    let s = Scratch::under(&volume, "mft");
+    s.write(r"tree\a b\été 2026\notes 1.txt", b"hello");
+    s.write(r"tree\a b\big.bin", &vec![7u8; 300_000]);
+    s.dir(r"tree\empty folder");
+    s.hard_link(
+        r"tree\a b\second name.txt",
+        r"tree\a b\été 2026\notes 1.txt",
+    );
+    s.link(r"tree\a b\lien", "été 2026");
+    s.deep(r"tree\deep", 30, "un dossier");
+    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
+    flush(&letter);
+    let walked = skwird_testkit::reference_walk(&s.join("tree"));
+    let top = skwird_testkit::reference_walk(s.path()).entries[Path::new("tree")].ino;
+    let v = Volume::open(OsStr::new(&letter)).unwrap();
+    let table = v.table().unwrap();
+    assert!(table.len() > 50, "a volume holds more: {}", table.len());
+    let found: BTreeMap<PathBuf, (Kind, u64, u64)> = table
+        .below(top)
+        .into_iter()
+        .map(|(p, r)| {
+            let kind = if r.is_reparse() {
+                Kind::Link
+            } else if r.folder {
+                Kind::Folder
+            } else {
+                Kind::File
+            };
+            (p, (kind, r.reference, if r.folder { 0 } else { r.size }))
+        })
+        .collect();
+    let expected: BTreeMap<PathBuf, (Kind, u64, u64)> = walked
+        .entries
+        .iter()
+        .map(|(p, seen)| (p.clone(), (seen.kind, seen.ino, seen.size)))
+        .collect();
+    assert_eq!(found, expected);
+}
+
+/// The volume's dirty buffers written to the disk, its file table among
+/// them, so that a raw read sees what was just made.
+fn flush(letter: &str) {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+        OPEN_EXISTING,
+    };
+    let name: Vec<u16> = format!(r"\\.\{letter}").encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated name alive for the call; the handle is
+    // closed below.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(
+        handle,
+        INVALID_HANDLE_VALUE,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: a handle of ours, open; closed once, after.
+    unsafe {
+        assert_ne!(
+            FlushFileBuffers(handle),
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        CloseHandle(handle);
+    }
+}

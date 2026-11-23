@@ -28,13 +28,20 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// A new, empty folder, named after `label`, the process and a count.
+    /// A new, empty folder, named after `label`, the process and a count,
+    /// under the user's local application data.
     pub fn new(label: &str) -> Scratch {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .expect("LOCALAPPDATA is not set")
             .join("skwird-tests");
+        Scratch::under(&base, label)
+    }
+
+    /// A new, empty folder under `base` (a test machine's volume,
+    /// [`ntfs`]), named as [`Scratch::new`] names one.
+    pub fn under(base: &Path, label: &str) -> Scratch {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = base.join(format!(
             "{label}-{}-{}",
             std::process::id(),
@@ -170,6 +177,18 @@ pub fn throwaway() -> bool {
         "SKWIRD_TEST_MACHINE is set, but this is not a runner GitHub hosts"
     );
     asked
+}
+
+/// The root of an NTFS volume of the tests' own, on a machine of theirs
+/// ([`throwaway`]): a virtual disk the workflow makes and names in
+/// `SKWIRD_TEST_NTFS` (`S:\`). None anywhere else, and the test that needs
+/// it says it is skipped.
+pub fn ntfs() -> Option<PathBuf> {
+    let volume = std::env::var_os("SKWIRD_TEST_NTFS").filter(|_| throwaway());
+    if volume.is_none() {
+        eprintln!("skipped: needs an NTFS volume of the tests' own (SKWIRD_TEST_NTFS)");
+    }
+    volume.map(PathBuf::from)
 }
 
 /// Whether this runs under Wine, not Windows (`tools/wine-tests`): what
