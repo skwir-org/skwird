@@ -1930,6 +1930,14 @@ above).
        attributes: the table adds it, as a listing does;
      - the two ways of naming a volume (`FILE_ID_INFO`, the table's) are
        the same 64 bits.
+     - a raw read sees only what is on the disk. The tests flushed the
+       volume before reading its table; the engine did not, so a file
+       made a moment before its root was followed could be in neither the
+       table nor the journal, the root said current without it (rule 1).
+       Found on 2026-11-24, and fixed: `Volume::table_of` flushes the
+       volume first (`FlushFileBuffers`), and reads past every cache
+       (`FILE_FLAG_NO_BUFFERING`); a volume that cannot be flushed is
+       walked. The tests read through it too.
    - **Not yet:** a file table fragmented past its first record (an
      `$ATTRIBUTE_LIST` on record 0) is refused, and the walk serves.
      Every record is held in memory while the table is built: to bound,

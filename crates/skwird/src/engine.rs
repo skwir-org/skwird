@@ -855,7 +855,7 @@ fn from_table(
         return crawl_and_build(root, opts, cancel, limits);
     }
     let start = Instant::now();
-    let table = match skwird_crawl::journal::Volume::of(root.path()).and_then(|v| v.table()) {
+    let table = match skwird_crawl::journal::Volume::table_of(root.path()) {
         Ok(table) => table,
         Err(e) => {
             log(&format!(

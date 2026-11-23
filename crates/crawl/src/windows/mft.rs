@@ -715,8 +715,38 @@ impl Volume {
         Ok(())
     }
 
-    /// Its file table, read whole from the disk.
-    pub fn table(&self) -> std::io::Result<Table> {
+    /// The file table of the volume holding `path`, read whole from the
+    /// disk as of now: the volume's buffers written to it first
+    /// (`FlushFileBuffers`, which an administrator may), its table among
+    /// them, and the table read past every cache (`FILE_FLAG_NO_BUFFERING`).
+    /// A raw read sees only what is on the disk. Unflushed, a file made a
+    /// moment before the root was followed would be in neither the table
+    /// nor the journal heard from then, and the root said current without
+    /// it (rule 1): the runner's tests read stale tables until they
+    /// flushed. Refused where the volume cannot be flushed: its folders are
+    /// walked instead.
+    pub fn table_of(path: &Path) -> std::io::Result<Table> {
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FlushFileBuffers};
+        let device = super::journal::device_of(path)?;
+        let writable = super::journal::open_device_as(&device, GENERIC_READ | GENERIC_WRITE, 0)?;
+        // SAFETY: the volume's handle, opened to write; every file of it
+        // flushed, waited for.
+        if unsafe { FlushFileBuffers(writable.0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        drop(writable);
+        // Whole sectors at sector offsets, into page-aligned memory
+        // ([`Pages`]), as a read past the cache must be.
+        Volume(super::journal::open_device(
+            &device,
+            FILE_FLAG_NO_BUFFERING,
+        )?)
+        .table()
+    }
+
+    /// Its file table, read whole from the disk, as the handle reads it.
+    fn table(&self) -> std::io::Result<Table> {
         let read_at = Time::now();
         let layout = self.layout()?;
         let record =

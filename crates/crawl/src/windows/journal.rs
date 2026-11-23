@@ -336,12 +336,18 @@ fn open_volume(volume: &OsStr) -> std::io::Result<Handle> {
 /// The volume device `device` names (NUL-terminated), opened to read, with
 /// `flags` (`FILE_FLAG_OVERLAPPED` for a read that waits).
 pub(crate) fn open_device(device: &[u16], flags: u32) -> std::io::Result<Handle> {
+    open_device_as(device, GENERIC_READ, flags)
+}
+
+/// The volume device `device` names (NUL-terminated), opened with `access`
+/// and `flags`.
+pub(crate) fn open_device_as(device: &[u16], access: u32, flags: u32) -> std::io::Result<Handle> {
     // SAFETY: a NUL-terminated name alive for the call, no security
     // attributes, no template; the handle given is ours to close.
     let handle = unsafe {
         CreateFileW(
             device.as_ptr(),
-            GENERIC_READ,
+            access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::path::Path;
 
 use skwird_testkit::{Kind, Scratch};
@@ -413,12 +412,9 @@ fn a_volumes_table_holds_what_a_walk_finds() {
     );
     s.link(r"tree\a b\lien", "été 2026");
     s.deep(r"tree\deep", 30, "un dossier");
-    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
-    flush(&letter);
     let walked = skwird_testkit::reference_walk(&s.join("tree"));
     let top = skwird_testkit::reference_walk(s.path()).entries[Path::new("tree")].ino;
-    let v = Volume::open(OsStr::new(&letter)).unwrap();
-    let table = v.table().unwrap();
+    let table = Volume::table_of(&volume).unwrap();
     assert!(table.len() > 50, "a volume holds more: {}", table.len());
     let found: BTreeMap<PathBuf, (Kind, u64, u64)> = table
         .below(top)
@@ -440,48 +436,6 @@ fn a_volumes_table_holds_what_a_walk_finds() {
         .map(|(p, seen)| (p.clone(), (seen.kind, seen.ino, seen.size)))
         .collect();
     assert_eq!(found, expected);
-}
-
-/// The volume's dirty buffers written to the disk, its file table among
-/// them, so that a raw read sees what was just made.
-fn flush(letter: &str) {
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
-        OPEN_EXISTING,
-    };
-    let name: Vec<u16> = format!(r"\\.\{letter}").encode_utf16().chain([0]).collect();
-    // SAFETY: a NUL-terminated name alive for the call; the handle is
-    // closed below.
-    let handle = unsafe {
-        CreateFileW(
-            name.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            0,
-            std::ptr::null_mut(),
-        )
-    };
-    assert_ne!(
-        handle,
-        INVALID_HANDLE_VALUE,
-        "{}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: a handle of ours, open; closed once, after.
-    unsafe {
-        assert_ne!(
-            FlushFileBuffers(handle),
-            0,
-            "{}",
-            std::io::Error::last_os_error()
-        );
-        CloseHandle(handle);
-    }
 }
 
 /// What a crawl found, folder by folder, in terms both ways of reading a
@@ -553,8 +507,6 @@ fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
     assert!(made.success(), "the junction");
     let (exclusions, refused) = crate::Exclusions::resolve([s.join(r"tree\clés")]);
     assert!(refused.is_empty(), "{refused:?}");
-    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
-    flush(&letter);
     let root = crate::Root::open(&s.join("tree"), exclusions).unwrap();
     let opts = Options {
         threads: 2,
@@ -562,7 +514,7 @@ fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
     };
     let cancel = crate::Cancel::default();
     let walked = crate::crawl_all(&root, &opts, &cancel).unwrap();
-    let table = Volume::open(OsStr::new(&letter)).unwrap().table().unwrap();
+    let table = Volume::table_of(&volume).unwrap();
     let reader = TableReader { table: &table };
     let read = crate::crawl_below_by(
         &root,
@@ -616,8 +568,6 @@ fn each_folder_says_what_it_is_judged_by() {
         "{}",
         String::from_utf8_lossy(&granted.stdout)
     );
-    let letter = volume.to_str().unwrap().trim_end_matches('\\').to_owned();
-    flush(&letter);
     let root = crate::Root::open(&s.join("tree"), crate::Exclusions::none()).unwrap();
     let opts = Options {
         threads: 2,
@@ -633,7 +583,7 @@ fn each_folder_says_what_it_is_judged_by() {
             .collect()
     };
     let read = owners(&crate::crawl_all(&root, &opts, &cancel).unwrap());
-    let table = Volume::open(OsStr::new(&letter)).unwrap().table().unwrap();
+    let table = Volume::table_of(&volume).unwrap();
     let reader = TableReader { table: &table };
     let from_table = owners(
         &crate::crawl_below_by(
