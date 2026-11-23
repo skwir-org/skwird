@@ -1875,6 +1875,47 @@ above).
 
    Wine has no journal. Its parsing is tested on records of the test's
    making, and the whole on a Windows machine.
+
+   **The volume's sources** (done on 2026-11-23,
+   `skwird_crawl::journal`):
+   - **`Volume`:** a volume opened itself, which administrators alone may.
+     - `enumerate` reads its file table in batches (`FSCTL_ENUM_USN_DATA`).
+     - `journal` gives its journal's identity and bounds.
+     - `read` gives the journal's records from a position on
+       (`FSCTL_READ_USN_JOURNAL`).
+   - **Records** of versions 2 (NTFS's 64-bit ids) and 3 (`ReFS`'s 128)
+     are read alike, by their own lengths and offsets. A record cut short
+     ends a batch and is never read past.
+   - **`Table`** assembles the records into the tree their parent links
+     make, from a root's id down, each folder before what it holds. What
+     no link leads to is set apart, and a loop is never followed twice.
+   - **`Position::holds`** is DESIGN 2's rule: the same journal, at or
+     past the lowest record it keeps, not past its next. A journal made
+     again, one that wrapped past the position, and a position ahead of
+     the journal (a volume restored) each make the check run.
+   - Under Wine, the parsing, the assembly and the rule pass on records
+     of the tests' making. The calls themselves wait for Windows.
+
+   **Left of step 7**, nothing of which Wine can try:
+   - **The index from the table.** The file table gives names, kinds and
+     ids, not sizes, times, nor a folder's change time, which the check
+     needs. So either each folder is read once after it (the table only
+     a faster first pass of names), or the file table's own records are
+     parsed for them (`$STANDARD_INFORMATION`, `$DATA`), as Everything
+     does. A choice to make with a Windows machine to measure on (open
+     question 7). `Volume::enumerate` also holds every record in memory,
+     to bound before a volume of millions.
+   - **The journal followed:** read on a thread of its own, each record's
+     parent folder found by its id and gathered, its position kept with
+     the index, and the rule applied at each start.
+   - **The service:** Windows' service control, a service account that
+     may read every folder (backup privileges), the system's pipe
+     `\\.\pipe\skwird` open to every user who logs on, and clients
+     checking that its server is that account, never a pipe another
+     user made.
+   - **Answers per asker** (DESIGN 4): each folder's security descriptor
+     (by the security id the records carry), checked against the asker
+     while impersonating the pipe's client, kept per folder and asker.
 8. **Measured,** on a Windows machine when one is at hand: the user's
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.

@@ -30,6 +30,7 @@
 
 #![allow(unsafe_code)] // Windows' calls have no safe binding; each block says why it is sound.
 
+pub mod journal;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -595,7 +596,7 @@ fn low_bits(id: &[u8; 16]) -> u64 {
 }
 
 /// A file time (100 ns since 1601) as an instant.
-fn time(filetime: i64) -> Time {
+pub(crate) fn time(filetime: i64) -> Time {
     // 1601 to 1970, in 100 ns.
     const EPOCH: i64 = 116_444_736_000_000_000;
     let since = filetime.saturating_sub(EPOCH);
