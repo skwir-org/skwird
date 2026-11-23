@@ -164,11 +164,31 @@ fn listen(config: &Config, socket: &Path) -> Result<(Listener, bool), String> {
 
 /// Where the engine answers on Windows: its user's pipe, made its user's
 /// alone, refused if another process holds the name.
+///
+/// The lock is held, so no other engine of the user's serves; but one
+/// that just went may still hold the name for a moment. Windows closes a
+/// dying process's handles one after the other, its lock's before its
+/// pipe's at times: a second engine taking over found the name held, once
+/// in four runs on a Windows runner. The name is asked for again for up to
+/// five seconds, while it is refused (`ERROR_ACCESS_DENIED`); a name held
+/// longer is another process's, and is refused.
 #[cfg(windows)]
 fn listen(_: &Config, pipe: &Path) -> Result<(Listener, bool), String> {
-    Listener::bind(pipe)
-        .map(|l| (l, true))
-        .map_err(|e| format!("cannot make the pipe (another process may hold it): {e}"))
+    const DENIED: i32 = 5;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match Listener::bind(pipe) {
+            Ok(l) => return Ok((l, true)),
+            Err(e) if e.raw_os_error() == Some(DENIED) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot make the pipe (another process may hold it): {e}"
+                ));
+            }
+        }
+    }
 }
 
 /// What the engine hears changes by: one watcher for every root, or for

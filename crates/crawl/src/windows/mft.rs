@@ -519,14 +519,15 @@ impl Table {
             .collect()
     }
 
-    /// A folder's own facts, as its stat gives them.
-    fn stat_of(&self, record: &Record) -> FolderStat {
+    /// A folder's own facts, as its stat gives them, on the volume `dev`
+    /// names as a stat does.
+    fn stat_of(&self, record: &Record, dev: u64) -> FolderStat {
         FolderStat {
             id: FileId {
-                dev: self.serial,
+                dev,
                 ino: record.reference,
             },
-            mount: self.serial,
+            mount: dev,
             ctime: record.ctime,
             mtime: record.mtime,
             owner: 0,
@@ -583,13 +584,18 @@ impl TableReader<'_> {
             None if rel.as_os_str().is_empty() => root.stat.id,
             None => return not_covered(None, Why::Gone),
         };
-        if id.dev != self.table.serial {
+        // The volume as a stat names it (`FILE_ID_INFO`), which the walk's
+        // identities carry: the table's serial is its 64 bits as NTFS
+        // keeps them, of which a stat's shares the low 32 at least. A root
+        // on another volume than the table's has none of its folders.
+        let dev = root.stat.id.dev;
+        if dev as u32 != self.table.serial as u32 || id.dev != dev {
             return not_covered(None, Why::Mount);
         }
         let Some(record) = self.table.get(id.ino) else {
             return not_covered(None, Why::Gone);
         };
-        let stat = self.table.stat_of(record);
+        let stat = self.table.stat_of(record, dev);
         if !record.folder {
             return not_covered(Some(stat), Why::Replaced);
         }
