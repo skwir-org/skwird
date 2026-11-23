@@ -410,7 +410,17 @@ fn reached(seeing: &Seeing<'_>, rel: &Path, memo: &mut HashMap<FolderId, Sight>)
     else {
         return Reached::Denied;
     };
-    match (seeing.sight(folder, memo), at == rel) {
+    // A folder never stat-ed (excluded by its path, or not read) holds no
+    // facts to judge it by. Its entry is in its parent's listing: an asker
+    // who may list the parent is told what the index says of it, excluded
+    // among it, so that a client walks it itself (DESIGN 5).
+    let sight = match seeing.index.parent_of(folder) {
+        Some(parent) if at == rel && seeing.index.facts_of(folder).is_none() => {
+            seeing.sight(parent, memo)
+        }
+        _ => seeing.sight(folder, memo),
+    };
+    match (sight, at == rel) {
         (Sight::Seen, true) => Reached::Listed(folder),
         (Sight::Seen, false) => Reached::Absent,
         _ => Reached::Denied,

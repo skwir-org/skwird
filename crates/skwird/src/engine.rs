@@ -454,9 +454,11 @@ fn exclusions(config: &Config, registrations: &[Registration]) -> (Exclusions, u
     let dirs = &config.dirs;
     // The system service's defaults are each user's, kept as theirs are
     // (`users_own`): resolved as the service, a link a user put there would
-    // take another's folder out.
+    // take another's folder out. The Nix store is Unix's: on Windows it is
+    // no absolute path, and would be counted refused.
     let (homes, store) = if config.system {
-        (Vec::new(), vec![PathBuf::from(crate::system::NIX_STORE)])
+        let store = cfg!(unix).then(|| PathBuf::from(crate::system::NIX_STORE));
+        (Vec::new(), store.into_iter().collect())
     } else {
         (vec![dirs.home.clone()], Vec::new())
     };

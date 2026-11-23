@@ -100,6 +100,10 @@ pkgs.testers.runNixOSTest {
         for name in ["id_test", "dear diary"]:
             found = lines(machine.succeed(f"SKWIRD_NO_START=1 skwird find '{name}' --in /home"))
             assert found == [], (name, found)
+        # Asked there, the user is told it is excluded, so that their client
+        # walks it itself.
+        said = as_user("someone", "skwird coverage ~/diary")
+        assert "names: not covered: Excluded" in said, said
 
     with subtest("a filesystem mounted while it runs is a root, let go of once unmounted"):
         machine.succeed(
