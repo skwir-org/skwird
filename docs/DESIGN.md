@@ -1598,6 +1598,13 @@ machine alone, a third of before.
    instead (`FSEventStreamFlushSync`).
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
+   - which folders a user's engine watches on Windows: every root,
+     whole (phase 4, step 5). `ReadDirectoryChangesW` watches a tree
+     with one handle, and takes no watch for each folder, so there is
+     no share to fill, and a registration changes nothing. A sync is a
+     barrier for the root holding the engine's cookies' folder (the
+     home, by default) alone: each root is heard on a stream of its own,
+     which Windows orders with no other's. A sync of another root checks.
    - which folders a user's engine watches on Linux: answered on
      2026-11-21, for phase 2. Those its clients register (`watch`), kept
      per client across restarts as exclusions are, within a quarter of

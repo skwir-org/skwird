@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use skwird_crawl::fanotify;
 use skwird_crawl::fanotify::Group;
 use skwird_index::block::FolderId;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::engine::Command;
 use crate::engine::log;
 
@@ -130,6 +130,25 @@ impl Source for Group {
     }
 }
 
+/// Listen to Windows' watcher for the writer (phase 4, step 5): wait until
+/// a root's thread heard something, and send it all. Each root is heard on
+/// a thread of its own; this one gathers them for the writer.
+#[cfg(windows)]
+pub fn listen(watcher: &Watcher, commands: &Sender<Command>, readers: &Readers) {
+    readers.join();
+    loop {
+        let mut heard = Vec::new();
+        if let Err(e) = watcher.read(&mut heard) {
+            log(&format!("cannot read the watcher: {e}"));
+            return;
+        }
+        let generation = watcher.generation();
+        if commands.send(Command::Heard { generation, heard }).is_err() {
+            return;
+        }
+    }
+}
+
 /// Listen to `source` for the writer: block until it can be read, send
 /// what it heard, and again. A read that fails is said as an overflow:
 /// nothing heard since proves anything. The mount table is followed too,
@@ -206,8 +225,6 @@ pub struct Readers {
 }
 
 impl Readers {
-    // A reader's alone, and none reads off Linux yet (phase 4, step 5).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn join(&self) {
         self.threads
             .lock()

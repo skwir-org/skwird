@@ -35,6 +35,9 @@ fn program() -> PathBuf {
 struct Env {
     s: Scratch,
     pipe: PathBuf,
+    /// The application data folder: outside the home, or in it, as
+    /// Windows has it ([`Env::local_in_home`]).
+    local: PathBuf,
     engines: Vec<Child>,
 }
 
@@ -49,11 +52,20 @@ impl Env {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        let local = s.join("local");
         Env {
             s,
             pipe,
+            local,
             engines: Vec::new(),
         }
+    }
+
+    /// The application data folder in the home, as Windows has it: the
+    /// engine's folders, its cookies' among them, below its root.
+    fn local_in_home(mut self) -> Env {
+        self.local = self.s.dir(r"home\AppData\Local");
+        self
     }
 
     fn home(&self) -> PathBuf {
@@ -65,7 +77,7 @@ impl Env {
         let mut c = Command::new(program());
         c.args(args)
             .env("USERPROFILE", self.home())
-            .env("LOCALAPPDATA", self.s.join("local"))
+            .env("LOCALAPPDATA", &self.local)
             .env("SKWIRD_PIPE", &self.pipe)
             // An engine a client of the test starts goes soon after.
             .env("SKWIRD_IDLE", "1");
@@ -218,8 +230,12 @@ fn an_engine_answers_what_a_walk_finds() {
         answered(&mut c, &named(&home.join("docs"), "report")).len(),
         20
     );
+    // Heard whole once read (phase 4, step 5), or checked until then.
     let coverage = c.coverage(&home).unwrap();
-    assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
+    assert!(
+        matches!(coverage.names, Proof::Live(_) | Proof::Checked(_)),
+        "{coverage:?}"
+    );
     assert_eq!(
         c.coverage(Path::new(r"C:\elsewhere")).unwrap().names,
         Proof::NotCovered(Why::Outside)
@@ -239,14 +255,18 @@ fn a_sync_answers_with_a_change_made_behind_the_engines_back() {
     let asked = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
+    // Checked at a time after it was asked; or live, a check having
+    // applied everything made before it (no cookie is heard in this root:
+    // the test's application data is outside it).
     let coverage = c.sync(&home).unwrap();
-    let Proof::Checked(at) = coverage.names else {
-        panic!("{coverage:?}")
-    };
-    assert!(
-        at.sec >= i64::try_from(asked.as_secs()).unwrap() - 1,
-        "{at:?}"
-    );
+    match coverage.names {
+        Proof::Checked(at) => assert!(
+            at.sec >= i64::try_from(asked.as_secs()).unwrap() - 1,
+            "{at:?}"
+        ),
+        Proof::Live(_) => {}
+        _ => panic!("{coverage:?}"),
+    }
     assert!(answered(&mut c, &named(&home, "behind its back")).contains(&made));
     assert_eq!(answered(&mut c, &everything(&home)), walked(&home));
 }
@@ -341,6 +361,73 @@ fn the_users_exclusions_and_the_private_defaults_hold() {
     assert!(answered(&mut c, &named(&home, "id_ed25519")).is_empty());
     assert!(answered(&mut c, &named(&home, "report 3.txt")).is_empty());
     assert_eq!(answered(&mut c, &named(&home, "report 4.txt")).len(), 1);
+}
+
+fn is_live(c: &mut Client, path: &Path) -> bool {
+    matches!(c.coverage(path).unwrap().names, Proof::Live(_))
+}
+
+/// Each root is heard whole (phase 4, step 5): live with no folder
+/// registered, and a change made in it, deep or new, is answered without
+/// a sync, within the gathering's second.
+#[test]
+fn a_change_is_answered_live_without_a_sync() {
+    let mut env = Env::new("win-live");
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    assert!(is_live(&mut c, &home.join(r"docs\d05")));
+    let made = env.s.file(home.join(r"docs\d05\made live.txt"));
+    let deep = env.s.file(home.join(r"new\folder\deep inside.txt"));
+    wait_for(5, "the changes answered without a sync", || {
+        let found = answered(&mut c, &named(&home, "live.txt"));
+        found.contains(&made) && answered(&mut c, &named(&home, "deep inside")).contains(&deep)
+    });
+    // Removed, it is gone from the answers as soon.
+    env.s.remove(r"home\docs\d05\made live.txt");
+    wait_for(5, "a removal answered without a sync", || {
+        answered(&mut c, &named(&home, "made live")).is_empty()
+    });
+    assert!(is_live(&mut c, &home));
+}
+
+/// A sync of a root holding the cookies' folder is a barrier: it answers
+/// live, with a change made just before it, every event before its
+/// cookie read. A sync of a root that does not hold it checks, as no
+/// cookie can be heard in its turn there, and never waits for one.
+#[test]
+fn a_sync_is_a_barrier_where_the_cookies_are_heard() {
+    let mut env = Env::new("win-barrier").local_in_home();
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    let made = env.s.file(home.join(r"docs\d07\just before.txt"));
+    let synced = c.sync(&home).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{synced:?}");
+    assert!(answered(&mut c, &named(&home, "just before")).contains(&made));
+    drop(c);
+    drop(env);
+
+    let mut env = Env::new("win-checked");
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    let made = env.s.file(home.join(r"docs\d07\just before.txt"));
+    let begun = Instant::now();
+    let synced = c.sync(&home).unwrap();
+    assert!(begun.elapsed() < Duration::from_secs(5), "it waited");
+    // Checked, then live as it was.
+    assert!(
+        matches!(synced.names, Proof::Live(_) | Proof::Checked(_)),
+        "{synced:?}"
+    );
+    assert!(answered(&mut c, &named(&home, "just before")).contains(&made));
 }
 
 /// One engine per user: a second waits on the lock while the first

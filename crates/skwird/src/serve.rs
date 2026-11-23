@@ -187,8 +187,7 @@ fn sources(
     } else {
         (crate::live::watcher(config.watches), None)
     };
-    // Windows has neither yet (phase 4, step 5): Linux's alone are
-    // listened to.
+    // inotify and fanotify, each waited on with the mount table: Linux's.
     #[cfg(target_os = "linux")]
     {
         if let Some(w) = &watcher {
@@ -204,8 +203,15 @@ fn sources(
             });
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (commands, shared);
+    // Windows' watcher hears each root on a thread of its own, and is
+    // read here for the writer.
+    #[cfg(windows)]
+    if let Some(w) = &watcher {
+        let (w, commands, shared) = (Arc::clone(w), commands.clone(), Arc::clone(shared));
+        named("skwird-heard", move || {
+            crate::live::listen(&w, &commands, &shared.readers);
+        });
+    }
     (watcher, group)
 }
 

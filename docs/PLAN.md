@@ -1791,6 +1791,42 @@ above).
      removal. It is let go of when its volume is about to be removed
      (`RegisterDeviceNotification`'s query to remove), then opened
      again.
+
+   Done on 2026-11-23, but for the volume's removal
+   (`crates/crawl/src/windows/watch.rs`):
+   - **The watcher.** Each root is watched before it is read, by one
+     handle on a thread of its own, and is heard whole once opened, as
+     the system service hears a marked filesystem.
+   - **Its events.** Each names an entry by its path below the root. Its
+     folder is found in the index by that path and gathered, or the
+     nearest folder above it the index holds, for a folder made with
+     what is in it. An event in a folder not covered is dropped: the
+     engine's own folders are under the home on Windows, and it would
+     hear its own saves.
+   - **An overflow** lowers the root's coverage, and a check brings live
+     back. A watch that ends says so, and its root is checked, never
+     live, until the engine starts again.
+   - **The barrier.** A cookie is heard in the stream of the root
+     holding the cookies' folder alone, and Windows does not order one
+     root's stream with another's. So a sync of that root is a barrier,
+     and a sync of any other root checks: it answers what was made
+     before it, and never waits for a cookie it cannot hear. The
+     cookies' folder is in the user's application data, under the home,
+     the root a user's engine has by default.
+   - **No share.** Registrations (`watch`) change nothing on Windows,
+     where every root is live; `watching` says each folder live as its
+     root is, with no share.
+
+   Under Wine (its `ReadDirectoryChangesW` runs over the host's inotify),
+   all pass: a change, a new deep folder and a removal answered without
+   a sync; a sync a barrier where the cookies are heard, and a check
+   elsewhere that never waits. An overflow cannot be forced there.
+
+   Left:
+   - the volume's removal (`RegisterDeviceNotification`), so that a
+     removable drive's root lets go of it;
+   - a watch that ended is not tried again until the engine starts
+     again.
 6. **A logon task** (DESIGN 1): the user's engine started at logon by a
    task of the user's, its definition in `dist/windows/`.
 7. **The service.**

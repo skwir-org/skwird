@@ -71,6 +71,8 @@ mod windows;
 use windows as sys;
 #[cfg(windows)]
 pub use windows::Root;
+#[cfg(windows)]
+pub use windows::watch::{Heard, Watcher};
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod other;
@@ -79,11 +81,11 @@ use other as sys;
 #[cfg(not(any(target_os = "linux", windows)))]
 pub use other::Root;
 
-// No watcher but Linux's yet (rule 7): Windows' comes with phase 4,
-// macOS's with phase 5.
-#[cfg(not(target_os = "linux"))]
+// No watcher but Linux's and Windows' yet (rule 7): macOS's comes with
+// phase 5.
+#[cfg(not(any(target_os = "linux", windows)))]
 mod unwatched;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub use unwatched::{Heard, Watcher};
 
 pub use exclude::Exclusions;

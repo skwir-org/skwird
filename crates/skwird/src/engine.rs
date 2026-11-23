@@ -633,7 +633,9 @@ pub fn writer(
     group: Option<Arc<Group>>,
 ) {
     let opts = Options {
-        watcher: watcher.clone(),
+        // Each folder watched as it is read on Linux; on Windows, each root
+        // is heard whole, and no folder is watched alone.
+        watcher: watcher.clone().filter(|_| cfg!(target_os = "linux")),
         threads: config.threads,
         // The system service answers each asker by each folder's ACL too.
         acls: config.system,
@@ -650,14 +652,23 @@ pub fn writer(
     let table = Table::read().unwrap_or_default();
     // Each root's filesystem marked before it is read (DESIGN 2, "watch,
     // then read"): what changes from now on is heard.
-    let marked: Vec<Option<(u32, u32)>> = match &group {
-        Some(g) => config
+    // On Windows, each root's tree watched whole before it is read, as a
+    // filesystem is marked (phase 4, step 5).
+    let marked: Vec<Option<(u32, u32)>> = match (&group, &watcher) {
+        (Some(g), _) => config
             .roots
             .iter()
             .enumerate()
             .map(|(i, root)| mark(g, i, root, &table))
             .collect(),
-        None => vec![None; config.roots.len()],
+        #[cfg(windows)]
+        (None, Some(w)) => config
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(i, root)| watch_whole(w, i, root))
+            .collect(),
+        _ => vec![None; config.roots.len()],
     };
     let since = Time::now();
     let cookies = match (&watcher, &group) {
@@ -982,9 +993,106 @@ impl Writing<'_> {
         true
     }
 
+    /// What the roots' watches heard (Windows, phase 4, step 5): each
+    /// entry's folder found in its root's index by its path, and gathered;
+    /// an overflow lowering its root's coverage at once, the check due once
+    /// the queue is quiet; a watch that ended, its root no longer heard.
+    #[cfg(windows)]
+    fn heard(&mut self, generation: u64, heard: Vec<Heard>) {
+        let now = Instant::now();
+        self.done.events += heard.len() as u64;
+        let mut lowered = BTreeSet::new();
+        for h in heard {
+            match h {
+                Heard::Entry { scope, .. } if self.opening.contains_key(&scope) => {
+                    self.hold(HeldEvent::Watched(generation, h));
+                }
+                Heard::Entry { scope, rel } => {
+                    if let Some((folder, name)) = self.entry_heard(scope, &rel) {
+                        match name {
+                            Some(name) => self.gather.note_entry(scope, folder, name, now),
+                            None => self.gather.note(scope, folder, now),
+                        }
+                    }
+                }
+                Heard::Overflow { scope } => {
+                    self.done.overflows += 1;
+                    self.opening_overflowed();
+                    if let Some(keeper) = self.keepers.get_mut(scope).and_then(Option::as_mut) {
+                        keeper.overflowed();
+                        lowered.insert(scope);
+                    }
+                }
+                Heard::Lost { scope } => {
+                    log(&format!(
+                        "root {scope}: its watch ended, so it is checked, never live"
+                    ));
+                    if let Some(m) = self.marked.get_mut(scope) {
+                        *m = None;
+                    }
+                    if let Some(keeper) = self.keepers.get_mut(scope).and_then(Option::as_mut) {
+                        keeper.unheard();
+                        lowered.insert(scope);
+                    }
+                }
+                Heard::Cookie(n) => {
+                    // Only the current watcher's cookie proves its queue read.
+                    if self
+                        .watcher
+                        .as_ref()
+                        .is_some_and(|w| w.generation() == generation)
+                    {
+                        self.cookie_heard(n);
+                    }
+                }
+            }
+        }
+        if !lowered.is_empty() {
+            log("events dropped: not live until checked");
+            self.gather.overflowed(now);
+            for i in lowered {
+                self.publish(i);
+            }
+        }
+    }
+
+    /// Where an entry heard at `rel` below root `scope` is to be read
+    /// again: its folder, and its name to stat; or, its folder not in the
+    /// index yet (made since, with what is in it), the nearest folder above
+    /// it the index holds, read whole, its new folders crawled. None where
+    /// that folder is not covered (the engine's own, an exclusion, a
+    /// mount): nothing heard there is read.
+    #[cfg(windows)]
+    fn entry_heard(&self, scope: usize, rel: &Path) -> Option<(FolderId, Option<Box<[u8]>>)> {
+        let index = self.keepers.get(scope)?.as_ref()?.index();
+        let covered = |f: FolderId| {
+            !matches!(
+                index.state_of(f),
+                Some(skwird_index::block::State::NotCovered(_))
+            )
+        };
+        let parent = rel.parent().unwrap_or(Path::new(""));
+        if let Some(folder) = index.folder_at(parent) {
+            let mut name = Vec::new();
+            skwird_crawl::wtf8::push(Path::new(rel.file_name()?), &mut name);
+            return covered(folder).then(|| (folder, Some(name.into_boxed_slice())));
+        }
+        let mut above = parent.to_path_buf();
+        let folder = loop {
+            if !above.pop() {
+                break index.root()?;
+            }
+            if let Some(f) = index.folder_at(&above) {
+                break f;
+            }
+        };
+        covered(folder).then_some((folder, None))
+    }
+
     /// What the watcher heard: each folder named gathered, an overflow or
     /// a watched subtree's own folder lost lowering coverage at once, the
     /// check due once the queue is quiet.
+    #[cfg(target_os = "linux")]
     fn heard(&mut self, generation: u64, heard: Vec<Heard>) {
         let now = Instant::now();
         self.done.events += heard.len() as u64;
@@ -1182,6 +1290,10 @@ impl Writing<'_> {
     /// The folders clients keep live, watched: the watcher told, each root
     /// given those below it, each new one installed.
     fn apply_scopes(&mut self) {
+        // Windows hears each root whole: no folder is kept live alone.
+        if cfg!(windows) {
+            return;
+        }
         let Some(watcher) = &self.watcher else {
             return;
         };
@@ -1270,7 +1382,8 @@ impl Writing<'_> {
             .map_or((0, 0), |w| (w.watching(), w.budget()));
         Watching {
             folders,
-            share: Some(Share {
+            // Windows hears each root whole, with no share of watches.
+            share: (!cfg!(windows)).then_some(Share {
                 used: used as u64,
                 size: size as u64,
             }),
@@ -1305,6 +1418,8 @@ impl Writing<'_> {
             _ => match crate::coverage::coverage_at(index, keeper.root().path(), &rel) {
                 None => NotLive::Missing,
                 Some(c) => match c.names {
+                    // In a root heard whole (Windows), live as it is.
+                    Proof::Live(since) => return (Keeping::Live(since), folders),
                     Proof::NotCovered(why) => NotLive::NotCovered(why),
                     _ => NotLive::Pending,
                 },
@@ -1491,11 +1606,21 @@ impl Writing<'_> {
         [self.gather.deadline(), late].into_iter().flatten().min()
     }
 
-    /// Whether answers at `rel` below root `root` are live.
+    /// Whether answers at `rel` below root `root` are live, and a sync of
+    /// it a barrier: a cookie is heard in its turn after its changes.
+    /// On Windows each root is heard on a stream of its own, and a cookie
+    /// in the stream of the root holding the cookies' folder alone: a sync
+    /// of another root checks, live or not.
     fn is_live(&self, root: usize, rel: &Path) -> bool {
-        self.keepers[root]
-            .as_ref()
-            .is_some_and(|k| k.index().live_since(rel).is_some())
+        let Some(keeper) = self.keepers[root].as_ref() else {
+            return false;
+        };
+        let barrier = !cfg!(windows)
+            || self
+                .cookies
+                .as_ref()
+                .is_some_and(|c| c.starts_with(keeper.root().path()));
+        barrier && keeper.index().live_since(rel).is_some()
     }
 
     /// A cookie made, its number given; none without a cookie folder.
@@ -1595,6 +1720,23 @@ impl Writing<'_> {
 
 /// Mark root `i`'s filesystem, at `root`: its device, or none if it was
 /// refused, said why, and the root is checked, never live.
+/// Root `i`, at `root`, heard whole from now on (Windows): its tree
+/// watched by one handle. Said marked, as a filesystem is on Linux, with
+/// no device to name; none if it cannot be, and it is checked, never
+/// live.
+#[cfg(windows)]
+fn watch_whole(watcher: &Watcher, i: usize, root: &Path) -> Option<(u32, u32)> {
+    match watcher.watch_root(i, root) {
+        Ok(()) => Some((0, 0)),
+        Err(e) => {
+            log(&format!(
+                "root {i} cannot be watched, so it is checked, never live: {e}"
+            ));
+            None
+        }
+    }
+}
+
 fn mark(group: &Group, i: usize, root: &Path, table: &Table) -> Option<(u32, u32)> {
     match group.mark(root, table) {
         Ok(m) => {

@@ -59,7 +59,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   set through a mount made for it and let go of at once; handles are
   opened through the mount table's mounts when they are read. What is
   opened again is known by its identity and mount id, never by its path
-  alone.
+  alone. One exception: on Windows, a root's folder is held open while
+  it is watched (`ReadDirectoryChangesW` needs its handle). It is
+  opened to share reading, writing and deletion, so it stops no rename
+  or removal.
 - **A share counts all the work it bounds,** and stays under its
   budget, leaving room for what cannot wait. The writer's work for what
   is heard (finding, applying, saving) is timed by its own thread's

@@ -30,6 +30,8 @@
 
 #![allow(unsafe_code)] // Windows' calls have no safe binding; each block says why it is sound.
 
+pub mod watch;
+
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
@@ -128,7 +130,7 @@ impl Fail {
 
 /// A handle, closed once dropped.
 #[derive(Debug)]
-struct Handle(HANDLE);
+pub(crate) struct Handle(pub(crate) HANDLE);
 
 // SAFETY: a handle names a kernel object, usable from any thread; it is
 // closed once, when dropped, and never used after.
@@ -405,7 +407,7 @@ pub(crate) fn plain(path: &Path) -> PathBuf {
 }
 
 /// `path` in its verbatim form, which takes any length, NUL-terminated.
-fn verbatim(path: &Path) -> Vec<u16> {
+pub(crate) fn verbatim(path: &Path) -> Vec<u16> {
     let mut parts = path.components();
     let start = match parts.next() {
         Some(Component::Prefix(p)) => match p.kind() {
@@ -720,7 +722,7 @@ fn list(dir: &Handle) -> Result<Vec<Item>, Fail> {
 }
 
 /// The buffer's bytes.
-fn bytemuck(buffer: &[u64]) -> &[u8] {
+pub(crate) fn bytemuck(buffer: &[u64]) -> &[u8] {
     // SAFETY: a `u64` slice is as many bytes, each initialized, aligned
     // for a byte's reading.
     unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) }
