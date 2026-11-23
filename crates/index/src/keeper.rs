@@ -24,7 +24,7 @@ use skwird_crawl::{Cancel, Entry, Error, Exclusions, Options, Root, Time, Watch,
 use crate::block::{FolderId, State};
 use crate::index::Index;
 use crate::log::{self, Log, Op, Record, Token};
-use crate::store::{self, Mark};
+use crate::store::{self, Mark, Position};
 use crate::tree::Limits;
 use crate::update::{self, HeardFolder, Proof, Refreshed, Seen};
 
@@ -143,6 +143,10 @@ pub struct Keeper {
     /// The log's epoch and last record when the index was last saved, or
     /// found saved: none until it is ([`Keeper::save`]).
     saved: Option<(u64, u64)>,
+    /// Where the change history was read up to, every change before it
+    /// applied ([`Keeper::set_position`]); and the one saved last.
+    position: Option<Position>,
+    saved_position: Option<Position>,
 }
 
 /// An epoch not `other`: the time, and the process.
@@ -205,6 +209,8 @@ impl Keeper {
                         live: Vec::new(),
                         acls: HashMap::new(),
                         saved: Some((mark.epoch, mark.log_seq)),
+                        position: mark.position,
+                        saved_position: mark.position,
                     };
                     if keeper.log.is_none() {
                         // The journal cannot go on from a log not found.
@@ -254,6 +260,8 @@ impl Keeper {
             live: Vec::new(),
             acls: HashMap::new(),
             saved: None,
+            position: None,
+            saved_position: None,
         };
         keeper.note(&built.watches);
         // Saved at once, so that the next start loads it; a save that
@@ -569,6 +577,19 @@ impl Keeper {
     pub fn unheard(&mut self) {
         self.live.clear();
         self.publish_live();
+    }
+
+    /// Where the change history was read up to, every change before it
+    /// applied: saved with the index at its next save, for the next start
+    /// to resume from (DESIGN 2). None takes back the one kept: what was
+    /// read since is not proven, and the next start does not resume.
+    pub fn set_position(&mut self, position: Option<Position>) {
+        self.position = position;
+    }
+
+    /// The position kept: as read back, or as set since.
+    pub fn position(&self) -> Option<Position> {
+        self.position
     }
 
     /// The folder at `rel` below the root, if the index holds one there of
@@ -893,6 +914,7 @@ impl Keeper {
             proven_at: proven_at(self.index.proof()),
             epoch: log.epoch(),
             log_seq: log.next() - 1,
+            position: self.position,
         };
         store::save(&mut self.index, &self.dir, &mark)?;
         let size = std::fs::metadata(log.path()).map_or(0, |m| m.len());
@@ -911,15 +933,18 @@ impl Keeper {
         }
         self.remove_other_logs();
         self.saved = self.log.as_ref().map(|log| (log.epoch(), log.next() - 1));
+        self.saved_position = self.position;
         Ok(())
     }
 
     /// Whether anything is new since the last save: a record logged, a
-    /// chunk not read from its file, a name not in one, or no save yet.
+    /// chunk not read from its file, a name not in one, the position
+    /// moved, or no save yet.
     fn unsaved(&self) -> bool {
         let at = self.log.as_ref().map(|log| (log.epoch(), log.next() - 1));
         at.is_none()
             || at != self.saved
+            || self.position != self.saved_position
             || self
                 .index
                 .tree()

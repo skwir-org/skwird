@@ -2046,10 +2046,27 @@ above).
    them (`skwird_crawl::open_folder`). The service test makes the user's
    file as the user, naming a folder of theirs and one that is not.
 
+   **The journal's position kept with the index** (2026-11-24, DESIGN 2,
+   "As built on Windows"):
+   - the follower says its position after each batch; the writer takes
+     it in once every change heard before it is applied, and never while
+     its root proves nothing; the index's manifest keeps it (version 4,
+     version 3 still read, as none);
+   - at a start where the rule holds, the root is resumed from it: what
+     changed meanwhile replayed, live at the replay's end, no check;
+   - the service manager's stop ends the engine cleanly, every root saved
+     with its position. It ended the process before.
+
+   Tested under Linux: the position saved, read back from the manifest
+   alone and with the index, and a manifest of version 3 still read. On
+   the runners: a root followed from a position kept hears what was made
+   meanwhile, then the replay's end; one of another journal, or ahead of
+   it, is not resumed from; the service stopped, a file made, the
+   service started again, the file answered with no sync and no check.
+
    **Left of step 7:**
-   - **The journal's position kept with the index,** and DESIGN 2's rule
-     applied at each start: caught up where it holds, the table read
-     again where it does not. Until then, a start checks each root.
+   - **The table read again** where a position kept does not hold, in
+     place of the check: seconds where the check stats every folder.
    - **A volume attached or taken away while the service runs**
      (`RegisterDeviceNotification`): a root from then on, or let go of.
      Until then, the roots are those at its start.

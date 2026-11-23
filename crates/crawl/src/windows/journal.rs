@@ -60,7 +60,7 @@ pub struct Journal {
 }
 
 /// Where reading a journal goes on from: kept with the index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position {
     /// The journal it was read from.
     pub journal: u64,

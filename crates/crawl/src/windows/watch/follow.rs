@@ -73,6 +73,11 @@ pub(super) struct Follower {
     input: Box<READ_USN_JOURNAL_DATA_V0>,
     buffer: Vec<u64>,
     position: Position,
+    /// Where the journal was as it started, while what came before it is
+    /// replayed from a position kept: none once read past it, or where it
+    /// started from the journal's next record.
+    replay_until: Option<i64>,
+    resumed: bool,
 }
 
 // SAFETY: moved once, to the thread that reads, and used by it alone
@@ -80,9 +85,11 @@ pub(super) struct Follower {
 unsafe impl Send for Follower {}
 
 impl Follower {
-    /// Follow the journal of the volume holding the root at `root` from its
-    /// next record, the journal made first where there is none.
-    pub(super) fn start(root: &Path) -> std::io::Result<Follower> {
+    /// Follow the journal of the volume holding the root at `root`, the
+    /// journal made first where there is none: from `kept` where the
+    /// journal still holds it (DESIGN 2, [`Position::holds`]), what changed
+    /// since replayed; from its next record otherwise.
+    pub(super) fn start(root: &Path, kept: Option<Position>) -> std::io::Result<Follower> {
         let device = journal::device_of(root)?;
         let volume = Volume(journal::open_device(&device, 0)?);
         let found = match volume.journal() {
@@ -119,11 +126,27 @@ impl Follower {
             ov: Box::new(unsafe { std::mem::zeroed() }),
             input: Box::default(),
             buffer: vec![0u64; 8 * 1024],
-            position: Position {
+            position: kept.filter(|k| k.holds(&found)).unwrap_or(Position {
                 journal: found.id,
                 next: found.next,
-            },
+            }),
+            replay_until: kept
+                .filter(|k| k.holds(&found) && k.next < found.next)
+                .map(|_| found.next),
+            resumed: kept.is_some_and(|k| k.holds(&found)),
         })
+    }
+
+    /// Where it reads from next.
+    pub(super) fn position(&self) -> Position {
+        self.position
+    }
+
+    /// Whether it started from the position kept; and whether what came
+    /// before the journal's next record, as it started, is still to be
+    /// read.
+    pub(super) fn resumed(&self) -> (bool, bool) {
+        (self.resumed, self.replay_until.is_some())
     }
 
     /// Ask for the records from the position on, the read waiting for one:
@@ -302,6 +325,8 @@ pub(super) fn run(
             // Records past the position dropped: read on from the next, the
             // root checked meanwhile, if the journal is still the same one.
             queue.push([Heard::Overflow { scope }]);
+            // The replay is cut short: the check makes the root current.
+            f.replay_until = None;
             match f.volume.journal() {
                 Ok(j) if j.id == f.position.journal => f.position.next = j.next,
                 _ => {
@@ -315,10 +340,21 @@ pub(super) fn run(
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            queue.push(f.heard(&journal::records(bytes), scope, root, cookies.as_deref()));
+            let mut said = f.heard(&journal::records(bytes), scope, root, cookies.as_deref());
             if let Some(next) = journal::next_of(bytes) {
                 f.position.next = next;
             }
+            // After what it read, in the same turn: once that is applied, the
+            // position holds it.
+            said.push(Heard::Position {
+                scope,
+                at: f.position,
+            });
+            if f.replay_until.is_some_and(|until| f.position.next >= until) {
+                f.replay_until = None;
+                said.push(Heard::Replayed { scope });
+            }
+            queue.push(said);
         }
         if !f.ask() {
             queue.push([Heard::Lost { scope }]);

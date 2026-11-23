@@ -237,6 +237,26 @@ concerned, until that subtree is read again.
   26.3 numbered its events afresh, below fsearch's saved id. A stream
   started from that id then replayed nothing, and said nothing (its
   `2919777`).
+
+  **As built on Windows** (2026-11-24, the system service's journal,
+  phase 4, step 7):
+  - The follower says its position after each batch, after what the
+    batch said. The writer takes a position in only once none of its
+    root's folders heard is still to be applied, and never while the
+    root proves nothing: not resumed and not yet built or checked, or
+    after an overflow, a watch ended or a change not applied, until its
+    check is done.
+  - The position is kept in the index's manifest (version 4), so that
+    the next start reads it before the index. It is saved with a save
+    something else makes due, and at a clean stop, never by a save of
+    its own: the engine's own saves are changes its volume's journal
+    holds too, and would make one save due after another.
+  - At a start where the rule holds, the root is followed from there:
+    what changed while no engine ran is heard first, and the root is
+    live once the replay reaches where the journal was at the start,
+    with no check. Where it does not hold, the root is checked.
+  - The service manager's stop ends the engine cleanly: what was heard
+    is applied and every root saved, its position with it.
 - **The barrier** makes "live" mean up to now. The client asks for a
   sync. skwird creates a cookie file in a folder of its own that shares
   the notification queue, and answers once it hears it. Where the

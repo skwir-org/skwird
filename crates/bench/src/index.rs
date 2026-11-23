@@ -153,6 +153,7 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
         proven_at: now,
         epoch: 0,
         log_seq: 0,
+        position: None,
     };
     store::save(&mut index, &dir, &mark).map_err(|e| format!("cannot save: {e}"))?;
     println!("save: {}", time(start.elapsed()));

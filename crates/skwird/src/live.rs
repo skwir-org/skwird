@@ -596,6 +596,11 @@ impl Gather {
         self.spent(took, now);
     }
 
+    /// Whether a folder of `root` heard is still to be applied.
+    pub fn holds(&self, root: usize) -> bool {
+        self.heard.keys().any(|(r, _)| *r == root)
+    }
+
     /// Every folder of `root` heard, done gathering or not: a sync takes
     /// them at once.
     pub fn take(&mut self, root: usize) -> Vec<HeardFolder> {

@@ -218,6 +218,7 @@ fn mark(at: Time) -> store::Mark {
         proven_at: at,
         epoch: 0,
         log_seq: 0,
+        position: None,
     }
 }
 

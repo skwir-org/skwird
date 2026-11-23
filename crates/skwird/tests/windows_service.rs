@@ -133,6 +133,51 @@ fn kept_out_by(user: &User, secret: &Path, not_theirs: &Path, bin: &Path) {
     assert_eq!(code, Some(0), "{said}");
 }
 
+/// `net` run with `args`, which waits for the service to stop or start.
+fn net(args: &[&str]) {
+    let out = Command::new("net").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The service stopped and started again resumes `root` from its
+/// journal's position kept (DESIGN 2): its stop saves the position with
+/// the index; a file made while it was stopped is answered once its
+/// journal is replayed, with no sync and no check, and the root is live.
+fn stopped_and_started_it_resumes(s: &Scratch, root: &Path) {
+    net(&["stop", skwird::service::NAME]);
+    let index = skwird::engine::index_dir(&skwird::dirs::Dirs::system(), root);
+    let kept = skwird_index::store::read_mark(&index).and_then(|m| m.position);
+    assert!(kept.is_some(), "the stop kept its position:\n{}", log());
+    s.write(r"root\open\notes-while-stopped.txt", b"");
+    let meanwhile = root.join(r"open\notes-while-stopped.txt");
+    net(&["start", skwird::service::NAME]);
+    let mut c = ready(root);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !answered(&mut c, &named(root, "notes")).contains(&meanwhile) {
+        assert!(Instant::now() < deadline, "never replayed:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !matches!(c.coverage(root).unwrap().names, Proof::Live(_)) {
+        assert!(Instant::now() < deadline, "never live again:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let logged = log();
+    let restart = logged.rfind("serving 1 roots").unwrap();
+    let since = &logged[restart..];
+    assert!(
+        since.contains("resumed from its journal's position kept"),
+        "{since}"
+    );
+    assert!(since.contains("its journal replayed, live"), "{since}");
+    assert!(!since.contains("checked in"), "no check:\n{since}");
+}
+
 /// The service, registered and started by `skwird service add`, as
 /// `LocalSystem`:
 /// - its pipe taken as the system's by an administrator's client and a
@@ -145,6 +190,8 @@ fn kept_out_by(user: &User, secret: &Path, not_theirs: &Path, bin: &Path) {
 /// - the user's own file of exclusions, in their profile, kept: a folder
 ///   of theirs it names never indexed, one it names that is not theirs
 ///   indexed all the same;
+/// - stopped and started again, it resumes from its journal's position
+///   kept, with no check ([`stopped_and_started_it_resumes`]);
 /// - taken back by `skwird service remove`, its pipe gone.
 #[test]
 fn the_service_answers_each_user_what_they_could_list() {
@@ -224,6 +271,7 @@ fn the_service_answers_each_user_what_they_could_list() {
     assert!(said.contains("notes-open.txt"), "{said}");
     assert!(said.contains("notes-later.txt"), "{said}");
     assert!(!said.contains("notes-closed.txt"), "{said}");
+    stopped_and_started_it_resumes(&s, &root);
     let said = run(&["service", "remove"]);
     assert!(said.contains("stopped and taken back"), "{said}");
     std::mem::forget(registered);

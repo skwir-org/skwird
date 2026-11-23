@@ -18,8 +18,10 @@
 //! names' layout versions (4 bytes each); the save's number (8); when it
 //! was saved, when the index was last crawled whole, and when its names
 //! were last proven (8 and 4 each); the log's epoch, and the number of
-//! the last record the chunks hold (8 each); the number the next names
-//! segment takes (8); the number of names
+//! the last record the chunks hold (8 each); where the change history was
+//! read up to, if it was ([`Position`]: 1, then 8 and 8, or 1 alone; from
+//! version 4, version 3 read as none); the number the next names segment
+//! takes (8); the number of names
 //! segments (4) and each one's number (8 each); the number of chunks (4)
 //! and each one's number (4 each).
 
@@ -38,7 +40,9 @@ use crate::names::{self, Names, Segment};
 use crate::tree::{ChunkId, Limits, Tree};
 
 const MAGIC: &[u8; 4] = b"SKWM";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
+/// The manifest's version before the position was kept, still read.
+const WITHOUT_POSITION: u32 = 3;
 const MANIFEST: &str = "manifest";
 
 /// Why an index could not be read back.
@@ -88,6 +92,19 @@ pub struct Mark {
     /// hold: the records after it are to be replayed.
     pub epoch: u64,
     pub log_seq: u64,
+    /// Where the change history was read up to, every change before it
+    /// applied in what is saved: none where none was, or what was read
+    /// since is not proven ([`Position`]).
+    pub position: Option<Position>,
+}
+
+/// A position in a system's history of changes, for an index to resume
+/// from (DESIGN 2): the history's identity, and the next record to read
+/// from it. On Windows, the change journal's id and its next USN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    pub history: u64,
+    pub next: i64,
 }
 
 fn chunk_file(id: ChunkId) -> String {
@@ -137,7 +154,8 @@ fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
     if r.take::<4>().as_ref() != Some(MAGIC) {
         return Err(LoadError::Damaged);
     }
-    if r.u32() != Some(VERSION)
+    let version = r.u32();
+    if !matches!(version, Some(VERSION | WITHOUT_POSITION))
         || r.u32() != Some(chunk::VERSION)
         || r.u32() != Some(names::VERSION)
     {
@@ -151,6 +169,22 @@ fn read_manifest(dir: &Path) -> Result<Manifest, LoadError> {
             proven_at: r.time()?,
             epoch: r.u64()?,
             log_seq: r.u64()?,
+            position: None,
+        };
+        let mark = if version == Some(VERSION) {
+            Mark {
+                position: match r.take::<1>()? {
+                    [0] => None,
+                    [1] => Some(Position {
+                        history: r.u64()?,
+                        next: r.take().map(i64::from_le_bytes)?,
+                    }),
+                    _ => return None,
+                },
+                ..mark
+            }
+        } else {
+            mark
         };
         let next_segment = r.u64()?;
         let count = r.u32()? as usize;
@@ -279,6 +313,14 @@ pub fn save(index: &mut Index, dir: &Path, mark: &Mark) -> std::io::Result<()> {
     }
     m.extend_from_slice(&mark.epoch.to_le_bytes());
     m.extend_from_slice(&mark.log_seq.to_le_bytes());
+    match mark.position {
+        None => m.push(0),
+        Some(p) => {
+            m.push(1);
+            m.extend_from_slice(&p.history.to_le_bytes());
+            m.extend_from_slice(&p.next.to_le_bytes());
+        }
+    }
     m.extend_from_slice(&next_segment.to_le_bytes());
     m.extend_from_slice(&(segments.len() as u32).to_le_bytes());
     for s in &segments {
@@ -358,6 +400,13 @@ fn remove_unnamed(dir: &Path, segments: &[u64], ids: &[ChunkId]) {
 /// The index saved in `dir`, its files mapped, and what it says of
 /// itself. Every file is checked as it is read; any that does not read
 /// as its layout refuses the whole.
+/// What the last save in `dir` says, its manifest alone read: where its
+/// change history was read up to, before the index is loaded. None where
+/// none is saved, or it does not read.
+pub fn read_mark(dir: &Path) -> Option<Mark> {
+    read_manifest(dir).ok().map(|m| m.mark)
+}
+
 pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Mark), LoadError> {
     let manifest = read_manifest(dir)?;
     let segments = manifest

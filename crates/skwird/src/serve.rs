@@ -33,6 +33,20 @@ const MOST_QUERIES: usize = 4;
 /// And the most connections a user holds open at once.
 const MOST_CONNECTIONS: usize = 64;
 
+/// Set once the engine is asked to stop by its service manager (Windows',
+/// [`stop`]): its loop ends at its next wake, as when it is idle.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Stop serving on `pipe` (Windows' service manager's stop): the loop
+/// that waits for clients is woken by a connection to its own pipe, and
+/// ends as when idle, the writer applying what it heard and saving every
+/// root, its journal's position among it, before [`serve`] gives back.
+#[cfg(windows)]
+pub fn stop(pipe: &Path) {
+    STOPPING.store(true, Ordering::Release);
+    let _ = skwird_client::pipe::Stream::connect(pipe.as_os_str(), Some(Duration::from_secs(1)));
+}
+
 /// How many clients are connected, and since when none is.
 struct Live {
     state: Mutex<(usize, Instant)>,
@@ -68,8 +82,9 @@ impl Live {
 }
 
 /// Serve the user's engine until it has been idle for `config.idle`, or
-/// for ever. A second engine blocks on the lock until the first is gone,
-/// then takes over: it never polls the lock.
+/// for ever, or until its service manager stops it (Windows, [`stop`]). A
+/// second engine blocks on the lock until the first is gone, then takes
+/// over: it never polls the lock.
 pub fn serve(config: &Config) -> Result<(), String> {
     // Before any thread allocates: what a burst frees goes back.
     crate::memory::settle();
@@ -116,7 +131,11 @@ pub fn serve(config: &Config) -> Result<(), String> {
         if wait.is_some_and(|w| w.is_zero()) {
             break;
         }
-        let stream = match listener.accept(wait) {
+        let accepted = listener.accept(wait);
+        if STOPPING.load(Ordering::Acquire) {
+            break;
+        }
+        let stream = match accepted {
             Ok(Some(stream)) => stream,
             Ok(None) => continue,
             Err(e) => return Err(format!("cannot wait for clients: {e}")),

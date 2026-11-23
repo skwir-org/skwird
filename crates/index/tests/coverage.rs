@@ -157,6 +157,7 @@ fn a_change_made_while_the_engine_was_down_is_found() {
             proven_at: saved_at,
             epoch: 0,
             log_seq: 0,
+            position: None,
         },
     )
     .unwrap();
@@ -471,6 +472,7 @@ fn random_edits_never_overstate_coverage() {
                         proven_at: now,
                         epoch: 0,
                         log_seq: 0,
+                        position: None,
                     },
                 )
                 .unwrap();

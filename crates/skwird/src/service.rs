@@ -55,8 +55,9 @@ use windows_sys::Win32::System::Services::{
     SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
     SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
     SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW,
-    SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP, SERVICE_STOPPED,
-    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
+    SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP,
+    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
+    StartServiceW,
 };
 
 use crate::engine::{Config, log};
@@ -104,12 +105,18 @@ impl Drop for Service {
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
 /// The handle the manager is told the service's state through.
 static STATUS: AtomicUsize = AtomicUsize::new(0);
+/// The pipe the service answers on, which a stop wakes its loop through.
+static PIPE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+/// How long a stop may take: the writer applies what it heard and saves
+/// every root.
+const STOPPING_FOR: u32 = 30_000;
 
 /// Serve `config` as the service the manager started: false, at once,
 /// where this process is not one it started (run from a console). Gives
 /// back once the service has stopped.
 pub fn dispatch(config: &Config) -> Result<bool, String> {
     *CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+    *PIPE.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.dirs.socket());
     let mut name = wide(NAME);
     let table = [
         SERVICE_TABLE_ENTRYW {
@@ -160,7 +167,11 @@ fn report(state: SERVICE_STATUS_CURRENT_STATE, code: u32) {
         },
         dwServiceSpecificExitCode: code,
         dwCheckPoint: 0,
-        dwWaitHint: 0,
+        dwWaitHint: if state == SERVICE_STOP_PENDING {
+            STOPPING_FOR
+        } else {
+            0
+        },
     };
     // SAFETY: the handle the manager gave this service, which it never
     // closes; the status read for the call.
@@ -213,17 +224,24 @@ unsafe extern "system" fn service_main(_: u32, _: *mut windows_sys::core::PWSTR)
 }
 
 /// What the manager asks of the service: to stop, as the machine shuts
-/// down or an administrator asks, it says it stopped. The dispatcher then
-/// gives back ([`dispatch`]), and the process ends with `main`: its index
-/// is saved as each change is, and read back at the next start, as after
-/// a Linux service's `SIGTERM`. Ended here, the process would end before
-/// the manager's call returned, which then fails (`ERROR_BROKEN_PIPE`),
-/// as a runner's first stop did.
+/// down or an administrator asks. It says it is stopping, and its loop is
+/// woken to end as when idle (`crate::serve::stop`): the writer applies
+/// what it heard and saves every root, its journal's position among it,
+/// so that the next start resumes from there (DESIGN 2). Once the engine
+/// is served, the service says it stopped, the dispatcher gives back
+/// ([`dispatch`]), and the process ends with `main`. Ended here, the
+/// process would end before the manager's call returned, which then fails
+/// (`ERROR_BROKEN_PIPE`), as a runner's first stop did.
 unsafe extern "system" fn control(code: u32, _: u32, _: *mut c_void, _: *mut c_void) -> u32 {
     match code {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             log("stopped by the service manager");
-            report(SERVICE_STOPPED, 0);
+            report(SERVICE_STOP_PENDING, 0);
+            let pipe = PIPE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            match pipe {
+                Some(pipe) => crate::serve::stop(&pipe),
+                None => report(SERVICE_STOPPED, 0),
+            }
             NO_ERROR
         }
         SERVICE_CONTROL_INTERROGATE => NO_ERROR,

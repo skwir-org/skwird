@@ -673,6 +673,9 @@ pub fn writer(
     // then read"): what changes from now on is heard.
     // On Windows, each root's tree watched whole before it is read, as a
     // filesystem is marked (phase 4, step 5).
+    // The system service's roots resumed from the journal's position kept.
+    #[cfg(windows)]
+    let mut resuming = Vec::new();
     let marked: Vec<Option<(u32, u32)>> = match (&group, &watcher) {
         (Some(g), _) => config
             .roots
@@ -685,7 +688,14 @@ pub fn writer(
             .roots
             .iter()
             .enumerate()
-            .map(|(i, root)| watch_whole(w, i, root, config.system))
+            .map(|(i, root)| {
+                let (marked, resumed) =
+                    watch_whole(w, i, root, config.system, kept_position(config, root));
+                if resumed {
+                    resuming.push(i);
+                }
+                marked
+            })
             .collect(),
         _ => vec![None; config.roots.len()],
     };
@@ -701,6 +711,8 @@ pub fn writer(
         config,
         shared,
         cancel,
+        #[cfg(windows)]
+        journals: Journals::started(config.roots.len(), &resuming, since),
         opts: opts.clone(),
         keepers: (0..config.roots.len()).map(|_| None).collect(),
         registrations,
@@ -931,6 +943,57 @@ struct Writing<'a> {
     /// send what they opened.
     shared_arc: Arc<Shared>,
     sender: Sender<Command>,
+    /// The system service's roots' journals (Windows).
+    #[cfg(windows)]
+    journals: Journals,
+}
+
+/// What the writer keeps of its roots' journals (Windows' system
+/// service, DESIGN 2): where each was read up to, to keep with its index
+/// once every change before it is applied, and which roots prove nothing
+/// yet. A position kept is never past a change not applied.
+#[cfg(windows)]
+#[derive(Default)]
+struct Journals {
+    /// Each root's last position heard, not kept yet.
+    pending: HashMap<usize, skwird_crawl::journal::Position>,
+    /// The roots whose positions prove nothing until they are built or
+    /// checked: one that could not resume, or whose changes were dropped
+    /// (an overflow, a watch ended, a change not applied).
+    unproven: std::collections::HashSet<usize>,
+    /// The roots resumed from a position kept, live once their replay
+    /// ends, from when they were followed.
+    replaying: HashMap<usize, Time>,
+}
+
+#[cfg(windows)]
+impl Journals {
+    /// The journals of `roots` roots, those `resuming` resumed from their
+    /// positions kept at `since`: live once their replays end. One that is
+    /// not proves nothing it hears until it is built or checked.
+    fn started(roots: usize, resuming: &[usize], since: Time) -> Journals {
+        let mut journals = Journals::default();
+        for i in 0..roots {
+            if resuming.contains(&i) {
+                log(&format!(
+                    "root {i}: resumed from its journal's position kept"
+                ));
+                journals.replaying.insert(i, since);
+            } else {
+                journals.unproven.insert(i);
+            }
+        }
+        journals
+    }
+
+    /// Root `i`'s changes were dropped, or not applied: no position it
+    /// hears is kept until it is checked, and its replay, cut short, ends
+    /// with the check.
+    fn doubt(&mut self, i: usize) {
+        self.unproven.insert(i);
+        self.pending.remove(&i);
+        self.replaying.remove(&i);
+    }
 }
 
 /// A root being opened: since when its filesystem was marked, and whether
@@ -1077,7 +1140,11 @@ impl Writing<'_> {
         let mut lowered = BTreeSet::new();
         for h in heard {
             match h {
-                Heard::Entry { scope, .. } if self.opening.contains_key(&scope) => {
+                Heard::Entry { scope, .. }
+                | Heard::Position { scope, .. }
+                | Heard::Replayed { scope }
+                    if self.opening.contains_key(&scope) =>
+                {
                     self.hold(HeldEvent::Watched(generation, h));
                 }
                 Heard::Entry { scope, rel } => {
@@ -1090,6 +1157,7 @@ impl Writing<'_> {
                 }
                 Heard::Overflow { scope } => {
                     self.done.overflows += 1;
+                    self.journals.doubt(scope);
                     self.opening_overflowed();
                     if let Some(keeper) = self.keepers.get_mut(scope).and_then(Option::as_mut) {
                         keeper.overflowed();
@@ -1100,6 +1168,7 @@ impl Writing<'_> {
                     log(&format!(
                         "root {scope}: its watch ended, so it is checked, never live"
                     ));
+                    self.journals.doubt(scope);
                     if let Some(m) = self.marked.get_mut(scope) {
                         *m = None;
                     }
@@ -1118,6 +1187,14 @@ impl Writing<'_> {
                         self.cookie_heard(n);
                     }
                 }
+                // Kept once every change heard before it is applied, if the
+                // root proves what it hears.
+                Heard::Position { scope, at } => {
+                    if !self.journals.unproven.contains(&scope) {
+                        self.journals.pending.insert(scope, at);
+                    }
+                }
+                Heard::Replayed { scope } => self.replayed(scope),
             }
         }
         if !lowered.is_empty() {
@@ -1289,6 +1366,8 @@ impl Writing<'_> {
             self.done.reads_took(&read, took);
             self.gather.applied(root, &read, took, Instant::now());
         }
+        #[cfg(windows)]
+        self.positions_applied();
         if self.gather.recheck_due(now) {
             let start = thread_time();
             for i in 0..self.keepers.len() {
@@ -1315,12 +1394,15 @@ impl Writing<'_> {
         }
     }
 
-    /// Every gathering applied at once, as the engine stops.
+    /// Every gathering applied at once, as the engine stops, and the
+    /// positions heard before it kept, to be saved.
     fn flush_all(&mut self) {
         for root in 0..self.keepers.len() {
             let heard = self.gather.take(root);
             self.apply_heard(root, &heard);
         }
+        #[cfg(windows)]
+        self.positions_applied();
     }
 
     /// The folders of `root` heard, read again; gives those read, each with
@@ -1344,6 +1426,12 @@ impl Writing<'_> {
                 log(&format!(
                     "root {root}: what was heard cannot be applied: {e}"
                 ));
+                // No position past it is kept until the root is checked.
+                #[cfg(windows)]
+                {
+                    self.journals.unproven.insert(root);
+                    self.journals.pending.remove(&root);
+                }
                 Vec::new()
             }
         };
@@ -1572,9 +1660,14 @@ impl Writing<'_> {
     /// current: a root on a drive taken away and given back, or whose
     /// watch failed, is live again, not checked until the engine starts
     /// again. A watch whose check fails is let go of, to be tried again.
+    /// A root heard whole and not live yet (its replay cut short, its
+    /// check at opening failed) is live from the check's start; and what
+    /// its journal says from then on proves again (DESIGN 2).
     fn check_root(&mut self, i: usize) {
         #[cfg(windows)]
         let since = self.rewatch(i);
+        #[cfg(windows)]
+        let checked_from = Time::now();
         let Some(keeper) = self.keepers[i].as_mut() else {
             return;
         };
@@ -1583,6 +1676,7 @@ impl Writing<'_> {
         if let Some(since) = since {
             if current {
                 keeper.heard_whole(since);
+                self.journals.unproven.remove(&i);
                 self.publish(i);
                 log(&format!("root {i}: watched again, live"));
             } else {
@@ -1591,13 +1685,70 @@ impl Writing<'_> {
                 }
                 self.marked[i] = None;
             }
+        } else if current {
+            self.journals.unproven.remove(&i);
+            let heard = self.marked.get(i).copied().flatten().is_some();
+            if heard && keeper.live().is_empty() && !self.journals.replaying.contains_key(&i) {
+                keeper.heard_whole(checked_from);
+                self.publish(i);
+                log(&format!("root {i}: checked, live"));
+            }
         }
         #[cfg(not(windows))]
         let _ = current;
     }
 
+    /// Root `scope`'s replay from its position kept is done (Windows):
+    /// what changed while no engine ran has been heard, and it is live from
+    /// when it was followed, as if no engine had stopped. Its check is not
+    /// needed (DESIGN 2).
+    #[cfg(windows)]
+    fn replayed(&mut self, scope: usize) {
+        let Some(since) = self.journals.replaying.remove(&scope) else {
+            return;
+        };
+        if let Some(keeper) = self.keepers.get_mut(scope).and_then(Option::as_mut) {
+            keeper.heard_whole(since);
+            self.publish(scope);
+            log(&format!("root {scope}: its journal replayed, live"));
+        }
+    }
+
+    /// The positions heard of roots every change before which is applied
+    /// (none of their folders heard waits), kept with their indexes, for
+    /// the next start to resume from (Windows). Saved with the next save
+    /// that something else makes due, or at a clean stop: never a save of
+    /// its own, or the engine's own saves, heard in its volume's journal,
+    /// would make one due after another.
+    #[cfg(windows)]
+    fn positions_applied(&mut self) {
+        let ready: Vec<usize> = self
+            .journals
+            .pending
+            .keys()
+            .copied()
+            .filter(|&i| !self.gather.holds(i))
+            .collect();
+        for i in ready {
+            let Some(keeper) = self.keepers.get_mut(i).and_then(Option::as_mut) else {
+                continue;
+            };
+            let Some(at) = self.journals.pending.remove(&i) else {
+                continue;
+            };
+            if keeper.position().is_none() {
+                log(&format!("root {i}: its journal's position kept"));
+            }
+            keeper.set_position(Some(skwird_index::store::Position {
+                history: at.journal,
+                next: at.next,
+            }));
+        }
+    }
+
     /// Root `i`'s tree watched again where its watch ended (Windows): since
-    /// when, if it is.
+    /// when, if it is. What its journal says proves nothing until it is
+    /// checked.
     #[cfg(windows)]
     fn rewatch(&mut self, i: usize) -> Option<Time> {
         if self.marked.get(i).copied().flatten().is_some() {
@@ -1606,7 +1757,8 @@ impl Writing<'_> {
         let watcher = self.watcher.as_ref()?;
         let path = self.keepers.get(i)?.as_ref()?.root().path().to_path_buf();
         let since = Time::now();
-        self.marked[i] = watch_whole(watcher, i, &path, self.config.system);
+        self.journals.doubt(i);
+        self.marked[i] = watch_whole(watcher, i, &path, self.config.system, None).0;
         self.marked[i].map(|_| since)
     }
 }
@@ -1836,29 +1988,52 @@ impl Writing<'_> {
 }
 
 /// Root `i`, at `root`, heard whole from now on (Windows): for the system
-/// service, through its volume's change journal (NTFS's); otherwise, or
-/// where its volume has none to follow (FAT, exFAT), its tree watched by
-/// one handle. Said marked, as a filesystem is on Linux, with no device
-/// to name; none if it cannot be, and it is checked, never live.
+/// service, through its volume's change journal (NTFS's), from the
+/// position `kept` where the journal still holds it; otherwise, or where
+/// its volume has none to follow (FAT, exFAT), its tree watched by one
+/// handle. Said marked, as a filesystem is on Linux, with no device to
+/// name; none if it cannot be, and it is checked, never live. And whether
+/// it resumed from `kept`.
 #[cfg(windows)]
-fn watch_whole(watcher: &Watcher, i: usize, root: &Path, system: bool) -> Option<(u32, u32)> {
+fn watch_whole(
+    watcher: &Watcher,
+    i: usize,
+    root: &Path,
+    system: bool,
+    kept: Option<skwird_crawl::journal::Position>,
+) -> (Option<(u32, u32)>, bool) {
     if system {
-        match watcher.follow_root(i, root) {
-            Ok(()) => return Some((0, 0)),
+        match watcher.follow_root_from(i, root, kept) {
+            Ok(resumed) => return (Some((0, 0)), resumed),
             Err(e) => log(&format!(
                 "root {i}: its volume's journal cannot be followed, so its tree is watched: {e}"
             )),
         }
     }
     match watcher.watch_root(i, root) {
-        Ok(()) => Some((0, 0)),
+        Ok(()) => (Some((0, 0)), false),
         Err(e) => {
             log(&format!(
                 "root {i} cannot be watched, so it is checked, never live: {e}"
             ));
-            None
+            (None, false)
         }
     }
+}
+
+/// The position root `root`'s journal was read up to, as its index kept
+/// it at its last save (Windows' system service): none for a user's
+/// engine, or where none was kept.
+#[cfg(windows)]
+fn kept_position(config: &Config, root: &Path) -> Option<skwird_crawl::journal::Position> {
+    if !config.system {
+        return None;
+    }
+    let p = skwird_index::store::read_mark(&index_dir(&config.dirs, root))?.position?;
+    Some(skwird_crawl::journal::Position {
+        journal: p.history,
+        next: p.next,
+    })
 }
 
 /// Mark root `i`'s filesystem, at `root`: its device, or none if it was
@@ -1929,11 +2104,17 @@ impl Writing<'_> {
         // Heard whole once marked (the system service): an index read back
         // is checked first. A user's engine hears its scopes alone.
         let marked = self.marked.get(i).copied().flatten().is_some();
+        // One resumed from its journal's position kept is current once its
+        // replay ends, with no check (Windows, DESIGN 2).
+        #[cfg(windows)]
+        let resumed = self.journals.replaying.contains_key(&i);
+        #[cfg(not(windows))]
+        let resumed = false;
         crate::serve::named("skwird-open", move || {
             let (mut keeper, built) = open_one(&config, &shared, i, &path, &ex, &opts, &cancel);
             // A crawl proves it current; an index read back, its check.
             let mut current = built;
-            if let Some(keeper) = keeper.as_mut().filter(|_| !built && marked) {
+            if let Some(keeper) = keeper.as_mut().filter(|_| !built && marked && !resumed) {
                 let start = Instant::now();
                 match keeper.refresh(&cancel) {
                     Ok(done) => {
@@ -1981,6 +2162,17 @@ impl Writing<'_> {
         if let Some(keeper) = self.keepers[root].as_mut() {
             if current && marked {
                 keeper.heard_whole(opening.since);
+            }
+            // Built or checked, what its journal says proves from now on; not
+            // resumed, the position its index kept holds no more.
+            #[cfg(windows)]
+            {
+                if current {
+                    self.journals.unproven.remove(&root);
+                }
+                if !self.journals.replaying.contains_key(&root) {
+                    keeper.set_position(None);
+                }
             }
             if opening.overflowed {
                 keeper.overflowed();

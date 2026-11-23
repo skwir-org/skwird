@@ -103,6 +103,62 @@ fn a_journal_says_what_changed_below_its_root() {
     );
 }
 
+/// A root followed from a position kept (DESIGN 2): what was made while
+/// no one followed it is heard first, then the replay's end; followed
+/// from the journal's next record, it says the position at once. A
+/// position of another journal, or past the journal's next record, is not
+/// resumed from. On a test machine's NTFS volume alone.
+#[test]
+fn a_root_followed_from_a_kept_position_hears_what_changed_meanwhile() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    assert!(crate::read_anything(), "an elevated administrator holds it");
+    let s = Scratch::under(&volume, "resume");
+    let root = s.dir("tree");
+    let w = Arc::new(Watcher::new(1, 0).unwrap());
+    assert!(!w.follow_root_from(3, &root, None).unwrap(), "nothing kept");
+    let heard = hearing(&w);
+    let first = until(&heard, |h| {
+        h.iter().any(|h| matches!(h, Heard::Position { .. }))
+    });
+    let Some(&Heard::Position { scope: 3, at: kept }) =
+        first.iter().find(|h| matches!(h, Heard::Position { .. }))
+    else {
+        panic!("{first:?}");
+    };
+    w.unwatch_root(3);
+    // Made while no one follows it.
+    s.write(r"tree\while away.txt", b"x");
+    let w = Arc::new(Watcher::new(2, 0).unwrap());
+    assert!(w.follow_root_from(3, &root, Some(kept)).unwrap(), "resumed");
+    let heard = hearing(&w);
+    let all = until(&heard, |h| h.contains(&Heard::Replayed { scope: 3 }));
+    let replayed = all
+        .iter()
+        .position(|h| *h == Heard::Replayed { scope: 3 })
+        .unwrap();
+    assert!(
+        entries(&all[..replayed], 3).contains(&PathBuf::from("while away.txt")),
+        "{all:?}"
+    );
+    w.unwatch_root(3);
+    let other = super::Position {
+        journal: kept.journal ^ 1,
+        ..kept
+    };
+    let ahead = super::Position {
+        next: i64::MAX,
+        ..kept
+    };
+    for refused in [other, ahead] {
+        let w = Watcher::new(3, 0).unwrap();
+        assert!(
+            !w.follow_root_from(3, &root, Some(refused)).unwrap(),
+            "{refused:?}"
+        );
+    }
+}
 /// A root followed through a journal reads nothing while nothing changes
 /// (rule 6: the read waits in the system, never asked again and again),
 /// and its watch ends once the journal is deleted, so that it is checked

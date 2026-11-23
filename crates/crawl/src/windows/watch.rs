@@ -60,6 +60,17 @@ pub enum Heard {
     /// The cookie of this number was made ([`Watcher::watch_cookies`]):
     /// every change below its root heard before it has been read.
     Cookie(u64),
+    /// Root `scope`'s journal was read up to `at`: every change before it
+    /// has been heard, and once applied, the next start may resume from
+    /// there (DESIGN 2). Said as a root is followed, and after each batch.
+    Position {
+        scope: usize,
+        at: super::journal::Position,
+    },
+    /// Root `scope`, followed from a position kept, has read its journal
+    /// up to where it was as it started: what changed while no engine ran
+    /// has been heard, the end of a replay (DESIGN 2).
+    Replayed { scope: usize },
 }
 
 /// A root watched: its thread, and the event that stops it.
@@ -200,10 +211,34 @@ impl Watcher {
     /// [`follow`]): from the journal's next record, so that what is made
     /// once this returns is heard whenever it is read.
     pub fn follow_root(&self, scope: usize, path: &Path) -> std::io::Result<()> {
-        let mut follower = follow::Follower::start(path)?;
+        self.follow_root_from(scope, path, None).map(|_| ())
+    }
+
+    /// [`Watcher::follow_root`], from the position `kept` where the journal
+    /// still holds it (DESIGN 2): what changed since is heard first, then
+    /// [`Heard::Replayed`]. Whether it resumed so; otherwise it is followed
+    /// from the journal's next record. Its position is said at once
+    /// ([`Heard::Position`]), and after each batch.
+    pub fn follow_root_from(
+        &self,
+        scope: usize,
+        path: &Path,
+        kept: Option<super::journal::Position>,
+    ) -> std::io::Result<bool> {
+        let mut follower = follow::Follower::start(path, kept)?;
         if !follower.ask() {
             return Err(std::io::Error::last_os_error());
         }
+        let (resumed, replaying) = follower.resumed();
+        let mut said = vec![Heard::Position {
+            scope,
+            at: follower.position(),
+        }];
+        if resumed && !replaying {
+            // Nothing was written since the position kept.
+            said.push(Heard::Replayed { scope });
+        }
+        self.queue.push(said);
         let stop = Arc::new(event()?);
         let (queue, cookies, reads, root) = (
             Arc::clone(&self.queue),
@@ -229,7 +264,7 @@ impl Watcher {
                     thread: Some(thread),
                 },
             );
-        Ok(())
+        Ok(resumed)
     }
 
     /// The journal reads done so far, every followed root's: one for each

@@ -13,6 +13,7 @@ use std::time::Duration;
 use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Why};
 use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
 use skwird_index::log::{Op, Token};
+use skwird_index::store::{self, Position};
 use skwird_index::tree::Limits;
 use skwird_index::{Index, Proof, Query};
 use skwird_testkit::{Scratch, reference_walk};
@@ -602,6 +603,50 @@ fn a_save_with_nothing_new_writes_nothing() {
         matches!(opened, Opened::Loaded { replayed: 0, .. }),
         "{opened:?}"
     );
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+}
+
+/// The position a change history was read up to (DESIGN 2): set, it is
+/// saved with the index though nothing else changed, and read back from
+/// the manifest alone, before the index, and with it; taken back, it is
+/// saved as none. A manifest of the version before it (3) still reads,
+/// with none: no index is built again for it.
+#[test]
+fn a_position_is_saved_with_the_index_and_read_back() {
+    let s = Scratch::new("keeper-position");
+    s.file("a/one");
+    let dir = s.join("index");
+    let (mut k, _) = keeper(&s);
+    assert_eq!(k.position(), None, "built: none read");
+    let at = Position {
+        history: 0x1234_5678,
+        next: 4096,
+    };
+    k.set_position(Some(at));
+    k.save().unwrap();
+    drop(k);
+    assert_eq!(store::read_mark(&dir).and_then(|m| m.position), Some(at));
+    let (mut k, opened) = keeper(&s);
+    assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
+    assert_eq!(k.position(), Some(at));
+    k.set_position(None);
+    k.save().unwrap();
+    drop(k);
+    assert_eq!(store::read_mark(&dir).and_then(|m| m.position), None);
+    // The same manifest as version 3 wrote it: its version, no position.
+    let manifest = dir.join("manifest");
+    let mut bytes = std::fs::read(&manifest).unwrap();
+    // Its magic, three versions, the save's number, three times, the log's
+    // epoch and last record: the position's tag after.
+    let tag = 4 + 3 * 4 + 8 + 3 * 12 + 2 * 8;
+    assert_eq!(bytes[tag], 0, "no position");
+    bytes.remove(tag);
+    bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+    std::fs::write(&manifest, &bytes).unwrap();
+    let mark = store::read_mark(&dir).expect("version 3 still reads");
+    assert_eq!(mark.position, None);
+    let (k, opened) = keeper(&s);
+    assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
     assert_eq!(ours(k.index()), of_walk(s.path()));
 }
 
