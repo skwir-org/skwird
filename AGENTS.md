@@ -149,6 +149,20 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   Downloads to the user's own folders. A test that passes there passes
   against Wine's answers, not NTFS's. A path in a test is absolute as
   its system has it: `/home/...` is not absolute on Windows.
+- CI (`.github/workflows`, GitHub's runners). On every push to `main`
+  or a work branch `ci/...`, `ci.yml` runs the gate's checks that need no
+  machine of their own on Linux. Windows' and macOS' tests run on their
+  own systems on demand alone:
+  - pushed to `ci/windows/...`, `ci/macos/...` or `ci/all/...`;
+  - or run by hand (`gh workflow run windows.yml --ref <branch>`).
+
+  A runner GitHub hosts is a machine thrown away after its job, and on
+  Windows its user is an administrator. A Windows test that changes the
+  system (a task registered, a volume made) or needs an administrator
+  runs only where `skwird_testkit::throwaway()` says so: a hosted runner
+  the workflow marks with `SKWIRD_TEST_MACHINE`. It is skipped anywhere
+  else, as a root test is outside its machine. Work branches are pushed
+  freely; `main` only when the user says.
 - Linux's packages are tried in distribution roots:
   `tools/package/try.sh debian|ubuntu|fedora|arch` builds one in a
   root under `~/.cache/skwird-tests/roots`, entered as its root in a

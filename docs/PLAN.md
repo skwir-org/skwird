@@ -2036,3 +2036,25 @@ resumes:
     Windows' is proven on a Windows machine (phase 4, paused).
 - CI once there are crates to check on three systems. The development
   shell (`flake.nix`) already carries the Windows and macOS targets.
+
+  **Begun** (2026-11-23), once the repository was made public at
+  `github.com/skwir-org/skwird` (AGENTS.md, Testing):
+  - **Every push** to `main` or a work branch runs `ci.yml` on Linux:
+    formatting, the lints for the three systems, and the tests. Ubuntu's
+    rule that refuses unprivileged user namespaces is lifted on the
+    runner, for the tests of a mount made below a folder.
+  - **On demand,** `windows.yml` and `macos.yml` run the lints and the
+    tests on the system itself. Every job fetches every system's crates
+    first, since the client's copies are checked offline for Windows
+    too.
+  - **What it brought:**
+    - the 88 tests that pass under Wine pass on Windows Server 2025, on
+      NTFS;
+    - `skwird logon add` registers its task with Task Scheduler, which
+      gives it back, and `remove` takes it back (`throwaway`);
+    - macOS builds and runs the 51 tests it has.
+
+    The first runs found no bug of skwird's. A second engine taking over
+    once failed to answer in 20 s, in one of four Windows runs, with
+    nothing to say why. A wait that fails now prints each engine's log;
+    it has not failed again.
