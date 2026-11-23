@@ -15,16 +15,26 @@ fn the_copies_of_the_clients_crates_build_on_their_own() {
     let s = Scratch::new("vendored");
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let vendor = s.dir("vendor");
-    let made = Command::new("bash")
-        .arg(repo.join("tools/vendor-client"))
-        .arg(&vendor)
-        .output()
-        .unwrap();
-    assert!(
-        made.status.success(),
-        "{}",
-        String::from_utf8_lossy(&made.stderr)
-    );
+    let copy = || {
+        let made = Command::new("bash")
+            .arg(repo.join("tools/vendor-client"))
+            .arg(&vendor)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    };
+    copy();
+    // Copied again over a copy: what the script wrote is replaced, a
+    // file the client keeps beside it stays.
+    let own = s.write("vendor/skwird-client/README.skwir.md", b"the client's own");
+    let stale = s.write("vendor/skwird-client/src/gone.rs", b"");
+    copy();
+    assert_eq!(std::fs::read(&own).unwrap(), b"the client's own");
+    assert!(!stale.exists(), "what skwird no longer has is not kept");
     for name in ["skwird-protocol", "skwird-client"] {
         let manifest = std::fs::read_to_string(vendor.join(name).join("Cargo.toml")).unwrap();
         assert!(!manifest.contains("workspace"), "{name}: {manifest}");

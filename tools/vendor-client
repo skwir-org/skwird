@@ -9,6 +9,8 @@
 #
 # skwir takes no git dependency (its ADR-050): it keeps these copies in
 # its vendor folder, outside its workspace, and copies again to update.
+# A copy made again replaces what this script wrote, and keeps what the
+# client put beside it.
 set -euo pipefail
 
 dest=${1:?usage: tools/vendor-client DEST (a client\'s vendor folder)}
@@ -29,7 +31,10 @@ license=$(workspace_field license)
 copy() {
   local crate=$1 name=$2
   local from="$here/crates/$crate" out="$dest/$name"
-  rm -rf "$out"
+  # What this script writes, and that alone: a client keeps files of its
+  # own beside the copy (skwir's README.skwir.md).
+  rm -rf "$out/src" "$out/transcripts" "$out/Cargo.toml" "$out/VENDORED" \
+    "$out/LICENSE-MIT" "$out/LICENSE-APACHE"
   mkdir -p "$out"
   cp -R "$from/src" "$out/src"
   if [ -d "$from/transcripts" ]; then
