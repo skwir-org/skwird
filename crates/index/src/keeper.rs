@@ -393,14 +393,29 @@ impl Keeper {
     /// Prove the index current ([`update::refresh`]), logging each change
     /// and, once done, when its names were proven.
     pub fn refresh(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
-        let done = self.refresh_held(cancel);
+        self.refresh_by(cancel, &skwird_crawl::check)
+    }
+
+    /// [`Keeper::refresh`], its folders proven current by `checker` (on
+    /// NTFS, the system service's volume's file table).
+    pub fn refresh_by(
+        &mut self,
+        cancel: &Cancel,
+        checker: skwird_crawl::Checker<'_>,
+    ) -> Result<Refreshed, Error> {
+        let done = self.refresh_held(cancel, checker);
         self.read_acls(None);
         self.root.let_go();
         done
     }
 
-    fn refresh_held(&mut self, cancel: &Cancel) -> Result<Refreshed, Error> {
-        let done = update::refresh(&mut self.index, &mut self.root, &self.opts, cancel)?;
+    fn refresh_held(
+        &mut self,
+        cancel: &Cancel,
+        checker: skwird_crawl::Checker<'_>,
+    ) -> Result<Refreshed, Error> {
+        let done =
+            update::refresh_by(&mut self.index, &mut self.root, &self.opts, cancel, checker)?;
         // The time the index now says it was proven at, exactly.
         let proven = proven_at(self.index.proof());
         self.append(done.records.iter().cloned().chain([Record::Proven(proven)]));

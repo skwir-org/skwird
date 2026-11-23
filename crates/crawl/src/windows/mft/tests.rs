@@ -614,3 +614,64 @@ fn each_folder_says_what_it_is_judged_by() {
         root.descriptor(id("shared one"))
     );
 }
+
+/// The check by the table says stale what the check of the disk says,
+/// after a tree changed behind it: a file made in one folder, a folder
+/// renamed, one removed, one made in another, one left as it was. Each
+/// folder is found by its name from the root's record down, and judged by
+/// its identity, its kind and its change time. On a test machine's NTFS
+/// volume alone.
+#[test]
+fn a_check_by_the_table_is_the_disks() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    let s = Scratch::under(&volume, "mft-check");
+    for rel in [
+        r"tree\a\one.txt",
+        r"tree\b\two.txt",
+        r"tree\c\d\three.txt",
+        r"tree\e\four.txt",
+        r"tree\quiet\five.txt",
+    ] {
+        s.write(rel, b"x");
+    }
+    let root = crate::Root::open(&s.join("tree"), crate::Exclusions::none()).unwrap();
+    let opts = Options {
+        threads: 2,
+        ..Options::default()
+    };
+    let cancel = crate::Cancel::default();
+    let crawl = crate::crawl_all(&root, &opts, &cancel).unwrap();
+    let mut stored = crate::Stored::default();
+    for f in &crawl.folders {
+        if let Some(stat) = f.stat {
+            stored.push(
+                &f.rel,
+                crate::StoredFolder {
+                    id: stat.id,
+                    ctime: stat.ctime,
+                    again: false,
+                },
+            );
+        }
+    }
+    s.write(r"tree\a\new.txt", b"x");
+    s.rename(r"tree\b", r"tree\b2");
+    s.remove(r"tree\c\d");
+    s.dir(r"tree\e\made");
+    let said = |c: &crate::Checked| {
+        c.stale
+            .iter()
+            .map(|&(i, why)| (stored.rel(i).into_owned(), why))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let disk = said(&crate::check(&root, &stored, &opts, &cancel).unwrap());
+    let table = Volume::table_of(&volume).unwrap();
+    let by_table = said(&table.check(&root, &stored, &cancel).unwrap());
+    assert_eq!(by_table, disk);
+    for rel in ["", "a", "b", "c", r"c\d", "e"] {
+        assert!(disk.contains_key(Path::new(rel)), "{rel}: {disk:?}");
+    }
+    assert!(!disk.contains_key(Path::new("quiet")), "{disk:?}");
+}

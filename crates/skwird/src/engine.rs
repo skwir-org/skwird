@@ -1671,7 +1671,7 @@ impl Writing<'_> {
         let Some(keeper) = self.keepers[i].as_mut() else {
             return;
         };
-        let current = refresh(keeper, i, self.shared, &self.cancel);
+        let current = refresh(keeper, i, self.config.system, self.shared, &self.cancel);
         #[cfg(windows)]
         if let Some(since) = since {
             if current {
@@ -1802,11 +1802,51 @@ fn theirs(all: &[Registration], client: &str, uid: Option<u32>) -> Vec<PathBuf> 
         .collect()
 }
 
+/// Root `i`'s index proven current (the check), what is stale read again:
+/// for the system service on NTFS, each folder judged by its volume's
+/// file table, read whole in seconds, where the check stats every folder
+/// (Windows, `mft::Table::check`); by every folder's own stat otherwise,
+/// or where the table cannot be read. A table is read after the root is
+/// followed, so what changes after it is heard.
+fn check_index(
+    keeper: &mut Keeper,
+    i: usize,
+    system: bool,
+    cancel: &Cancel,
+) -> Result<skwird_index::Refreshed, skwird_crawl::Error> {
+    #[cfg(windows)]
+    if system && keeper.root().fs_name() == "NTFS" {
+        let start = Instant::now();
+        match skwird_crawl::journal::Volume::table_of(keeper.root().path()) {
+            Ok(table) => {
+                log(&format!(
+                    "root {i}: its volume's file table read in {:.2?}, to check it by",
+                    start.elapsed()
+                ));
+                return keeper.refresh_by(cancel, &|root, stored, _, cancel| {
+                    table.check(root, stored, cancel)
+                });
+            }
+            Err(e) => log(&format!(
+                "root {i}: its volume's file table cannot be read, so every folder is checked: {e}"
+            )),
+        }
+    }
+    let _ = (i, system);
+    keeper.refresh(cancel)
+}
+
 /// Check root `root`, save what changed, publish it: whether it was
 /// proven current.
-fn refresh(keeper: &mut Keeper, root: usize, shared: &Shared, cancel: &Cancel) -> bool {
+fn refresh(
+    keeper: &mut Keeper,
+    root: usize,
+    system: bool,
+    shared: &Shared,
+    cancel: &Cancel,
+) -> bool {
     let start = Instant::now();
-    let current = match keeper.refresh(cancel) {
+    let current = match check_index(keeper, root, system, cancel) {
         Ok(done) => {
             if !done.records.is_empty() {
                 log(&format!(
@@ -2116,7 +2156,7 @@ impl Writing<'_> {
             let mut current = built;
             if let Some(keeper) = keeper.as_mut().filter(|_| !built && marked && !resumed) {
                 let start = Instant::now();
-                match keeper.refresh(&cancel) {
+                match check_index(keeper, i, config.system, &cancel) {
                     Ok(done) => {
                         log(&format!(
                             "root {i} checked in {:.2?}: {} read again, {} crawled",

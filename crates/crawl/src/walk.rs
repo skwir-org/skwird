@@ -377,6 +377,11 @@ pub struct Checked {
     pub took: Duration,
 }
 
+/// What proves stored folders current for a refresh: [`check`], or one
+/// that stats them by other means (on NTFS, the system service's volume's
+/// file table: `mft::Table::check`).
+pub type Checker<'a> = &'a dyn Fn(&Root, &Stored, &Options, &Cancel) -> Result<Checked, Error>;
+
 /// Prove the stored folders current where nothing watched: each folder
 /// stat-ed by its path, its identity, mount and change time compared with
 /// what was stored, on [`Options::threads`] threads. A folder at or below

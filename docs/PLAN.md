@@ -2072,9 +2072,18 @@ above).
    it, is not resumed from; the service stopped, a file made, the
    service started again, the file answered with no sync and no check.
 
+   **The check by the table** (2026-11-24): where a position kept does not
+   hold, or after an overflow, the system service checks an NTFS root by
+   its volume's file table, read after the root is followed
+   (`mft::Table::check`, `Keeper::refresh_by`). Each stored folder is
+   found by its name from the root's record down and judged as the disk
+   would judge it; what is stale is read again from the disk. Unlike a
+   build anew, the index's log goes on, and clients' tokens hold. On the
+   runners: after a tree changed, the table's check says stale what the
+   disk's says; the service, its journal deleted while it was stopped,
+   checks by the table at its start, and answers what was made meanwhile.
+
    **Left of step 7:**
-   - **The table read again** where a position kept does not hold, in
-     place of the check: seconds where the check stats every folder.
    - **A volume attached or taken away while the service runs**
      (`RegisterDeviceNotification`): a root from then on, or let go of.
      Until then, the roots are those at its start.

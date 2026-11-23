@@ -616,10 +616,23 @@ pub fn refresh(
     opts: &Options,
     cancel: &Cancel,
 ) -> Result<Refreshed, Error> {
+    refresh_by(index, root, opts, cancel, &check)
+}
+
+/// [`refresh`], the stored folders proven current by `prove` (on NTFS,
+/// the system service's volume's file table), those it says stale read
+/// again from the disk.
+pub fn refresh_by(
+    index: &mut Index,
+    root: &mut Root,
+    opts: &Options,
+    cancel: &Cancel,
+    prove: skwird_crawl::Checker<'_>,
+) -> Result<Refreshed, Error> {
     let start = Time::now();
     root.reread_mounts().map_err(Error::Root)?;
     let (ids, stored) = index.stored(|_| true);
-    let checked = check(root, &stored, opts, cancel)?;
+    let checked = prove(root, &stored, opts, cancel)?;
     let mut done = Refreshed {
         checked: stored.len(),
         ..Refreshed::default()

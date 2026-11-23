@@ -50,7 +50,7 @@ use super::journal::{Volume, control};
 use super::{Folder, Item, Root, folder_kind, listed};
 use crate::Time;
 use crate::walk::mount_why;
-use crate::{FileId, FolderStat, Options, Outcome, Watch, Why};
+use crate::{Checked, FileId, FolderStat, Options, Outcome, Stale, Watch, Why};
 
 /// A file's reference: its record's number (48 bits) and that record's
 /// sequence number (16), which changes when the record is reused.
@@ -538,6 +538,126 @@ impl Table {
                 }
             })
             .collect()
+    }
+
+    /// The check ([`crate::check`]) with each folder's stat from the table,
+    /// not from the disk: in seconds where a stat of every folder takes
+    /// minutes on a volume of millions. Each stored folder is found as its
+    /// path finds it, by its name in its parent's entries from the root's
+    /// record down, and judged as `windows::verdict` judges it: its
+    /// identity, its kind, its change time. A folder the table cannot find
+    /// (gone, renamed, a record torn among its parent's) is said gone, and
+    /// read again from the disk with the rest that is stale: the check
+    /// says no less is current than the disk's would. The folders read
+    /// again are read from the disk.
+    pub fn check(
+        &self,
+        root: &Root,
+        stored: &crate::Stored,
+        cancel: &crate::Cancel,
+    ) -> Result<Checked, crate::Error> {
+        let start = std::time::Instant::now();
+        let points = root.points();
+        // Each folder's record, by its path below the root, as found.
+        let mut found: HashMap<PathBuf, Option<Reference>> = HashMap::new();
+        let on_volume = root.stat.id.dev == self.serial;
+        let mut stale = Vec::new();
+        for i in 0..stored.len() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let rel = stored.rel(i);
+            let reference = if !on_volume {
+                None
+            } else if rel.as_os_str().is_empty() {
+                Some(root.stat.id.ino)
+            } else {
+                self.find(root, &rel, &mut found)
+            };
+            if let Some(why) = self.verdict(&points, &rel, stored.folder(i), reference) {
+                stale.push((i, why));
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(crate::Error::Cancelled);
+        }
+        Ok(Checked {
+            stale,
+            took: start.elapsed(),
+        })
+    }
+
+    /// The record of the folder at `rel` below the root, found by its name
+    /// in its parent's entries, the parent found likewise and remembered in
+    /// `found`.
+    fn find(
+        &self,
+        root: &Root,
+        rel: &Path,
+        found: &mut HashMap<PathBuf, Option<Reference>>,
+    ) -> Option<Reference> {
+        if let Some(&known) = found.get(rel) {
+            return known;
+        }
+        let parent = rel.parent().unwrap_or(Path::new(""));
+        let above = if parent.as_os_str().is_empty() {
+            Some(root.stat.id.ino)
+        } else {
+            self.find(root, parent, found)
+        };
+        let mut name = Vec::new();
+        if let Some(last) = rel.file_name() {
+            crate::wtf8::push(Path::new(last), &mut name);
+        }
+        let reference = above.and_then(|above| {
+            self.children
+                .get(&number(above))?
+                .iter()
+                .find_map(|(n, i)| {
+                    let r = self.records.get(n)?;
+                    (r.names.get(*i)?.name == name).then_some(r.reference)
+                })
+        });
+        found.insert(rel.to_path_buf(), reference);
+        reference
+    }
+
+    /// What `windows::verdict` says of the stored folder at `rel`, its
+    /// record `reference` where the table found one.
+    fn verdict(
+        &self,
+        points: &[(PathBuf, bool)],
+        rel: &Path,
+        stored: crate::StoredFolder,
+        reference: Option<Reference>,
+    ) -> Option<Stale> {
+        if let Some(&(_, network)) = points.iter().find(|(p, _)| rel.starts_with(p)) {
+            return Some(if network {
+                Stale::NetworkMount
+            } else {
+                Stale::Mount
+            });
+        }
+        if stored.again {
+            return Some(Stale::Again);
+        }
+        let Some(record) = reference.and_then(|r| self.get(r)) else {
+            return Some(Stale::Gone);
+        };
+        if !record.folder {
+            return Some(Stale::Replaced);
+        }
+        match folder_kind(record.attributes, record.tag, || record.volume) {
+            Folder::Entered => {}
+            Folder::Link => return Some(Stale::Replaced),
+            Folder::NotCovered(Why::NetworkMount) => return Some(Stale::NetworkMount),
+            Folder::NotCovered(_) => return Some(Stale::Mount),
+        }
+        let stat = Table::stat_of(record, self.serial);
+        if stat.id != stored.id {
+            return Some(Stale::Replaced);
+        }
+        (stat.ctime != stored.ctime).then_some(Stale::Changed)
     }
 
     /// A folder's own facts, as its stat gives them, on the volume `dev`

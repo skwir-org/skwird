@@ -178,6 +178,40 @@ fn stopped_and_started_it_resumes(s: &Scratch, root: &Path) {
     assert!(!since.contains("checked in"), "no check:\n{since}");
 }
 
+/// Where the position kept no longer holds, the root is checked by its
+/// volume's file table (DESIGN 2): its journal deleted while the service
+/// is stopped, a file made meanwhile is answered once the restart's check
+/// is done, by the table, not resumed, and the root is live.
+fn a_journal_made_again_is_checked_by_the_table(s: &Scratch, volume: &Path, root: &Path) {
+    net(&["stop", skwird::service::NAME]);
+    let letter = volume.to_str().unwrap().trim_end_matches('\\');
+    let deleted = Command::new("fsutil")
+        .args(["usn", "deletejournal", "/n", letter])
+        .output()
+        .unwrap();
+    assert!(
+        deleted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted.stdout)
+    );
+    s.write(r"root\open\notes-journal-gone.txt", b"");
+    let meanwhile = root.join(r"open\notes-journal-gone.txt");
+    net(&["start", skwird::service::NAME]);
+    let mut c = ready(root);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !answered(&mut c, &named(root, "notes")).contains(&meanwhile)
+        || !matches!(c.coverage(root).unwrap().names, Proof::Live(_))
+    {
+        assert!(Instant::now() < deadline, "never checked:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let logged = log();
+    let since = &logged[logged.rfind("serving 1 roots").unwrap()..];
+    assert!(!since.contains("resumed from"), "{since}");
+    assert!(since.contains("to check it by"), "{since}");
+    assert!(since.contains("checked in"), "{since}");
+}
+
 /// The service, registered and started by `skwird service add`, as
 /// `LocalSystem`:
 /// - its pipe taken as the system's by an administrator's client and a
@@ -191,7 +225,9 @@ fn stopped_and_started_it_resumes(s: &Scratch, root: &Path) {
 ///   of theirs it names never indexed, one it names that is not theirs
 ///   indexed all the same;
 /// - stopped and started again, it resumes from its journal's position
-///   kept, with no check ([`stopped_and_started_it_resumes`]);
+///   kept, with no check ([`stopped_and_started_it_resumes`]); its journal
+///   made again meanwhile, it checks by the table
+///   ([`a_journal_made_again_is_checked_by_the_table`]);
 /// - taken back by `skwird service remove`, its pipe gone.
 #[test]
 fn the_service_answers_each_user_what_they_could_list() {
@@ -272,6 +308,7 @@ fn the_service_answers_each_user_what_they_could_list() {
     assert!(said.contains("notes-later.txt"), "{said}");
     assert!(!said.contains("notes-closed.txt"), "{said}");
     stopped_and_started_it_resumes(&s, &root);
+    a_journal_made_again_is_checked_by_the_table(&s, &volume, &root);
     let said = run(&["service", "remove"]);
     assert!(said.contains("stopped and taken back"), "{said}");
     std::mem::forget(registered);

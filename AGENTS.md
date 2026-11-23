@@ -165,7 +165,9 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   real system service there is in a test binary of its own
   (`tests/windows_service.rs`): while it runs, the system's pipe answers
   every client on the machine that names no pipe of its own, and cargo
-  runs one test binary at a time. Work branches are pushed freely;
+  runs one test binary at a time. So is one that makes a user and loads
+  their profile (`tests/windows_users.rs`), which loads the machine for
+  seconds: a test that times the engine beside it once failed so. Work branches are pushed freely;
   `main` only when the user says.
 - Linux's packages are tried in distribution roots:
   `tools/package/try.sh debian|ubuntu|fedora|arch` builds one in a

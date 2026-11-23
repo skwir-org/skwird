@@ -254,7 +254,12 @@ concerned, until that subtree is read again.
   - At a start where the rule holds, the root is followed from there:
     what changed while no engine ran is heard first, and the root is
     live once the replay reaches where the journal was at the start,
-    with no check. Where it does not hold, the root is checked.
+    with no check. Where it does not hold, the root is checked by its
+    volume's file table: each folder's stat taken from it, found by its
+    name from the root's record down, in seconds where a stat of every
+    folder takes minutes (`mft::Table::check`). What it says stale is
+    read again from the disk; a folder it cannot find is said gone, and
+    read again so. Its log goes on, so clients' tokens hold.
   - The service manager's stop ends the engine cleanly: what was heard
     is applied and every root saved, its position with it.
 - **The barrier** makes "live" mean up to now. The client asks for a
