@@ -66,8 +66,8 @@
           ./LICENSE-APACHE
         ];
       };
-      # The skwird crate's: the workspace has no version of its own.
-      inherit ((builtins.fromTOML (builtins.readFile ./crates/skwird/Cargo.toml)).package) version;
+      # The workspace's, every crate's (docs/DESIGN.md, decision 11).
+      inherit ((builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package) version;
       cargoLock.lockFile = ./Cargo.lock;
       skwird = pkgs.callPackage ./dist/nix/package.nix {
         inherit rustPlatform src version cargoLock;

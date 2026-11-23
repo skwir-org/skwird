@@ -1,6 +1,6 @@
 [package]
 name = "skwird-client"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ description = "skwird's client: finds or starts an engine, and asks it; and a fa
 # Windows, so that the copies a client keeps build on their own
 # (docs/DESIGN.md, Protocol).
 [dependencies]
-skwird-protocol = { path = "../protocol", version = "0.0.0" }
+skwird-protocol = { path = "../protocol", version = "0.1.0" }
 
 # Its pipes on Windows (phase 4): a version skwir's lockfile already
 # holds.

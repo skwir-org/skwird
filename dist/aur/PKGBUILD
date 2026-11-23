@@ -8,12 +8,12 @@
 # Maintainer: The skwir authors
 
 pkgname=skwird
-pkgver=0.0.0
+pkgver=0.1.0
 pkgrel=1
 pkgdesc='An index of file names kept current, answered over a local socket'
 arch=('x86_64' 'aarch64')
 url='https://skwir.org'
-# Where its releases are to be published.
+# Where its releases are published.
 _repo='https://github.com/skwir-org/skwird'
 license=('MIT OR Apache-2.0')
 depends=('gcc-libs' 'glibc')

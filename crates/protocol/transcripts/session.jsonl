@@ -4,7 +4,7 @@
 # Hello first: the versions the client speaks, and its name, which keeps
 # its registrations apart from another client's.
 > {"id":1,"hello":{"versions":[0],"client":"skwir"}}
-< {"id":1,"hello":{"version":0,"scope":"user","engine":"skwird 0.0.0","roots":["/home/user"]}}
+< {"id":1,"hello":{"version":0,"scope":"user","engine":"skwird 0.1.0","roots":["/home/user"]}}
 # How far answers below a root can be trusted: names checked, attributes
 # as of the last whole crawl, and a subtree not covered.
 > {"id":2,"coverage":{"root":"/home/user/Documents"}}

@@ -9,9 +9,10 @@
 set -eu
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 version="$(sed -n 's/^pkgver=//p' "$root/dist/aur/PKGBUILD")"
-crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/crates/skwird/Cargo.toml" | head -1)"
-if [ "$version" != "$crate" ]; then
-    echo "the PKGBUILD's version ($version) is not the skwird crate's ($crate)" >&2
+# Every crate's version is the workspace's (docs/DESIGN.md, decision 11).
+crate="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml")"
+if [ -z "$crate" ] || [ "$version" != "$crate" ]; then
+    echo "the PKGBUILD's version ($version) is not the workspace's (${crate:-none})" >&2
     exit 1
 fi
 work="$root/target/aur"

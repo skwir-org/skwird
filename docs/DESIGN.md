@@ -1534,6 +1534,22 @@ checks it there (`tools/package/check.sh`):
 The system service itself needs fanotify, which no user namespace
 grants: the flake's machines prove it (`checks`).
 
+**Versions** (the user's choice, 2026-11-23). skwird's version is its
+own, not skwir's, one for every crate (the workspace's), and it starts
+at 0.1.0. The reasons:
+- a client and an engine agree by the protocol's version, which `hello`
+  says (Protocol), never by the program's. A client keeps copies of
+  `skwird-client` and works with any engine that speaks its protocol;
+- skwir is skwird's first client, not its only one;
+- skwird's releases follow its systems' progress, not skwir's.
+
+It stays below 1.0 while the protocol is experimental, and 1.0
+declares it stable, what other programs are then promised. Below 1.0,
+the minor version moves with what a client, a package or a user meets:
+the protocol, the command line, a package's files. The patch version
+is for fixes alone. Its packages sit beside skwir's in skwir.org's
+repositories, their versions their own.
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`

@@ -24,6 +24,7 @@ fi
 workspace_field() {
   sed -n '/^\[workspace.package\]/,/^\[/p' "$here/Cargo.toml" | sed -n "s/^$1 = //p" | head -1
 }
+version=$(workspace_field version)
 edition=$(workspace_field edition)
 rust_version=$(workspace_field rust-version)
 license=$(workspace_field license)
@@ -45,7 +46,8 @@ copy() {
     echo "[package]"
     # The crate's own fields, the workspace's written out.
     sed -n '/^\[package\]/,/^\[/p' "$from/Cargo.toml" | sed '1d;/^\[/d;/^$/d' |
-      sed "s/^edition.workspace = true/edition = $edition/;
+      sed "s/^version.workspace = true/version = $version/;
+           s/^edition.workspace = true/edition = $edition/;
            s/^rust-version.workspace = true/rust-version = $rust_version/;
            s/^license.workspace = true/license = $license/"
     echo

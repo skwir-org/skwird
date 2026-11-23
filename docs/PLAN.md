@@ -2020,15 +2020,18 @@ resumes:
     takes minutes. It is run when a package's files change, and before a
     release.
 
+  **The version** (the user's choice, the same day, DESIGN 11): skwird's
+  own, 0.1.0 for every crate (the workspace's), written out in the
+  client's copies by `tools/vendor-client`. The repository is
+  `github.com/skwir-org/skwird`, the PKGBUILD's source.
+
   **Left:**
-  - a version: the crates are 0.0.0, and the first release's version is
-    the user's to choose;
   - the system service in a package's system, which needs fanotify, so
     a machine (the flake's prove it on NixOS);
   - skwir.org's repositories and their signing, skwir's release tools'
     work, beside skwir's own packages;
-  - publishing: the AUR, the PKGBUILD's source URL (where the releases
-    are to be, assumed `github.com/skwir-org/skwird`), nixpkgs;
+  - a release: its tag, notes and assets, and publishing to the AUR and
+    nixpkgs, each the user's to do or ask;
   - Homebrew, once macOS has an engine (phase 5), and winget, once
     Windows' is proven on a Windows machine (phase 4, paused).
 - CI once there are crates to check on three systems. The development
