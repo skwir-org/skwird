@@ -561,10 +561,116 @@ fn open_beneath(dir: &Handle, rel: &Path) -> Result<Handle, Fail> {
     Ok(handle)
 }
 
+/// What came of opening a user's own file ([`open_own`]).
+pub enum OwnFile {
+    /// Not there, nor a folder of its path.
+    Absent,
+    /// There, but not opened: a link, a junction or a file in its way, or
+    /// itself a link or a folder, or it could not be opened.
+    Refused,
+    /// Opened to read it and its security.
+    Opened(std::fs::File),
+}
+
+/// The file at `rel` below the folder at `home`, opened to read it and its
+/// security, through no reparse point (`OBJ_DONT_REPARSE`) and none
+/// itself: how the system service opens a file of a user's own (DESIGN
+/// 5), as `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` does on
+/// Linux. With the backup privilege, whatever its descriptor says.
+pub fn open_own(home: &Path, rel: &Path) -> OwnFile {
+    use windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_DATA, READ_CONTROL};
+    let Ok(home) = open_path(home) else {
+        return OwnFile::Absent;
+    };
+    let (Some(name), parent) = (rel.file_name(), rel.parent().unwrap_or(Path::new(""))) else {
+        return OwnFile::Refused;
+    };
+    let dir = match open_beneath(&home, parent) {
+        Ok(dir) => dir,
+        Err(Fail::Gone) => return OwnFile::Absent,
+        Err(_) => return OwnFile::Refused,
+    };
+    let name: Vec<u16> = name.encode_wide().collect();
+    let file = match nt_open_as(
+        dir.0,
+        &name,
+        FILE_READ_DATA | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_NON_DIRECTORY_FILE,
+    ) {
+        Ok(file) => file,
+        Err(Fail::Gone) => return OwnFile::Absent,
+        Err(_) => return OwnFile::Refused,
+    };
+    match info::<FILE_BASIC_INFO>(&file, FileBasicInfo) {
+        Ok(basic) if basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {
+            OwnFile::Opened(file.into_file())
+        }
+        _ => OwnFile::Refused,
+    }
+}
+
+/// The folder at `path` opened itself, never what it links to, to read
+/// its security; and its identity. An error where it is not a folder, or
+/// is a reparse point.
+pub fn open_folder(path: &Path) -> std::io::Result<(std::fs::File, FileId)> {
+    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+    let name = verbatim(path);
+    // SAFETY: a NUL-terminated name alive for the call, no security
+    // attributes, no template; the handle given is ours to close.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let handle = Handle(handle);
+    let (stat, attributes) = stat_of(&handle)?;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a folder, or a link",
+        ));
+    }
+    Ok((handle.into_file(), stat.id))
+}
+
+impl Handle {
+    /// The handle, as a file of std's, which closes it once dropped.
+    fn into_file(self) -> std::fs::File {
+        use std::os::windows::io::FromRawHandle;
+        let raw = self.0;
+        std::mem::forget(self);
+        // SAFETY: a handle of ours alone, open, given away whole.
+        unsafe { std::fs::File::from_raw_handle(raw) }
+    }
+}
+
 /// `name` below the folder open as `dir`, opened as a folder, itself if
 /// it is a reparse point, and through none above it. An empty name is the
 /// folder itself, opened again.
 fn nt_open(dir: HANDLE, name: &[u16]) -> Result<Handle, Fail> {
+    nt_open_as(
+        dir,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_DIRECTORY_FILE,
+    )
+}
+
+/// `name` below the folder open as `dir`, opened with `access`, as `kind`
+/// says (`FILE_DIRECTORY_FILE`, `FILE_NON_DIRECTORY_FILE`), itself if it
+/// is a reparse point, and through none above it.
+fn nt_open_as(dir: HANDLE, name: &[u16], access: u32, kind: u32) -> Result<Handle, Fail> {
     let bytes = u16::try_from(name.len() * 2).map_err(|_| Fail::Other(STATUS_NAME_TOO_LONG))?;
     let unicode = UNICODE_STRING {
         Length: bytes,
@@ -587,15 +693,14 @@ fn nt_open(dir: HANDLE, name: &[u16]) -> Result<Handle, Fail> {
     let status = unsafe {
         NtCreateFile(
             &raw mut handle,
-            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            access,
             &raw const attributes,
             &raw mut io,
             std::ptr::null(),
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             FILE_OPEN,
-            FILE_DIRECTORY_FILE
-                | FILE_SYNCHRONOUS_IO_NONALERT
+            kind | FILE_SYNCHRONOUS_IO_NONALERT
                 | FILE_OPEN_REPARSE_POINT
                 | FILE_OPEN_FOR_BACKUP_INTENT,
             std::ptr::null(),

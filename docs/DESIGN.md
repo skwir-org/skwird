@@ -501,7 +501,13 @@ proved as root in the test machine on Linux 6.18.58):
     go by the number. A user it cannot number is refused.
   - **Their homes** are their profiles (`ProfileList`), where every
     default private folder is left out (5). Their own files of
-    exclusions, and the folders they own: next (PLAN).
+    exclusions are read from their local application data
+    (`AppData\Local\skwird\config\exclude`, and `state\registered`
+    beside it): opened beneath the home through no reparse point
+    (`OBJ_DONT_REPARSE`), and taken only if their owner is the user,
+    `LocalSystem` or the administrators and none but them may write
+    them, as OpenSSH for Windows takes a user's keys. A folder a user
+    keeps out is theirs if its owner is them, as on Linux.
   - **Its roots:** every volume of the machine's own that stores files
     (NTFS, FAT, exFAT), at its drive's letter or its shortest folder.
     Never one on a USB, SD or MMC bus, or of a removable medium (open

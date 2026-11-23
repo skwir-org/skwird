@@ -411,7 +411,7 @@ impl User {
         // `/s`: the line after `/c`, its first and last quotes taken off, is
         // run as it is.
         let mut process = self.spawn(&format!(
-            "\"{}\" /d /s /c \"{command} > \"{}\" 2>&1\"",
+            "\"{}\" /d /s /c \"({command}) > \"{}\" 2>&1\"",
             system.join(r"System32\cmd.exe").display(),
             out.display()
         ));

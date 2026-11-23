@@ -91,6 +91,48 @@ fn answered(c: &mut Client, query: &Query) -> BTreeSet<PathBuf> {
     found
 }
 
+/// A client of the service, once it answers and its index of `root` is
+/// ready, waited for at most a minute.
+fn ready(root: &Path) -> Client {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let asked = Client::connect(&system())
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| match c.coverage(root) {
+                Ok(cov) if cov.names != Proof::NotCovered(Why::Unread) => Ok(c),
+                Ok(cov) => Err(format!("{:?}", cov.names)),
+                Err(e) => Err(e.to_string()),
+            });
+        match asked {
+            Ok(c) => return c,
+            Err(e) => assert!(
+                Instant::now() < deadline,
+                "the service never answered ({e}):\n{}",
+                log()
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A folder of `user`'s, made by them at `secret` with a file in it, and
+/// their own file of exclusions, in their profile, which names it and
+/// `not_theirs`; their output in `bin`.
+fn kept_out_by(user: &User, secret: &Path, not_theirs: &Path, bin: &Path) {
+    let config = r"%LOCALAPPDATA%\skwird\config";
+    let (code, said) = user.run(
+        &format!(
+            "mkdir \"{secret}\" && echo.> \"{secret}\\notes-secret.txt\" && mkdir \"{config}\" && \
+             (echo {secret}& echo {not_theirs})> \"{config}\\exclude\"",
+            secret = secret.display(),
+            not_theirs = not_theirs.display(),
+        ),
+        bin,
+        Duration::from_secs(60),
+    );
+    assert_eq!(code, Some(0), "{said}");
+}
+
 /// The service, registered and started by `skwird service add`, as
 /// `LocalSystem`:
 /// - its pipe taken as the system's by an administrator's client and a
@@ -100,6 +142,9 @@ fn answered(c: &mut Client, query: &Query) -> BTreeSet<PathBuf> {
 /// - an administrator answered a folder the administrators alone may list,
 ///   a user of the test's own not, though both are answered the folder
 ///   every user may list;
+/// - the user's own file of exclusions, in their profile, kept: a folder
+///   of theirs it names never indexed, one it names that is not theirs
+///   indexed all the same;
 /// - taken back by `skwird service remove`, its pipe gone.
 #[test]
 fn the_service_answers_each_user_what_they_could_list() {
@@ -118,34 +163,29 @@ fn the_service_answers_each_user_what_they_could_list() {
     skwird_testkit::grant(&bin, user.name);
     let theirs = bin.join("skwird.exe");
     std::fs::copy(program(), &theirs).unwrap();
+    // A folder of theirs, made by them, and their own file of exclusions,
+    // which names it and a folder that is not theirs: read as the service
+    // starts.
+    skwird_testkit::grant(&s.dir(r"root\theirs"), user.name);
+    let secret = root.join(r"theirs\secret");
+    kept_out_by(&user, &secret, &root.join("open"), &bin);
     let registered = Registered;
     let said = run(&["service", "add", "--root", root.to_str().unwrap()]);
     assert!(said.contains("registered and started"), "{said}");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut c = loop {
-        let asked = Client::connect(&system())
-            .map_err(|e| e.to_string())
-            .and_then(|mut c| match c.coverage(&root) {
-                Ok(cov) if cov.names != Proof::NotCovered(Why::Unread) => Ok(c),
-                Ok(cov) => Err(format!("{:?}", cov.names)),
-                Err(e) => Err(e.to_string()),
-            });
-        match asked {
-            Ok(c) => break c,
-            Err(e) => assert!(
-                Instant::now() < deadline,
-                "the service never answered ({e}):\n{}",
-                log()
-            ),
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    let mut c = ready(&root);
     assert_eq!(c.welcome().scope, Scope::System);
     let both: BTreeSet<PathBuf> = [r"open\notes-open.txt", r"closed\notes-closed.txt"]
         .iter()
         .map(|rel| root.join(rel))
         .collect();
     assert_eq!(answered(&mut c, &named(&root, "notes")), both, "{}", log());
+    let kept_out = c.coverage(&secret).unwrap();
+    assert_eq!(
+        kept_out.names,
+        Proof::NotCovered(Why::Excluded),
+        "{}",
+        log()
+    );
     let logged = log();
     assert!(
         logged.contains("its volume's file table read"),

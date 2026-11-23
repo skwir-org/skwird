@@ -471,7 +471,7 @@ pub fn running() -> bool {
 }
 
 /// A security descriptor a conversion made, freed once dropped.
-struct Descriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct Descriptor(pub(crate) PSECURITY_DESCRIPTOR);
 
 impl Drop for Descriptor {
     fn drop(&mut self) {
@@ -491,7 +491,7 @@ impl Drop for Owned {
 }
 
 /// The text of the SID at `sid`.
-fn sid_text(sid: PSID) -> Option<String> {
+pub(crate) fn sid_text(sid: PSID) -> Option<String> {
     let mut text: *mut u16 = std::ptr::null_mut();
     // SAFETY: a SID the system gave, valid while its descriptor is; the
     // string given is ours to free.

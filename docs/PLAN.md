@@ -2035,11 +2035,18 @@ above).
      make an instance of it, and a pipe another user made, open to all,
      is refused.
 
+   **Each user's own exclusions** (2026-11-23): their file and what their
+   engine's clients registered, read from their profile's local
+   application data as Linux reads them from the home
+   (`skwird::system::own_exclusions`, the same on both). Each opened
+   beneath the home through no reparse point (`skwird_crawl::open_own`),
+   and taken only if its owner is the user, `LocalSystem` or the
+   administrators and none but them may write it, by its access list's
+   allowing entries. A folder a user keeps out is theirs if its owner is
+   them (`skwird_crawl::open_folder`). The service test makes the user's
+   file as the user, naming a folder of theirs and one that is not.
+
    **Left of step 7:**
-   - **Each user's own exclusions:** their file and what their engine's
-     clients registered, read from their profile, taken only if no other
-     user may write it; and which folders a user owns, by their
-     descriptors' owners, for what they register with the service.
    - **The journal's position kept with the index,** and DESIGN 2's rule
      applied at each start: caught up where it holds, the table read
      again where it does not. Until then, a start checks each root.

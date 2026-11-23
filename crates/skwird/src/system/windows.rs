@@ -12,12 +12,15 @@
 //!   `LocalSystem` is 0, as root is.
 //! - **Their homes** are their profiles, as the machine lists them
 //!   (`ProfileList`), where the default private folders are left out
-//!   (DESIGN 5).
+//!   (DESIGN 5), and their own files of exclusions read: taken only if
+//!   none but they, `LocalSystem` and the administrators may write them,
+//!   as OpenSSH for Windows takes a user's keys. A folder a user keeps
+//!   out is theirs if its owner is them.
 
-#![allow(unsafe_code)] // The registry has no safe binding; each block says why it is sound.
+#![allow(unsafe_code)] // The registry and security descriptors have no safe binding; each block says why it is sound.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -30,6 +33,7 @@ use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
 
+use super::Own;
 use crate::engine::log;
 
 /// The filesystems that store files on Windows, as volumes name them.
@@ -284,6 +288,171 @@ fn home_of(key: &Key, sid: &[u16]) -> Option<PathBuf> {
     }
     let home = PathBuf::from(OsString::from_wide(&expanded));
     home.is_absolute().then_some(home)
+}
+
+/// Who besides a user may write a file of theirs the service takes:
+/// `LocalSystem`, the administrators, and the placeholders that stand for
+/// its owner (`CREATOR OWNER`, `OWNER RIGHTS`), whose owner is checked.
+const MAY_WRITE: &[&str] = &[SYSTEM, ADMINISTRATORS, "S-1-3-0", "S-1-3-4"];
+/// `BUILTIN\Administrators`.
+const ADMINISTRATORS: &str = "S-1-5-32-544";
+
+/// The rights that change a file, its access or its owner, or remove it.
+const WRITES: u32 = 0x0002 // FILE_WRITE_DATA
+    | 0x0004 // FILE_APPEND_DATA
+    | 0x0010 // FILE_WRITE_EA
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
+/// An entry that allows (`ACCESS_ALLOWED_ACE_TYPE`), and those that deny,
+/// of an access list's.
+const ALLOWED: u8 = 0;
+const DENIED: &[u8] = &[1, 6, 10, 12];
+
+/// A file of a user's own, at `rel` in their home, read for the system
+/// service: opened beneath the home through no link
+/// (`skwird_crawl::open_own`), and taken only if its owner is the user,
+/// `LocalSystem` or the administrators, and none but them may write it,
+/// as OpenSSH for Windows takes a user's keys. At most a mebibyte.
+pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
+    use std::io::Read;
+    let file = match skwird_crawl::open_own(home, Path::new(rel)) {
+        skwird_crawl::OwnFile::Absent => return Own::Absent,
+        skwird_crawl::OwnFile::Refused => return Own::Refused,
+        skwird_crawl::OwnFile::Opened(file) => file,
+    };
+    let Some(sid) = sid_of(uid) else {
+        return Own::Refused;
+    };
+    if !theirs_alone(&file, &sid) {
+        return Own::Refused;
+    }
+    let mut bytes = Vec::new();
+    match file.take(1 << 20).read_to_end(&mut bytes) {
+        Ok(_) => Own::Read(bytes),
+        Err(_) => Own::Refused,
+    }
+}
+
+/// Whether user `uid`, of home `home`, owns the folder an exclusion of
+/// theirs resolved to: at `resolved`, of identity `id` if one is there.
+/// `LocalSystem` owns every folder. A folder there is theirs if it is
+/// still that folder and its owner is them; a path where none is there
+/// yet, if it is in their home and they own that.
+pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::FileId>) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    let Some(sid) = sid_of(uid) else {
+        return false;
+    };
+    let owned_by = |path: &Path, id: Option<skwird_crawl::FileId>| {
+        skwird_crawl::open_folder(path).is_ok_and(|(file, at)| {
+            id.is_none_or(|id| id == at) && owner_of(&file).is_some_and(|o| o == sid)
+        })
+    };
+    match id {
+        Some(id) => owned_by(resolved, Some(id)),
+        None => resolved.starts_with(home) && owned_by(home, None),
+    }
+}
+
+/// The security of the file open as `file`: its owner's SID, and whether
+/// none but `sid`, `LocalSystem` and the administrators may write it.
+fn security_of(file: &std::fs::File, sid: Option<&str>) -> Option<(String, bool)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, INHERIT_ONLY_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    };
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut held: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let what = if sid.is_some() {
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+    } else {
+        OWNER_SECURITY_INFORMATION
+    };
+    // SAFETY: the file's handle, opened to read its security; the owner
+    // and the list point into the descriptor given, which is ours to
+    // free, and freed after they are read.
+    let failed = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            what,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            &raw mut dacl,
+            std::ptr::null_mut(),
+            &raw mut held,
+        )
+    };
+    if failed != 0 {
+        return None;
+    }
+    let held = crate::service::Descriptor(held);
+    let owner = crate::service::sid_text(owner)?;
+    let Some(sid) = sid else {
+        drop(held);
+        return Some((owner, false));
+    };
+    let may = |s: &str| s == sid || MAY_WRITE.contains(&s);
+    // A list that is not there grants everyone everything.
+    let mut alone = may(&owner) && !dacl.is_null();
+    // SAFETY: the list, in the descriptor held, its header read.
+    let count = if alone {
+        unsafe { (*dacl).AceCount }
+    } else {
+        0
+    };
+    for i in 0..u32::from(count) {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        // SAFETY: the list, an entry within its count; the pointer given
+        // points into the list.
+        if unsafe { GetAce(dacl, i, &raw mut ace) } == 0 {
+            alone = false;
+            break;
+        }
+        // SAFETY: every entry begins with its header.
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || DENIED.contains(&header.AceType) {
+            continue;
+        }
+        if header.AceType != ALLOWED {
+            // An entry that allows by other means (an object's, a
+            // condition's): not read, so taken as one that may write.
+            alone = false;
+            break;
+        }
+        // SAFETY: an entry that allows, as its type says; its SID starts
+        // where its last field does, within its size.
+        let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        if allowed.Mask & WRITES == 0 {
+            continue;
+        }
+        let who = crate::service::sid_text((&raw const allowed.SidStart).cast_mut().cast());
+        if !who.is_some_and(|w| may(&w)) {
+            alone = false;
+            break;
+        }
+    }
+    drop(held);
+    Some((owner, alone))
+}
+
+fn owner_of(file: &std::fs::File) -> Option<String> {
+    security_of(file, None).map(|(owner, _)| owner)
+}
+
+fn theirs_alone(file: &std::fs::File, sid: &str) -> bool {
+    security_of(file, Some(sid)).is_some_and(|(owner, alone)| {
+        (owner == sid || owner == SYSTEM || owner == ADMINISTRATORS) && alone
+    })
 }
 
 #[cfg(test)]

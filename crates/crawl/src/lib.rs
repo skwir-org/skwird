@@ -77,7 +77,9 @@ pub use windows::security::read_anything;
 #[cfg(windows)]
 pub use windows::watch::{Heard, Watcher};
 #[cfg(windows)]
-pub use windows::{OPEN_TO_ALL, descriptor_on, journal, mft, verbatim, volumes};
+pub use windows::{
+    OPEN_TO_ALL, OwnFile, descriptor_on, journal, mft, open_folder, open_own, verbatim, volumes,
+};
 
 #[cfg(not(any(target_os = "linux", windows)))]
 mod other;

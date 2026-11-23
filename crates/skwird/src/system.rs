@@ -128,12 +128,13 @@ fn passwd_users(text: &str) -> Vec<(u32, PathBuf)> {
 }
 
 /// What came of reading a user's file.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub enum Own {
     /// Not there.
     Absent,
-    /// There, but not taken: not a file, not theirs or root's, others may
-    /// write it, or a link was in its way.
+    /// There, but not taken: not a file, not theirs or root's (on Windows,
+    /// `LocalSystem`'s or the administrators'), others may write it, or a
+    /// link was in its way.
     Refused,
     Read(Vec<u8>),
 }
@@ -220,8 +221,18 @@ fn is_private_group(passwd: &str, group: &str, uid: u32, gid: u32) -> bool {
     primary == gid && alone && members_alone
 }
 
-/// A folder a user's engine's clients registered, as the file keeps it.
+/// Where a user's engine keeps their exclusions and what its clients
+/// registered, below their home, at the default places.
 #[cfg(target_os = "linux")]
+const OWN_FILES: (&str, &str) = (".config/skwird/exclude", ".local/state/skwird/registered");
+#[cfg(windows)]
+const OWN_FILES: (&str, &str) = (
+    r"AppData\Local\skwird\config\exclude",
+    r"AppData\Local\skwird\state\registered",
+);
+
+/// A folder a user's engine's clients registered, as the file keeps it.
+#[cfg(any(target_os = "linux", windows))]
 #[derive(serde::Deserialize)]
 struct Registered {
     path: skwird_protocol::WirePath,
@@ -232,8 +243,10 @@ struct Registered {
 /// home, `#` a comment) and what their engine's clients registered
 /// (`~/.local/state/skwird/registered`), at the default places, since the
 /// service knows no user's environment; and how many of the two files
-/// were there but not taken ([`read_own`]).
-#[cfg(target_os = "linux")]
+/// were there but not taken ([`read_own`]). On Windows, in their profile's local
+/// application data (`AppData\Local\skwird\config\exclude`,
+/// `AppData\Local\skwird\state\registered`), where their engine keeps them.
+#[cfg(any(target_os = "linux", windows))]
 pub fn own_exclusions(home: &Path, uid: u32) -> (Vec<PathBuf>, usize) {
     let mut paths = Vec::new();
     let mut refused = 0;
@@ -245,8 +258,9 @@ pub fn own_exclusions(home: &Path, uid: u32) -> (Vec<PathBuf>, usize) {
         }
         Own::Absent => None,
     };
-    let exclude = read(".config/skwird/exclude");
-    let registered = read(".local/state/skwird/registered");
+    let (exclude, registered) = OWN_FILES;
+    let exclude = read(exclude);
+    let registered = read(registered);
     if let Some(text) = exclude {
         let text = String::from_utf8_lossy(&text);
         paths.extend(
@@ -290,13 +304,14 @@ pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::Fi
 
 // The system service on Windows (phase 4, step 7): its roots the
 // machine's volumes, its users told by their SIDs and numbered, their
-// homes their profiles. Its users' own files of exclusions, and the
-// folders they own as their security descriptors say, come next: until
-// then no user's file is read, and no user owns a folder in its eyes.
+// homes their profiles, their own files read and their folders owned as
+// their security descriptors say.
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{keep_numbers, number_of, numbering, roots as volume_roots, sid_of, users};
+pub use windows::{
+    keep_numbers, number_of, numbering, owned, read_own, roots as volume_roots, sid_of, users,
+};
 
 /// No user's exclusions are kept on macOS yet: its system service comes
 /// with phase 5.
@@ -305,14 +320,14 @@ pub fn users() -> Vec<(u32, PathBuf)> {
     Vec::new()
 }
 
-/// No user's file of exclusions is read off Linux yet.
-#[cfg(not(target_os = "linux"))]
+/// No user's file of exclusions is read on macOS yet.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn own_exclusions(_: &Path, _: u32) -> (Vec<PathBuf>, usize) {
     (Vec::new(), 0)
 }
 
-/// No folder is any user's own off Linux yet: none is registered for one.
-#[cfg(not(target_os = "linux"))]
+/// No folder is any user's own on macOS yet: none is registered for one.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn owned(_: u32, _: &Path, _: &Path, _: Option<skwird_crawl::FileId>) -> bool {
     false
 }
