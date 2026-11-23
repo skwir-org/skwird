@@ -521,7 +521,7 @@ impl Table {
 
     /// A folder's own facts, as its stat gives them, on the volume `dev`
     /// names as a stat does.
-    fn stat_of(&self, record: &Record, dev: u64) -> FolderStat {
+    fn stat_of(record: &Record, dev: u64) -> FolderStat {
         FolderStat {
             id: FileId {
                 dev,
@@ -595,7 +595,7 @@ impl TableReader<'_> {
         let Some(record) = self.table.get(id.ino) else {
             return not_covered(None, Why::Gone);
         };
-        let stat = self.table.stat_of(record, dev);
+        let stat = Table::stat_of(record, dev);
         if !record.folder {
             return not_covered(Some(stat), Why::Replaced);
         }
