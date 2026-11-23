@@ -5,3 +5,6 @@
 [toolchain]
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]
+# Windows and macOS: their lints, the copies of the client checked for
+# Windows, and Windows' tests under Wine (tools/gate.sh).
+targets = ["x86_64-pc-windows-gnu", "aarch64-apple-darwin"]

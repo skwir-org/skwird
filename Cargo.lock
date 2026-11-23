@@ -202,6 +202,7 @@ name = "skwird-client"
 version = "0.0.0"
 dependencies = [
  "skwird-protocol",
+ "windows-sys",
 ]
 
 [[package]]

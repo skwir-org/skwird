@@ -1483,6 +1483,22 @@ machine alone, a third of before.
   folder. A service manager may make the socket and pass it
   (systemd's `LISTEN_FDS`, phase 2): the engine then answers on it, and
   neither binds nor removes one of its own.
+
+  **As built on Windows** (phase 4, step 4):
+  - A user's pipe is `\\.\pipe\skwird-<SID>`, or the one `SKWIRD_PIPE`
+    names: a test's own, as `XDG_RUNTIME_DIR` is on Unix.
+  - Its every instance has a security descriptor granting that user's
+    SID alone. The first instance is made only if no other process holds
+    the name (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and remote clients are
+    refused.
+  - Any user may make a pipe of any name first. So a client checks,
+    before it says anything, that the server's process runs as itself,
+    and is identified to the server, never impersonated
+    (`SECURITY_IDENTIFICATION`).
+  - Reads and writes are overlapped, so a call can be given up on after
+    a silence, or stopped from another thread, as on Unix.
+  - The system service's pipe, `\\.\pipe\skwird`, is not asked until
+    the service exists (step 7) and a client can tell its account.
 - **Framing.** JSON lines at first, for readability; each message has
   an id.
 - **Messages:**
@@ -1520,8 +1536,11 @@ machine alone, a third of before.
     it) and a fake engine for clients' tests, built on
     `skwird-protocol`.
 
-  Both depend on serde and serde_json alone, and neither is published
-  on crates.io (the user's choice, 2026-11-11). A client copies them
+  Both depend on serde and serde_json, and the client on Windows on
+  windows-sys too (since phase 4, step 4: a pipe's read can be timed
+  out or cancelled through no call of std's). skwir's lockfile held
+  that version already. Neither is published on crates.io (the user's
+  choice, 2026-11-11). A client copies them
   into its own tree: skwir takes no git dependency (its ADR-050), and
   keeps them as `vendor/skwird-protocol` and `vendor/skwird-client`, as
   it keeps gpui and syntect. skwird's `tools/vendor-client` writes

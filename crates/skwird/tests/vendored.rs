@@ -40,16 +40,28 @@ fn the_copies_of_the_clients_crates_build_on_their_own() {
         assert!(!manifest.contains("workspace"), "{name}: {manifest}");
         assert!(vendor.join(name).join("VENDORED").is_file());
     }
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let built = Command::new(cargo)
-        .args(["check", "--offline", "--quiet", "--manifest-path"])
-        .arg(vendor.join("skwird-client/Cargo.toml"))
-        .env("CARGO_TARGET_DIR", s.join("target"))
-        .output()
-        .unwrap();
+    let client = std::fs::read_to_string(vendor.join("skwird-client/Cargo.toml")).unwrap();
     assert!(
-        built.status.success(),
-        "the copies do not build alone:\n{}",
-        String::from_utf8_lossy(&built.stderr)
+        client.contains("[target.'cfg(windows)'.dependencies]\nwindows-sys"),
+        "its pipes on Windows: {client}"
     );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // For this system, and for Windows, whose pipes take a dependency of
+    // their own: checked, not linked, so no linker of Windows' is needed.
+    for target in [None, Some("x86_64-pc-windows-gnu")] {
+        let mut check = Command::new(&cargo);
+        check
+            .args(["check", "--offline", "--quiet", "--manifest-path"])
+            .arg(vendor.join("skwird-client/Cargo.toml"))
+            .env("CARGO_TARGET_DIR", s.join("target"));
+        if let Some(target) = target {
+            check.args(["--target", target]);
+        }
+        let built = check.output().unwrap();
+        assert!(
+            built.status.success(),
+            "the copies do not build alone, for {target:?}:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    }
 }

@@ -1713,6 +1713,22 @@ above).
    - `skwird find`, `coverage`, `sync` and `status`.
 
    It is tested under Wine as the Linux engine's tests test it.
+
+   **The client's side** (done on 2026-11-23, `skwird_client::pipe`):
+   - the user's pipe, its server checked to run as the user before
+     anything is said;
+   - overlapped reads and writes, so the silence and the Stopper work as
+     on Unix;
+   - the engine started with no console window, in a process group of
+     its own, from the system's folder;
+   - the pipe's server side, which the engine is to serve on, and the
+     fake engine on it.
+
+   The client takes `windows-sys` on Windows (DESIGN, Protocol), and
+   `tools/vendor-client` now copies a crate's dependencies of one
+   system. Under Wine, the client's tests of giving up pass over the
+   pipe. A pipe another user made cannot be tried under Wine, whose
+   processes all run as one user.
 5. **Live** (`ReadDirectoryChangesW`).
    - One handle per root watches its whole tree, read on a thread of
      its own.

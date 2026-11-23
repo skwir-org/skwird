@@ -1,10 +1,10 @@
 //! Every call can be given up on (skwir's provider, step B): after the
 //! engine's silence, or from another thread. An engine that accepts and
-//! then hangs, or one slow to check, never holds a client's search.
+//! then hangs, or one slow to check, never holds a client's search. On
+//! Unix over a socket, on Windows over a named pipe.
 
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,10 +13,12 @@ use skwird_client::protocol::{Query, WirePath};
 use skwird_client::{Client, Error, Find};
 
 /// A folder of the test's own under the user's cache, never `/tmp`
-/// (AGENTS.md, "Testing"), removed when dropped.
+/// (AGENTS.md, "Testing"), removed when dropped; on Windows, a pipe's
+/// name of its own.
 struct Dir(PathBuf);
 
 impl Dir {
+    #[cfg(unix)]
     fn new(label: &str) -> Dir {
         let dir = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
@@ -28,8 +30,23 @@ impl Dir {
         std::fs::create_dir_all(&dir).unwrap();
         Dir(dir)
     }
+
+    #[cfg(windows)]
+    fn new(label: &str) -> Dir {
+        Dir(format!(r"\\.\pipe\skwird-test-{label}-{}", std::process::id()).into())
+    }
+
+    /// Where an engine of the test's answers.
+    fn socket(&self) -> PathBuf {
+        if cfg!(windows) {
+            self.0.clone()
+        } else {
+            self.0.join("socket")
+        }
+    }
 }
 
+#[cfg(unix)]
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -42,7 +59,7 @@ fn silent(dir: &Dir) -> Fake {
         silent: true,
         ..Script::default()
     };
-    Fake::start(dir.0.join("socket"), script).unwrap()
+    Fake::start(dir.socket(), script).unwrap()
 }
 
 fn find(socket: &Path, silence: Option<Duration>) -> Find {
@@ -92,10 +109,13 @@ fn a_call_never_answered_gives_up_after_its_silence() {
 #[test]
 fn an_engine_that_never_says_hello_is_given_up_on() {
     let dir = Dir::new("hello");
-    let socket = dir.0.join("socket");
+    let socket = dir.socket();
     // Bound and never accepted from: a connection is made, and nothing is
     // ever said on it.
-    let _listener = UnixListener::bind(&socket).unwrap();
+    #[cfg(unix)]
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    #[cfg(windows)]
+    let _listener = skwird_client::pipe::Server::bind(socket.as_os_str()).unwrap();
     let begun = Instant::now();
     let e = Client::connect(&find(&socket, Some(Duration::from_millis(200))))
         .err()

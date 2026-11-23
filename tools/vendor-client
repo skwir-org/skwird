@@ -52,14 +52,19 @@ copy() {
     echo "[dependencies]"
     sed -n '/^\[dependencies\]/,/^\[/p' "$from/Cargo.toml" | sed '1d;/^\[/d;/^$/d;/^#/d' |
       sed 's|path = "../protocol"|path = "../skwird-protocol"|'
+    # A system's own (the client's pipes on Windows), as written.
+    awk '/^\[target\..*\.dependencies\]$/ { on = 1; print ""; print; next }
+         /^\[/ { on = 0 }
+         on && !/^#/ && !/^$/' "$from/Cargo.toml"
   } > "$out/Cargo.toml"
   cat > "$out/VENDORED" <<EOF
 A copy of skwird's $name, made by skwird's tools/vendor-client from
 $commit.
 
 Do not change it here: change skwird, and copy it again. It depends on
-serde and serde_json alone (and the client on the protocol's copy beside
-it), at versions a client's lockfile resolves.
+serde and serde_json (and the client on the protocol's copy beside it,
+and on Windows on windows-sys), at versions a client's lockfile
+resolves.
 EOF
 }
 
