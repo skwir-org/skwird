@@ -86,6 +86,12 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   after its folder was opened (POSIX; btrfs does): a folder is watched,
   then opened again for its listing, so that what is made meanwhile is
   listed or heard, never neither. A check watches before its stat.
+- **A path compared is resolved by `skwird_crawl::canonical`,** never
+  `std::fs::canonicalize`. On Windows, std gives the verbatim form
+  (`\\?\C:\Users`), and clients name paths plainly (`C:\Users`): the
+  two never compare equal. Names are bytes everywhere: on Windows,
+  their WTF-8 (`skwird_crawl::wtf8`), never Rust's encoded bytes of an
+  `OsStr`, which it does not promise.
 - **Locks and pools.** Never hand work to a thread pool while holding a
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is

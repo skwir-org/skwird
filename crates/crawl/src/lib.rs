@@ -65,11 +65,18 @@ pub use linux::watch::{Heard, Watcher};
 #[cfg(target_os = "linux")]
 pub use linux::{Root, filesystem_name};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as sys;
+#[cfg(windows)]
+pub use windows::Root;
+
+#[cfg(not(any(target_os = "linux", windows)))]
 mod other;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 use other as sys;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub use other::Root;
 
 // No watcher but Linux's yet (rule 7): Windows' comes with phase 4,
@@ -80,6 +87,16 @@ mod unwatched;
 pub use unwatched::{Heard, Watcher};
 
 pub use exclude::Exclusions;
+
+/// `path` resolved by the system, named as skwird names paths: on Windows
+/// plainly (`C:\Users`), not in the verbatim form the system gives
+/// (`\\?\C:\Users`), as clients name them.
+pub fn canonical(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    let resolved = windows::plain(&resolved);
+    Ok(resolved)
+}
 
 /// A file's identity: its device and inode. On btrfs each subvolume has
 /// a device of its own, so the two name one file.

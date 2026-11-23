@@ -647,6 +647,12 @@ its ADR-050). Its sessions build them, in its repository:
   folder watched already, read again on an event, was refused its
   watch, so the folder it was kept for was no longer live. A folder
   watched keeps its watch now, the share spent or not.
+
+  skwir copied the client again at `94a6d65` and built the seam the
+  provider plugs into (its ADR-150). It asks an index for name terms and
+  kinds alone, never sizes or times yet: in its searches, a link's size
+  and times are its target's. When skwir designs that, it may ask
+  whether skwird could hold or answer a link's target's attributes.
 - **D. The harvest's enumeration and journal** (skwir's ADR-089):
   `changes` from step 4, live from phase 2. A `changes` that a check
   found holds no write made in place: such a write changes no folder's
@@ -1633,11 +1639,66 @@ above).
    - The test kit runs on Windows (`Scratch` under the user's local
      application data, the reference walk), and the crawl's tests run
      on both systems against it.
+
+   Done on 2026-11-23, with step 3's check (`crates/crawl/src/windows.rs`):
+   - **The split.** What every system does (the crawl's scheduling, the
+     folders stored, the check's verdicts gathered) moved to `walk.rs`.
+     Each system gives only opening, listing and stat-ing a folder.
+     Linux's code moved unchanged.
+   - **Names** are kept as their WTF-8 (`wtf8.rs`, skwird's own): UTF-8
+     for every valid name, an unpaired surrogate kept. The index's log
+     and its paths use it too.
+   - **Opening** is relative to the root's handle (`NtCreateFile`, with
+     `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT`), in parts past
+     30,000 units. Then the folder opened must be the one named: its path
+     within its volume, links resolved (`GetFinalPathNameByHandleW`), is
+     the root's and the path asked.
+     - That second guard is the only one under Wine. Wine crosses a link
+       in a path's middle whatever it is asked, and the test of a folder
+       replaced by a link failed without it.
+     - On Windows it costs one call a folder, to measure there.
+   - **Listing** is by `NtQueryDirectoryFile` with
+     `FileIdFullDirectoryInformation`: 64-bit file ids. Wine lacks
+     `FileIdExtdDirectoryInfo`, which has ReFS's 128 bits (open question
+     7).
+   - **A path** is named plainly (`C:\Users`), as clients name it, and
+     opened verbatim (`\\?\C:\Users`), rebuilt from its components,
+     since a verbatim path takes `\` alone as a separator.
+     `skwird_crawl::canonical` resolves paths so, exclusions among them.
+   - **Reparse points**, told by the tag the listing gives:
+     - a symbolic link, a junction, Linux's subsystem's link or an app's
+       alias is a link, not followed. Wine gives no tag, so any reparse
+       point is a link there;
+     - a junction that mounts a volume (`\??\Volume{`) is a mount, not
+       covered;
+     - a folder that any other filter driver gives (cloud files, a
+       projected file system) is not entered either, and not covered (a
+       mount). That keeps OneDrive's folders out: DESIGN's open question
+       11, the user's to decide.
+   - **The check** opens each folder and compares its identity, volume
+     and change time through its own handle. That is an open and three
+     queries a folder. `NtQueryInformationByName` would take one, where
+     Windows has it: to measure on a Windows machine, with open question
+     7.
+   - **Under Wine:** 52 tests pass, the crawl's 24 among them.
+     - The shared tests run on both systems: a crawl equal to the
+       reference walk, names alone, private and excluded folders, the
+       check's verdicts, the tick, a folder replaced by a link, a
+       cancelled crawl, and depth past 260 characters.
+     - Wine cannot hold a name with an unpaired surrogate, so under Wine
+       the odd name is a surrogate pair. The test kit tells Wine apart
+       (`under_wine`).
+
+   Left for later steps:
+   - the protocol's `WirePath` reads names lossily off Unix, where they
+     are to be WTF-8 (step 4);
+   - each listing's entry is an allocation of its own, where Linux's
+     read in place (DESIGN 8), to measure first.
 3. **The check.** Each folder's identity and change time are compared
    with what was stored, the time read through the folder's own handle:
    on NTFS, the copy in its parent's listing may lag. Whether NTFS's
    folder times can serve so is open question 7. Wine answers it for
-   its own files only.
+   its own files only. Built with step 2.
 4. **The engine on Windows.** The engine's modules are compiled on
    every system, what is Linux's behind `cfg`:
    - its folders (`%LOCALAPPDATA%\skwird`);

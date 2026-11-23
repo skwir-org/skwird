@@ -1242,6 +1242,17 @@ Linux, macOS and Windows:
   times, its file ids and its change journal wait for a Windows
   machine (open question 7).
 
+**As built** (phase 4, step 2):
+- What the crawl does on every system is one code (`walk.rs`). Each
+  system gives only how a folder is opened, listed and stat-ed.
+- On Windows, names are kept as their WTF-8: UTF-8 for every valid
+  name, nothing lost of the others.
+- A folder is opened relative to its root, through no reparse point,
+  and must be, by its final path, the folder named. Wine's crossing of
+  links in a path's middle is caught so.
+- Mounts are found where listings meet them, and a filter driver's
+  folders are not entered (open question 11).
+
 ### 10. Idle is idle, and nothing leaves the machine
 
 There is no polling loop: the engine sleeps until the system notifies
@@ -1638,3 +1649,14 @@ machine alone, a third of before.
     too costly, as skwir's own list keeps tool stores from searches
     (its ADR-125), and walks when searched in. A root named as a snapshot
     is read. A root test proves both, beside a writable subvolume read.
+11. **Cloud files on Windows** (found on 2026-11-23, phase 4, step 2).
+    A folder whose content a filter driver gives is a reparse point of
+    the driver's kind: OneDrive's, with Files On-Demand, holds the
+    user's Documents and Desktop wherever they are redirected there.
+    Listing one that is not populated locally makes its provider fetch
+    it, from the network (decision 10). Until the user decides, the
+    crawl does not enter such a folder, and answers it not covered (a
+    mount): coverage lost, never overstated, nothing fetched. The other
+    way would list a folder whose listing is local (no
+    `FILE_ATTRIBUTE_RECALL_ON_OPEN`) and leave out the rest. It needs a
+    Windows machine with OneDrive to verify; Wine has no cloud files.

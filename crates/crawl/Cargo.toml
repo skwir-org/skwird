@@ -14,6 +14,18 @@ rustix = { workspace = true, features = ["mount"] }
 # fanotify and file handles, which rustix has no binding for.
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# The walk: folders opened relative to their root, listed in batches
+# (docs/PLAN.md, phase 4, step 2).
+windows-sys = { workspace = true, features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+] }
+
 [dev-dependencies]
 skwird-testkit.workspace = true
 

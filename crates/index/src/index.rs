@@ -96,8 +96,15 @@ pub fn component(name: &[u8]) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(name))
 }
 
-/// A name's bytes as a path's component: elsewhere than Unix, its UTF-8.
-#[cfg(not(unix))]
+/// A name's bytes as a path's component: on Windows, its WTF-8, as the
+/// crawl gives names ([`skwird_crawl::wtf8`]).
+#[cfg(windows)]
+pub fn component(name: &[u8]) -> PathBuf {
+    skwird_crawl::wtf8::path(name)
+}
+
+/// A name's bytes as a path's component: elsewhere, its UTF-8.
+#[cfg(not(any(unix, windows)))]
 pub fn component(name: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(name).into_owned())
 }

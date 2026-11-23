@@ -10,5 +10,14 @@ description = "Synthetic trees, a reference walk and namespaces for skwird's tes
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
+[target.'cfg(windows)'.dependencies]
+# A file's identity, for the reference walk; whether Wine runs it
+# (phase 4).
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+] }
+
 [lints]
 workspace = true

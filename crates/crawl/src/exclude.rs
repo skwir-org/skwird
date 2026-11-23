@@ -130,7 +130,7 @@ fn resolve_one(path: &Path) -> Result<(PathBuf, Option<FileId>), Refused> {
     let components: Vec<Component<'_>> = path.components().collect();
     for split in (1..=components.len()).rev() {
         let existing: PathBuf = components[..split].iter().collect();
-        let Ok(resolved) = std::fs::canonicalize(&existing) else {
+        let Ok(resolved) = crate::canonical(&existing) else {
             continue;
         };
         let mut full = resolved;
@@ -161,7 +161,12 @@ fn folder_id(path: &Path) -> Option<FileId> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn folder_id(path: &Path) -> Option<FileId> {
+    crate::windows::folder_id(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn folder_id(_: &Path) -> Option<FileId> {
     None
 }
