@@ -7,14 +7,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use skwird_crawl::Watcher;
-use skwird_crawl::fanotify::{self, Group};
+#[cfg(target_os = "linux")]
+use skwird_crawl::fanotify;
+use skwird_crawl::fanotify::Group;
 use skwird_index::block::FolderId;
 
-use crate::engine::{Command, log};
+#[cfg(target_os = "linux")]
+use crate::engine::Command;
+use crate::engine::log;
 
 /// A folder's events are gathered until this passes without one...
 const QUIET: Duration = Duration::from_millis(100);
@@ -27,6 +32,7 @@ const MOST: Duration = Duration::from_secs(1);
 /// events"). Half of [`QUIET`], it ends no gathering later than that; a
 /// sync's cookie wakes it at once. Idle, the reader waits for the next
 /// event, as before.
+#[cfg(target_os = "linux")]
 const READ_EVERY: Duration = Duration::from_millis(50);
 /// What was heard is saved this long after the first change unsaved: the
 /// log keeps it durable meanwhile.
@@ -73,6 +79,7 @@ fn window() -> Duration {
 
 /// What the writer listens to: a user's engine's watcher (inotify), or
 /// the system service's group (fanotify).
+#[cfg(target_os = "linux")]
 pub trait Source {
     type Heard;
     fn fd(&self) -> rustix::fd::BorrowedFd<'_>;
@@ -83,6 +90,7 @@ pub trait Source {
     fn command(generation: u64, heard: Vec<Self::Heard>) -> Command;
 }
 
+#[cfg(target_os = "linux")]
 impl Source for Watcher {
     type Heard = skwird_crawl::Heard;
     fn fd(&self) -> rustix::fd::BorrowedFd<'_> {
@@ -102,6 +110,7 @@ impl Source for Watcher {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Source for Group {
     type Heard = fanotify::Heard;
     fn fd(&self) -> rustix::fd::BorrowedFd<'_> {
@@ -126,6 +135,7 @@ impl Source for Group {
 /// nothing heard since proves anything. The mount table is followed too,
 /// as skwir follows it: `/proc/self/mountinfo` signals a change with
 /// `POLLPRI`, and is read through so that it signals the next.
+#[cfg(target_os = "linux")]
 pub fn listen<S: Source>(source: &S, commands: &Sender<Command>, readers: &Readers) {
     use std::io::{Read, Seek};
     readers.join();
@@ -196,6 +206,8 @@ pub struct Readers {
 }
 
 impl Readers {
+    // A reader's alone, and none reads off Linux yet (phase 4, step 5).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn join(&self) {
         self.threads
             .lock()
@@ -203,6 +215,7 @@ impl Readers {
             .push(std::thread::current());
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn awaited(&self) -> bool {
         self.awaited.load(std::sync::atomic::Ordering::Acquire)
     }

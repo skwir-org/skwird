@@ -34,6 +34,26 @@ fn var(name: &str) -> Option<PathBuf> {
 }
 
 impl Dirs {
+    /// A user's engine's folders on Windows (`docs/PLAN.md`, phase 4,
+    /// step 4): in the user's local application data, never roamed,
+    /// `skwird`'s own; the home its profile. Its pipe is its user's own
+    /// ([`Dirs::socket`]).
+    #[cfg(windows)]
+    pub fn from_env() -> Result<Dirs, String> {
+        let home = var("USERPROFILE").ok_or("USERPROFILE is not set")?;
+        let base = var("LOCALAPPDATA")
+            .ok_or("LOCALAPPDATA is not set: skwird keeps its index there")?
+            .join("skwird");
+        Ok(Dirs {
+            runtime: base.join("run"),
+            cache: base.join("cache"),
+            config: base.join("config"),
+            state: base.join("state"),
+            home,
+        })
+    }
+
+    #[cfg(not(windows))]
     pub fn from_env() -> Result<Dirs, String> {
         let home = var("HOME").ok_or("HOME is not set")?;
         let runtime = var("XDG_RUNTIME_DIR")
@@ -74,7 +94,14 @@ impl Dirs {
         }
     }
 
+    /// Where the engine answers: its socket in its runtime folder; on
+    /// Windows, its user's pipe (or `SKWIRD_PIPE`'s), a name and no
+    /// file.
     pub fn socket(&self) -> PathBuf {
+        #[cfg(windows)]
+        if let Some(pipe) = skwird_client::pipe::user_pipe() {
+            return pipe;
+        }
         self.runtime.join("socket")
     }
 
@@ -83,8 +110,17 @@ impl Dirs {
     }
 }
 
+/// A pipe's name: no limit as a Unix socket's path has.
+#[cfg(windows)]
+// The same call as on Unix, which may refuse.
+#[allow(clippy::unnecessary_wraps)]
+pub fn check_socket_path(_: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// A socket's path, refused where it is longer than a Unix socket takes:
 /// an error that says so, not the crash it was in fsearch.
+#[cfg(not(windows))]
 pub fn check_socket_path(path: &Path) -> Result<(), String> {
     let len = path.as_os_str().len();
     if len > SOCKET_MAX {
@@ -118,12 +154,20 @@ pub fn make_private(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn make_private(_: &Path) -> Result<(), String> {
-    Err(
-        "skwird's engine runs on Linux so far: Windows comes with phase 4, macOS with phase 5"
-            .into(),
-    )
+/// `dir`, made if it is not there. On Windows, a folder in the user's
+/// local application data inherits its profile's access, its user's
+/// alone; and no socket is in it, the pipe having a security descriptor
+/// of its own.
+#[cfg(windows)]
+pub fn make_private(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot make a folder of skwird's: {e}"))
+}
+
+/// The system service's runtime folder: no system service runs on
+/// Windows yet (phase 4, step 7).
+#[cfg(windows)]
+pub fn make_shared(_: &Path) -> Result<(), String> {
+    Err("skwird's system service runs on Linux so far: Windows' comes with phase 4".into())
 }
 
 /// `dir`, made if it is not there, owned by the user running this and

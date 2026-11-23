@@ -88,7 +88,7 @@ fn above_of(root: &Path, system: bool) -> Vec<Option<crate::asker::Owned>> {
         .ancestors()
         .skip(1)
         .filter(|_| system)
-        .map(crate::asker::owned_at)
+        .map(owned_at)
         .collect();
     above.reverse();
     above
@@ -374,19 +374,33 @@ fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
         .unwrap_or_default()
 }
 
+/// A folder's owner as the system service judges it: on Unix by its stat;
+/// none on Windows, whose system service comes with phase 4's step 7.
+#[cfg(unix)]
+fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
+    crate::asker::owned_at(path)
+}
+
+#[cfg(windows)]
+fn owned_at(_: &Path) -> Option<crate::asker::Owned> {
+    None
+}
+
 fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     let path = dirs.state.join(file);
     let tmp = dirs.state.join(format!("{file}.tmp"));
     // Its user's alone (0600), whatever the umask: the system service takes
     // a user's file only if no one else may write it.
     let write = |bytes: &[u8]| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // On Windows, the state folder's access, its profile's.
+        #[cfg(unix)]
+        options.mode(0o600);
+        options
             .open(&tmp)
             .and_then(|mut f| f.write_all(bytes))
             .is_ok()
@@ -467,7 +481,7 @@ fn users_own(exclusions: &mut Exclusions, registrations: &[Registration]) -> usi
         // what it leads to: resolved as the service, a link a user put
         // there would take another's folder out. Not counted: a system
         // user's home, owned by root, would refuse them all.
-        let at_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
+        let at_home = skwird_crawl::canonical(home).unwrap_or_else(|_| home.clone());
         for rel in skwird_crawl::exclude::DEFAULTS {
             let place = at_home.join(rel);
             let held = exclusions.insert_if(&place, |resolved, _| resolved == place);
@@ -503,7 +517,7 @@ fn users_own(exclusions: &mut Exclusions, registrations: &[Registration]) -> usi
 /// `path` excluded for user `uid`, of home `home`, if they own the folder
 /// it resolves to ([`crate::system::owned`]): whether it was.
 fn theirs_kept(exclusions: &mut Exclusions, uid: u32, home: &Path, path: &Path) -> bool {
-    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let home = skwird_crawl::canonical(home).unwrap_or_else(|_| home.to_path_buf());
     matches!(
         exclusions.insert_if(path, |resolved, id| crate::system::owned(
             uid, &home, resolved, id
@@ -709,7 +723,7 @@ fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     registrations
         .iter()
-        .filter_map(|r| std::fs::canonicalize(r.path.to_path()).ok())
+        .filter_map(|r| skwird_crawl::canonical(r.path.to_path()).ok())
         .filter(|p| seen.insert(p.clone()))
         .collect()
 }
@@ -1217,7 +1231,7 @@ impl Writing<'_> {
             .iter()
             .filter_map(|r| {
                 Some((
-                    std::fs::canonicalize(r.path.to_path()).ok()?,
+                    skwird_crawl::canonical(r.path.to_path()).ok()?,
                     r.path.clone(),
                 ))
             })
@@ -1228,7 +1242,7 @@ impl Writing<'_> {
             .iter()
             .filter(|r| r.client == client && r.uid.is_none())
             .map(|r| {
-                let resolved = std::fs::canonicalize(r.path.to_path()).ok();
+                let resolved = skwird_crawl::canonical(r.path.to_path()).ok();
                 let (state, folders) = match &resolved {
                     Some(p) => self.keeping(p),
                     None => (Keeping::NotLive(skwird_protocol::NotLive::Missing), None),
@@ -1900,6 +1914,9 @@ impl Writing<'_> {
             found.insert(folder, at);
             wheres.push(at);
         }
+        // Linux's resolver lets go of the mounts it opened; elsewhere, a
+        // stub with nothing to let go of (rule 7).
+        #[cfg_attr(not(target_os = "linux"), allow(clippy::drop_non_drop))]
         drop(resolver);
         self.table = table;
         (wheres, failed, charges)
@@ -2229,9 +2246,5 @@ impl Done {
 
 /// The processor time this thread has taken.
 fn thread_time() -> std::time::Duration {
-    let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
-    std::time::Duration::new(
-        u64::try_from(t.tv_sec).unwrap_or(0),
-        u32::try_from(t.tv_nsec).unwrap_or(0),
-    )
+    crate::os::thread_time()
 }

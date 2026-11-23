@@ -23,12 +23,29 @@ use crate::FileId;
 /// The folders kept out of the index unless the user's configuration
 /// says otherwise, below the user's home: keys and keyrings, and the
 /// password store, whose names are the accounts it holds.
+#[cfg(not(windows))]
 pub const DEFAULTS: &[&str] = &[
     ".ssh",
     ".gnupg",
     ".local/share/keyrings",
     ".local/share/kwalletd",
     ".password-store",
+];
+
+/// The same on Windows, where they are kept elsewhere: OpenSSH's and
+/// `pass`'s as on Unix, `GnuPG`'s in the roaming application data, and
+/// Windows' own credentials and the keys that protect them (its
+/// credential manager, its vault, its data protection keys).
+#[cfg(windows)]
+pub const DEFAULTS: &[&str] = &[
+    ".ssh",
+    ".password-store",
+    "AppData/Roaming/gnupg",
+    "AppData/Roaming/Microsoft/Credentials",
+    "AppData/Local/Microsoft/Credentials",
+    "AppData/Roaming/Microsoft/Protect",
+    "AppData/Roaming/Microsoft/Crypto",
+    "AppData/Local/Microsoft/Vault",
 ];
 
 /// The default exclusions for a user whose home is `home`.

@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -22,6 +21,7 @@ use crate::convert;
 use crate::coverage::coverage_at;
 use crate::dirs::{check_socket_path, make_private};
 use crate::engine::{Command, Config, Published, Shared, log, writer};
+use crate::transport::{Listener, Stream};
 
 /// Results sent at a time.
 const BATCH: usize = 512;
@@ -83,33 +83,8 @@ pub fn serve(config: &Config) -> Result<(), String> {
     } else {
         make_private(&config.dirs.runtime)?;
     }
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(config.dirs.lock())
-        .map_err(|e| format!("cannot open the lock: {e}"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
-        .map_err(|e| format!("cannot take the lock: {e}"))?;
-    // A service manager's socket, where it passed one; otherwise our own.
-    // The lock is ours: a socket left at the path is a dead engine's.
-    let activated = crate::activation::passed()?;
-    let bound = activated.is_none();
-    let listener = if let Some(listener) = activated {
-        log("answering on the socket the service manager passed");
-        listener
-    } else {
-        let _ = std::fs::remove_file(&socket);
-        let listener =
-            UnixListener::bind(&socket).map_err(|e| format!("cannot bind the socket: {e}"))?;
-        if config.system {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
-                .map_err(|e| format!("cannot open the socket to every user: {e}"))?;
-        }
-        listener
-    };
+    let lock = crate::os::lock(&config.dirs.lock())?;
+    let (listener, bound) = listen(config, &socket)?;
     log(&format!("serving {} roots", config.roots.len()));
     let shared = Arc::new(Shared::new(config.roots.clone(), config.system));
     let (commands, received) = channel();
@@ -123,35 +98,23 @@ pub fn serve(config: &Config) -> Result<(), String> {
     let live = Arc::new(Live {
         state: Mutex::new((0, Instant::now())),
     });
-    let me = rustix::process::geteuid();
     loop {
         // Woken by a client, or when the idle time may be up: no polling.
         let wait = config.idle.map(|idle| live.left(idle).unwrap_or(idle));
         if wait.is_some_and(|w| w.is_zero()) {
             break;
         }
-        let timeout = wait.map(|w| rustix::event::Timespec {
-            tv_sec: i64::try_from(w.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: i64::from(w.subsec_nanos()),
-        });
-        let mut fds = [rustix::event::PollFd::new(
-            &listener,
-            rustix::event::PollFlags::IN,
-        )];
-        match rustix::event::poll(&mut fds, timeout.as_ref()) {
-            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
-            Ok(_) => {}
+        let stream = match listener.accept(wait) {
+            Ok(Some(stream)) => stream,
+            Ok(None) => continue,
             Err(e) => return Err(format!("cannot wait for clients: {e}")),
-        }
-        let Ok((stream, _)) = listener.accept() else {
-            continue;
         };
         // A user's engine answers its user alone; the system service, every
         // user, each what they could list (rule 2).
         let Ok(asker) = Asker::of(&stream) else {
             continue;
         };
-        if !config.system && asker.uid != me.as_raw() {
+        if !config.system && !asker.is_engines_user() {
             continue;
         }
         // Each connection is a thread of the service's: a user holds at most
@@ -170,13 +133,42 @@ pub fn serve(config: &Config) -> Result<(), String> {
     let _ = commands.send(Command::Stop);
     let _ = writing.join();
     // A socket the service manager passed stays its own, to start the
-    // next engine.
-    if bound {
+    // next engine. A pipe is no file.
+    if bound && cfg!(unix) {
         let _ = std::fs::remove_file(&socket);
     }
     log("idle: gone");
     drop(lock);
     Ok(())
+}
+
+/// Where the engine answers: a service manager's socket, where it passed
+/// one; otherwise its own, bound (and so to be removed). The lock is held:
+/// a socket left at the path is a dead engine's.
+#[cfg(unix)]
+fn listen(config: &Config, socket: &Path) -> Result<(Listener, bool), String> {
+    #[cfg(target_os = "linux")]
+    if let Some(listener) = crate::activation::passed()? {
+        log("answering on the socket the service manager passed");
+        return Ok((Listener::passed(listener), false));
+    }
+    let _ = std::fs::remove_file(socket);
+    let listener = Listener::bind(socket).map_err(|e| format!("cannot bind the socket: {e}"))?;
+    if config.system {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666))
+            .map_err(|e| format!("cannot open the socket to every user: {e}"))?;
+    }
+    Ok((listener, true))
+}
+
+/// Where the engine answers on Windows: its user's pipe, made its user's
+/// alone, refused if another process holds the name.
+#[cfg(windows)]
+fn listen(_: &Config, pipe: &Path) -> Result<(Listener, bool), String> {
+    Listener::bind(pipe)
+        .map(|l| (l, true))
+        .map_err(|e| format!("cannot make the pipe (another process may hold it): {e}"))
 }
 
 /// What the engine hears changes by: one watcher for every root, or for
@@ -195,22 +187,29 @@ fn sources(
     } else {
         (crate::live::watcher(config.watches), None)
     };
-    if let Some(w) = &watcher {
-        let (w, commands, shared) = (Arc::clone(w), commands.clone(), Arc::clone(shared));
-        named("skwird-heard", move || {
-            crate::live::listen(&*w, &commands, &shared.readers);
-        });
+    // Windows has neither yet (phase 4, step 5): Linux's alone are
+    // listened to.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(w) = &watcher {
+            let (w, commands, shared) = (Arc::clone(w), commands.clone(), Arc::clone(shared));
+            named("skwird-heard", move || {
+                crate::live::listen(&*w, &commands, &shared.readers);
+            });
+        }
+        if let Some(g) = &group {
+            let (g, commands, shared) = (Arc::clone(g), commands.clone(), Arc::clone(shared));
+            named("skwird-heard", move || {
+                crate::live::listen(&*g, &commands, &shared.readers);
+            });
+        }
     }
-    if let Some(g) = &group {
-        let (g, commands, shared) = (Arc::clone(g), commands.clone(), Arc::clone(shared));
-        named("skwird-heard", move || {
-            crate::live::listen(&*g, &commands, &shared.readers);
-        });
-    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (commands, shared);
     (watcher, group)
 }
 
-type Writer = Arc<Mutex<UnixStream>>;
+type Writer = Arc<Mutex<Stream>>;
 
 fn send(to: &Writer, id: u64, answer: Answer) -> bool {
     let mut stream = to.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -388,7 +387,7 @@ fn hole(shared: &Shared, i: usize, index: &Index, f: FolderId) -> wire::Hole {
 
 /// The client's hello, answered: its name, or none if it speaks no
 /// version of ours, or said something else first.
-fn hello(reader: &mut BufReader<UnixStream>, writer: &Writer, shared: &Shared) -> Option<String> {
+fn hello(reader: &mut BufReader<Stream>, writer: &Writer, shared: &Shared) -> Option<String> {
     match wire::read::<_, Request>(reader) {
         Ok(Some(Request {
             id,
@@ -547,7 +546,7 @@ fn spawn_query(
 
 /// One client: hello first, then its requests in turn, each query on a
 /// thread of its own.
-fn connection(stream: UnixStream, shared: &Arc<Shared>, commands: &Sender<Command>, who: &Asker) {
+fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, who: &Asker) {
     let Ok(clone) = stream.try_clone() else {
         return;
     };

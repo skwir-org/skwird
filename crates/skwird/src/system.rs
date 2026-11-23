@@ -4,9 +4,7 @@
 //! ones, network mounts, nor removable volumes (open question 8); and in
 //! every home, the default exclusions (decision 5).
 
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use skwird_crawl::mounts::{Mount, Table};
 
@@ -288,6 +286,29 @@ pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::Fi
                 && std::fs::symlink_metadata(home).is_ok_and(|m| m.uid() == uid)
         }
     }
+}
+
+// The system service elsewhere than Linux: none yet. Windows' comes with
+// phase 4's step 7, its users told by their SIDs, its folders owned as
+// their security descriptors say; until then it keeps no user's
+// exclusions, and no user owns a folder in its eyes.
+
+/// No user's exclusions are kept off Linux yet.
+#[cfg(not(target_os = "linux"))]
+pub fn users() -> Vec<(u32, PathBuf)> {
+    Vec::new()
+}
+
+/// No user's file of exclusions is read off Linux yet.
+#[cfg(not(target_os = "linux"))]
+pub fn own_exclusions(_: &Path, _: u32) -> (Vec<PathBuf>, usize) {
+    (Vec::new(), 0)
+}
+
+/// No folder is any user's own off Linux yet: none is registered for one.
+#[cfg(not(target_os = "linux"))]
+pub fn owned(_: u32, _: &Path, _: &Path, _: Option<skwird_crawl::FileId>) -> bool {
+    false
 }
 
 #[cfg(test)]

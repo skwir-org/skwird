@@ -116,7 +116,7 @@ fn main() -> ExitCode {
 /// The folder a command asks about: as given, made absolute and resolved.
 fn folder(args: &Args) -> Result<PathBuf, String> {
     let path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
-    std::fs::canonicalize(&path).map_err(|e| format!("cannot reach the folder: {e}"))
+    skwird_crawl::canonical(&path).map_err(|e| format!("cannot reach the folder: {e}"))
 }
 
 fn client() -> Result<Client, String> {
@@ -217,11 +217,16 @@ fn run(args: &Args) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn serve(args: &Args) -> Result<(), String> {
     // The system service's folders are its service manager's; its roots,
     // unless named, every local filesystem that stores files (DESIGN 1).
     let dirs = if args.system {
+        if cfg!(windows) {
+            return Err(
+                "skwird's system service runs on Linux so far: Windows' comes with phase 4".into(),
+            );
+        }
         skwird::dirs::Dirs::system()
     } else {
         skwird::dirs::Dirs::from_env()?
@@ -235,9 +240,10 @@ fn serve(args: &Args) -> Result<(), String> {
             skwird::system::roots(&table, skwird::system::removable)
         }
     };
+    // Named as clients name them (on Windows, plainly).
     let roots = roots
         .iter()
-        .map(|r| std::fs::canonicalize(r).map_err(|e| format!("cannot reach a root: {e}")))
+        .map(|r| skwird_crawl::canonical(r).map_err(|e| format!("cannot reach a root: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
     skwird::serve::serve(&skwird::engine::Config {
         dirs,
@@ -254,7 +260,7 @@ fn serve(args: &Args) -> Result<(), String> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn serve(args: &Args) -> Result<(), String> {
     skwird::serve(&args.roots, args.idle)
 }
@@ -268,7 +274,7 @@ fn watch(args: &Args) -> Result<(), String> {
     let folders = args
         .folders
         .iter()
-        .map(|f| std::fs::canonicalize(f).map_err(|e| format!("cannot reach a folder: {e}")))
+        .map(|f| skwird_crawl::canonical(f).map_err(|e| format!("cannot reach a folder: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
     let named: Vec<&Path> = folders.iter().map(PathBuf::as_path).collect();
     let mut c = client()?;

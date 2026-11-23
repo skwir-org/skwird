@@ -91,7 +91,7 @@ pub use exclude::Exclusions;
 /// `path` resolved by the system, named as skwird names paths: on Windows
 /// plainly (`C:\Users`), not in the verbatim form the system gives
 /// (`\\?\C:\Users`), as clients name them.
-pub fn canonical(path: &std::path::Path) -> std::io::Result<PathBuf> {
+pub fn canonical(path: impl AsRef<std::path::Path>) -> std::io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     #[cfg(windows)]
     let resolved = windows::plain(&resolved);

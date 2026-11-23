@@ -1729,6 +1729,33 @@ above).
    system. Under Wine, the client's tests of giving up pass over the
    pipe. A pipe another user made cannot be tried under Wine, whose
    processes all run as one user.
+
+   **The engine's side** (done on 2026-11-23):
+   - The engine's modules are compiled on Linux and Windows. Socket
+     activation, the inotify and fanotify listener, and the system
+     service's users stay Linux's; macOS keeps its stub until phase 5.
+   - The transport is `transport`: a socket, or the pipe's server.
+   - What the engine asks of its system is in `os`: the lock
+     (`LockFileEx`, as `flock`), and a thread's processor time
+     (`GetThreadTimes`).
+   - Its folders are under `%LOCALAPPDATA%\skwird`: `run` (the lock),
+     `cache`, `config`, `state`. The home is `USERPROFILE`.
+   - The asker of a pipe is the engine's own user, whom the pipe alone
+     lets in. It is given no id a user has.
+   - Paths are resolved by `skwird_crawl::canonical` throughout the
+     engine and its command line. The command line resolved them with
+     std's first, so `skwird find` said "outside" under Wine.
+   - Windows' default private folders: `.ssh`, `.password-store`,
+     GnuPG's in `AppData\Roaming\gnupg`, and Windows' credentials, vault
+     and data protection keys. They are the same kinds as DESIGN 5's.
+
+   Tried by hand under Wine, on a scratch tree in the tests' prefix:
+   - the engine served its pipe and built its index;
+   - `status`, `find` and `coverage` answered ("as of");
+   - a file made behind its back was found after a `sync` ("checked");
+   - read back on the next start, it went once idle.
+
+   The engine's own tests under Wine are next.
 5. **Live** (`ReadDirectoryChangesW`).
    - One handle per root watches its whole tree, read on a thread of
      its own.

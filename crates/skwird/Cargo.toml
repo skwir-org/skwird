@@ -29,6 +29,15 @@ rustix = { workspace = true, features = ["event", "net", "process", "time"] }
 # SO_PEERGROUPS, which rustix has no binding for.
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# The lock and a thread's processor time (phase 4, step 4).
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 skwird-testkit.workspace = true
 

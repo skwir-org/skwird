@@ -8,12 +8,14 @@
 //! every folder above it. A folder with an access ACL is judged by it,
 //! as read (`skwird_crawl::acl`); one whose ACL was not read is not
 //! known: never answered as its mode alone says, and not covered.
-#![allow(unsafe_code)] // SO_PEERGROUPS has no safe binding; the one block says why it is sound.
+#![cfg_attr(unix, allow(unsafe_code))] // SO_PEERGROUPS has no safe binding; the one block says why it is sound.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
+
+use crate::transport::Stream;
 
 use skwird_index::block::FolderId;
 use skwird_index::{Index, Sight};
@@ -41,13 +43,43 @@ pub struct Owned {
 
 impl Asker {
     /// The peer of `stream`, as the kernel held it when it connected.
-    pub fn of(stream: &UnixStream) -> std::io::Result<Asker> {
+    #[cfg(unix)]
+    pub fn of(stream: &Stream) -> std::io::Result<Asker> {
         let cred = rustix::net::sockopt::socket_peercred(stream)?;
         Ok(Asker {
             uid: cred.uid.as_raw(),
             gid: cred.gid.as_raw(),
             groups: peer_groups(stream)?,
         })
+    }
+
+    /// The peer of a pipe: the engine's own user, whom its security
+    /// descriptor alone lets in (`skwird_client::pipe`). Its ids are none
+    /// a user has: no mode grants it anything, should it ever be
+    /// evaluated. The system service, which answers every user, comes
+    /// with phase 4's step 7.
+    #[cfg(windows)]
+    // The same call as on Unix, which may fail.
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn of(_: &Stream) -> std::io::Result<Asker> {
+        Ok(Asker {
+            uid: u32::MAX,
+            gid: u32::MAX,
+            groups: Vec::new(),
+        })
+    }
+
+    /// Whether the asker is the user the engine runs as.
+    #[cfg(unix)]
+    pub fn is_engines_user(&self) -> bool {
+        self.uid == rustix::process::geteuid().as_raw()
+    }
+
+    /// Whether the asker is the user the engine runs as: on Windows, any
+    /// asker the pipe let in.
+    #[cfg(windows)]
+    pub fn is_engines_user(&self) -> bool {
+        true
     }
 
     pub fn is_root(&self) -> bool {
@@ -102,7 +134,8 @@ impl Asker {
 }
 
 /// The peer's groups, every one, as the kernel holds them.
-fn peer_groups(stream: &UnixStream) -> std::io::Result<Vec<u32>> {
+#[cfg(unix)]
+fn peer_groups(stream: &Stream) -> std::io::Result<Vec<u32>> {
     let mut groups = vec![0u32; 64];
     loop {
         let mut len = libc::socklen_t::try_from(groups.len() * 4).unwrap_or(libc::socklen_t::MAX);
@@ -133,6 +166,7 @@ fn peer_groups(stream: &UnixStream) -> std::io::Result<Vec<u32>> {
 
 /// What a folder at `path` is owned as, by its stat now, following no
 /// link: none if it cannot be stat-ed. Its ACL is asked too.
+#[cfg(unix)]
 pub fn owned_at(path: &Path) -> Option<Owned> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::symlink_metadata(path).ok()?;
