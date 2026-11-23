@@ -565,6 +565,16 @@ fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
     )
     .unwrap();
     let (walked, read) = (summary(&walked), summary(&read));
+    // The root first, with both volumes' names: what the rest hangs on.
+    assert_eq!(
+        read.get(Path::new("")),
+        walked.get(Path::new("")),
+        "the root, its volume {:#x} by a stat, {:#x} by the table; {} records, {} unread",
+        root.stat.id.dev,
+        table.serial,
+        table.len(),
+        table.unread.len()
+    );
     let why = |p: &str| read.get(Path::new(p)).map(|f| f.1.clone().err());
     assert_eq!(why("journal intime"), Some(Some(Why::Private)));
     assert_eq!(why("clés"), Some(Some(Why::Excluded)));
