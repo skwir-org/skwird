@@ -92,10 +92,12 @@ impl Env {
         c
     }
 
-    /// An engine of the home, gone after `idle` seconds without a client.
+    /// An engine of the home, gone after `idle` seconds without a client,
+    /// its log in the test's folder ([`Env::logs`]).
     fn engine(&mut self, idle: u64) -> usize {
         let home = self.home();
         let idle = idle.to_string();
+        let log = self.s.join(format!("engine-{}.log", self.engines.len()));
         let child = self
             .command(&[
                 "serve",
@@ -106,6 +108,7 @@ impl Env {
                 "--threads",
                 "2",
             ])
+            .env("SKWIRD_LOG", &log)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -113,6 +116,17 @@ impl Env {
             .unwrap();
         self.engines.push(child);
         self.engines.len() - 1
+    }
+
+    /// What each engine this test started logged, for a failure to say.
+    fn logs(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for n in 0..self.engines.len() {
+            let log = std::fs::read_to_string(self.s.join(format!("engine-{n}.log")));
+            let _ = writeln!(out, "--- engine {n}:\n{}", log.unwrap_or_default());
+        }
+        out
     }
 
     fn find(&self) -> Find {
@@ -126,12 +140,26 @@ impl Env {
     /// A client of the engine, once it answers and its index is ready.
     fn client(&self) -> Client {
         let home = self.home();
-        wait_for(20, "the engine never answered", || {
-            Client::connect(&self.find()).is_ok_and(|mut c| {
-                c.coverage(&home)
-                    .is_ok_and(|cov| cov.names != Proof::NotCovered(Why::Unread))
-            })
-        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let said = Client::connect(&self.find()).map(|mut c| c.coverage(&home));
+            if said.as_ref().is_ok_and(|cov| {
+                cov.as_ref()
+                    .is_ok_and(|c| c.names != Proof::NotCovered(Why::Unread))
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the engine never answered (last: {}):\n{}",
+                match &said {
+                    Ok(Ok(c)) => format!("{:?}", c.names),
+                    Ok(Err(e)) | Err(e) => e.to_string(),
+                },
+                self.logs()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Client::connect(&self.find()).unwrap()
     }
 }
