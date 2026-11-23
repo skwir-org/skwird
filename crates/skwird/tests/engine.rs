@@ -15,7 +15,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use skwird_client::{Client, Find};
-use skwird_protocol::{Keeping, Links, Match, NameTerm, NotLive, Proof, Query, Why, WirePath};
+use skwird_protocol::{
+    Complete, Event, Keeping, Links, Match, NameTerm, NotLive, Proof, Query, Why, WirePath,
+};
 use skwird_testkit::{Scratch, in_namespace, reference_walk};
 
 /// A scratch home, its XDG folders, and the engines run in it.
@@ -597,6 +599,61 @@ fn wait_for(seconds: u64, what: &str, mut done: impl FnMut() -> bool) {
 
 fn is_live(c: &mut Client, path: &Path) -> bool {
     matches!(c.coverage(path).unwrap().names, Proof::Live(_))
+}
+
+/// A journal says how far its events are every change below the folder
+/// asked: where nothing is live, neither its names nor its attributes;
+/// for a folder made live after the token, its names (the check that made
+/// it live found what changed before) and not its attributes; live since
+/// the token, both, a file written among the events. The folders not
+/// covered are named beside them.
+#[test]
+fn a_journal_says_how_far_its_events_are_every_change() {
+    let mut env = Env::new("engine-complete");
+    tree(&env);
+    env.s.file(env.home().join(".ssh/id_test"));
+    env.engine(30);
+    let home = env.home();
+    let docs = home.join("docs");
+    let mut c = env.client("a test");
+    let checked = c.changes(&docs, "").unwrap().expect("a token");
+    assert_eq!(
+        checked.complete,
+        Complete {
+            names: false,
+            attrs: false
+        },
+        "checked alone"
+    );
+    let holes = c.changes(&home, "").unwrap().expect("a token").holes;
+    assert!(
+        holes.iter().any(|h| h.path.to_path() == home.join(".ssh")),
+        "{holes:?}"
+    );
+    c.watch(&[&docs], &[]).unwrap();
+    wait_for(20, "live", || is_live(&mut c, &docs));
+    let since_checked = c.changes(&docs, &checked.token).unwrap().expect("in reach");
+    assert!(
+        since_checked.complete.names && !since_checked.complete.attrs,
+        "{:?}",
+        since_checked.complete
+    );
+    let live = c.changes(&docs, "").unwrap().expect("a token");
+    let written = docs.join("d00/report 0.txt");
+    std::fs::write(&written, b"more than before").unwrap();
+    let mut events = Vec::new();
+    wait_for(10, "the write heard", || {
+        let since = c.changes(&docs, &live.token).unwrap().expect("in reach");
+        assert!(
+            since.complete.names && since.complete.attrs,
+            "{:?}",
+            since.complete
+        );
+        events = since.events;
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Changed(entry) if entry.path.to_path() == written))
+    });
 }
 
 /// A folder a client watches is live, and a change made in it is

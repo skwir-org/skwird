@@ -731,9 +731,11 @@ fn a_folder_found_then_moved_is_heard_at_its_new_place() {
     wait_for(5, "a file in the folder", || {
         !at(&mut c, "one.txt").is_empty()
     });
-    // Its large parent applied: held now for its share.
+    // Its large parent applied: held now for its share. Reading its 59,000
+    // entries is charged to the writer's account (DESIGN 8), as the waits
+    // below are: 5 s was too short once on a loaded machine (2026-11-23).
     std::fs::write(place.join("old/busy.txt"), b"x").unwrap();
-    wait_for(5, "a file in its parent", || {
+    wait_for(15, "a file in its parent", || {
         !at(&mut c, "busy.txt").is_empty()
     });
     std::fs::rename(place.join("old/inner"), place.join("new/inner")).unwrap();

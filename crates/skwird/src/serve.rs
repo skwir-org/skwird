@@ -748,7 +748,7 @@ fn changes(
     let Some(answer) = asked.ok().and_then(|()| answer.recv().ok()) else {
         return failure("internal", "the engine is going");
     };
-    let Ok((events, token)) = answer else {
+    let Ok((events, token, complete)) = answer else {
         return Answer::TooOld {};
     };
     let base = &shared.root(i);
@@ -791,9 +791,17 @@ fn changes(
             },
         })
         .collect();
+    // The folders not covered, whose changes no event holds: as the root's
+    // coverage names them to this asker now.
+    let holes = coverage(shared, root, who).map_or_else(|_| Vec::new(), |c| c.holes);
     Answer::Changes(wire::Changes {
         events,
         token: token.text(),
+        complete: wire::Complete {
+            names: complete.names,
+            attrs: complete.attrs,
+        },
+        holes,
     })
 }
 

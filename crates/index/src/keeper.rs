@@ -83,6 +83,10 @@ pub struct Live {
     /// Since when every change below it is heard: none while it is not,
     /// not installed yet, or since an overflow until a check.
     pub since: Option<Time>,
+    /// The log's last record when it became live: a token from there on
+    /// misses no change below it, its attributes' included
+    /// ([`Keeper::changes`]).
+    since_seq: u64,
     /// Why it cannot be live: a folder in it past the budget of watches,
     /// past the user's limit, or whose watch failed. It is checked, then.
     pub short: Option<Watch>,
@@ -91,6 +95,15 @@ pub struct Live {
     /// Left short, the watches the watcher held once it let go of its
     /// own: tried again once it holds fewer ([`Keeper::retry_short`]).
     short_at: Option<usize>,
+}
+
+/// How far a journal's events hold every change below the folder asked,
+/// from the token asked from up to the one given back
+/// ([`Keeper::complete`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Complete {
+    pub names: bool,
+    pub attrs: bool,
 }
 
 /// What `more` did, added to what `done` says.
@@ -365,9 +378,11 @@ impl Keeper {
         // Proven after an overflow, an installed subtree is live again:
         // its watches stayed, and what came of the events lost is read.
         if let Proof::Checked(at) = self.index.proof() {
+            let seq = self.seq();
             for live in &mut self.live {
                 if live.installed && live.short.is_none() && live.since.is_none() {
                     live.since = Some(at);
+                    live.since_seq = seq;
                 }
             }
         }
@@ -414,6 +429,7 @@ impl Keeper {
             self.live.push(Live {
                 scope: scope.clone(),
                 since: None,
+                since_seq: 0,
                 short: None,
                 installed: false,
                 short_at: None,
@@ -496,10 +512,12 @@ impl Keeper {
         self.append(installed.records.iter().cloned());
         self.note(&installed.watches);
         let there = self.index.folder_at(scope).is_some();
+        let seq = self.seq();
         if let Some(live) = self.live.iter_mut().find(|l| l.scope == scope) {
             live.installed = there;
             if there && live.short.is_none() {
                 live.since = Some(start);
+                live.since_seq = seq;
             }
         }
         Ok(installed)
@@ -511,9 +529,11 @@ impl Keeper {
     /// open what was heard ([`Keeper::overflowed`]), then from the check
     /// after.
     pub fn heard_whole(&mut self, since: Time) {
+        let since_seq = self.seq();
         self.live = vec![Live {
             scope: PathBuf::new(),
             since: Some(since),
+            since_seq,
             short: None,
             installed: true,
             short_at: None,
@@ -895,6 +915,28 @@ impl Keeper {
             if name.starts_with("log-") && name != ours {
                 let _ = std::fs::remove_file(entry.path());
             }
+        }
+    }
+
+    /// The log's last record now: 0 where there is no log.
+    fn seq(&self) -> u64 {
+        self.log.as_ref().map_or(0, |l| l.token().seq)
+    }
+
+    /// How far the events since `since` below `below` hold every change,
+    /// up to now: names wherever the subtree is live (the check that made
+    /// it live found every name changed before, in any gap); attributes
+    /// only where it has been live since that token, as no check finds an
+    /// attribute changed alone ([`Complete`]).
+    pub fn complete(&self, below: &Path, since: Token) -> Complete {
+        let covering = || {
+            self.live
+                .iter()
+                .filter(|l| below.starts_with(&l.scope) && l.since.is_some())
+        };
+        Complete {
+            names: covering().next().is_some(),
+            attrs: covering().any(|l| l.since_seq <= since.seq),
         }
     }
 

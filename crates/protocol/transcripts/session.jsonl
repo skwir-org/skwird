@@ -25,7 +25,7 @@
 # with what it was, a subtree no longer covered; then the token to ask
 # from next.
 > {"id":7,"changes":{"root":"/home/user/Documents","since":"0000018c2f3a1b4d.12"}}
-< {"id":7,"changes":{"events":[{"added":{"path":"/home/user/Documents/new.txt","kind":"file","id":{"dev":45,"ino":1400},"folder":{"dev":45,"ino":256}}},{"removed":{"path":"/home/user/Documents/old.txt","kind":"file","id":{"dev":45,"ino":1100},"folder":{"dev":45,"ino":256}}},{"changed":{"path":"/home/user/Documents/notes","kind":"folder","id":{"dev":45,"ino":1500},"folder":{"dev":45,"ino":256}}},{"not_covered":{"path":"/home/user/Documents/shut","why":"denied"}}],"token":"0000018c2f3a1b4d.15"}}
+< {"id":7,"changes":{"events":[{"added":{"path":"/home/user/Documents/new.txt","kind":"file","id":{"dev":45,"ino":1400},"folder":{"dev":45,"ino":256}}},{"removed":{"path":"/home/user/Documents/old.txt","kind":"file","id":{"dev":45,"ino":1100},"folder":{"dev":45,"ino":256}}},{"changed":{"path":"/home/user/Documents/notes","kind":"folder","id":{"dev":45,"ino":1500},"folder":{"dev":45,"ino":256}}},{"not_covered":{"path":"/home/user/Documents/shut","why":"denied"}}],"token":"0000018c2f3a1b4d.15","complete":{"names":true,"attrs":false}}}
 # A token of another epoch, or from before what the engine keeps.
 > {"id":8,"changes":{"root":"/home/user","since":"0000000000000001.3"}}
 < {"id":8,"too_old":{}}

@@ -1634,7 +1634,22 @@ repositories, their versions their own.
     from, which a client takes before it walks, first or after "too
     old", so that nothing is lost between (found missing on 2026-11-22:
     no client could start the journal). At the system service, an event
-    is given only to who may list the folder holding what it names;
+    is given only to who may list the folder holding what it names.
+    Each answer says how far its events are every change below the root,
+    from the token asked from up to the one given, computed as it
+    answers (`complete`, 2026-11-23, skwir's ask, for its tags index to
+    check its folders by the journal instead of a walk):
+    - `names` wherever the root is live now: the check that made it live
+      found every name changed in any gap before;
+    - `attrs` only where it has been live since that token: an attribute
+      changed alone (an extended attribute set, a mode, a write that
+      changes no name) moves no folder's time, so no check finds it, and
+      a gap in what was heard loses it for good;
+    - beside them, the folders not covered (`holes`), as the root's
+      coverage names them to the asker: their changes are in no event.
+
+    Both are false where the root is only checked: its events are every
+    name change up to the check, as its coverage says, never to now;
   - `exclude {add, remove}`: folders the client keeps out of the index
     (5). A client removes only what it added.
   - `watch {add, remove}` (phase 2): folders the client wants live,

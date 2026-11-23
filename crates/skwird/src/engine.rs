@@ -20,7 +20,7 @@ use skwird_crawl::mounts::Table;
 use skwird_crawl::{Cancel, Exclusions, Heard, Options, Root, Time, Watcher};
 use skwird_index::Index;
 use skwird_index::block::FolderId;
-use skwird_index::keeper::{Event, Keeper, Opened, Reconciled, TooOld};
+use skwird_index::keeper::{Complete, Event, Keeper, Opened, Reconciled, TooOld};
 use skwird_index::log::Token;
 use skwird_index::tree::Limits;
 use skwird_protocol::WirePath;
@@ -233,6 +233,10 @@ impl Shared {
     }
 }
 
+/// What a journal's request is answered: its events, the token to ask
+/// from next, and how far the events are every change; or too old.
+pub(crate) type JournalAnswer = Result<(Vec<Event>, Token, Complete), TooOld>;
+
 pub enum Command {
     /// Prove the root current now; answered once its snapshot is
     /// published.
@@ -246,7 +250,7 @@ pub enum Command {
         root: usize,
         rel: PathBuf,
         since: String,
-        reply: Sender<Result<(Vec<Event>, Token), TooOld>>,
+        reply: Sender<JournalAnswer>,
     },
     /// A client's registrations: folders it keeps out of the index.
     Exclude {
@@ -942,10 +946,13 @@ impl Writing<'_> {
                 // Since nothing: from now, no event, and the token to go on
                 // from, which a client takes before it walks.
                 let answer = match (self.keepers[root].as_ref(), Token::parse(&since)) {
-                    (Some(keeper), _) if since.is_empty() => {
-                        keeper.token().map(|t| (Vec::new(), t)).ok_or(TooOld)
-                    }
-                    (Some(keeper), Some(token)) => keeper.changes(&rel, token),
+                    (Some(keeper), _) if since.is_empty() => keeper
+                        .token()
+                        .map(|t| (Vec::new(), t, keeper.complete(&rel, t)))
+                        .ok_or(TooOld),
+                    (Some(keeper), Some(token)) => keeper
+                        .changes(&rel, token)
+                        .map(|(events, now)| (events, now, keeper.complete(&rel, token))),
                     _ => Err(TooOld),
                 };
                 let _ = reply.send(answer);

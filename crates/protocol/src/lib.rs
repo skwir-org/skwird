@@ -375,6 +375,28 @@ pub struct Changes {
     pub events: Vec<Event>,
     /// The token to ask from next.
     pub token: String,
+    /// How far `events` hold every change below the root, from the token
+    /// asked from up to `token`, outside `holes`: computed as it answers,
+    /// so that a client need not judge it from a coverage asked apart.
+    #[serde(default)]
+    pub complete: Complete,
+    /// The folders below the root not covered, whose changes are in no
+    /// event: as a coverage of the root names them now.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Hole>,
+}
+
+/// How far a journal's events are every change ([`Changes::complete`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Complete {
+    /// Every name made, removed or renamed: wherever the root is live now,
+    /// a check having found what changed in any gap before.
+    pub names: bool,
+    /// Every change of size, times or anything else a stat says, a change
+    /// of its change time alone among them (an extended attribute set, a
+    /// mode changed): only where the root has been live since the token
+    /// asked from, as no check finds an attribute changed alone.
+    pub attrs: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
