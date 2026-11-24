@@ -43,7 +43,9 @@ run as root, its roots `/` and the Data volume's firmlinks, its askers
 judged by their modes and macOS' ACLs as the kernel judges them, its
 users' exclusions kept. Left: step 8, the measurement, on a Mac, and
 what a Mac alone can test (Full Disk Access given, an event database
-made afresh).
+made afresh). skwird 0.1.0 was released on 2026-11-24 (below, "The
+first release"): Linux's four packages, Windows' and macOS' programs,
+and a Homebrew formula built from its source.
 
 ## Phase 0: measure (done)
 
@@ -2564,6 +2566,23 @@ The user's choices of 2026-11-24 (DESIGN 11, open questions 5, 8, 9).
 skwir's session agreed to each point that touches skwir, with its
 conditions, which are written where each is decided.
 
+**Released on 2026-11-24**
+(`github.com/skwir-org/skwird/releases/tag/v0.1.0`), as
+`docs/RELEASING.md` says:
+- `v0.1.0`, the commit that dated the changelog, built by `release.sh
+  build` before the tag was pushed. Everything passed:
+  - the gate and the flake's three machines;
+  - the four Linux packages, each installed, run and removed in its
+    distribution's root;
+  - Windows' and macOS' programs, built on the workstation.
+- The draft tried by `try.yml` on both systems, its programs from the
+  draft: each checksum held, an engine answered a query, and its start
+  at login was registered and taken back. macOS' signature was valid.
+- The notes, the changelog's section, joined onto one line a paragraph
+  (`release.sh notes`): GitHub keeps a release's line breaks, and the
+  draft's first notes broke where the file is wrapped.
+- Published by the user. The tap's formula then took its source.
+
 **The release, 0.1.0:**
 1. **The name** (open question 9). Done on 2026-11-24: free everywhere a
    package of skwird's would go.
@@ -2575,7 +2594,9 @@ conditions, which are written where each is decided.
    Homebrew asks that a tap of anyone but its own be trusted first (`brew
    trust skwir-org/tap`): the workflow trusts it as a user would, and the
    README says so. Passing on the runner on 2026-11-24: style, audit,
-   build from source, test. skwir's session would add a cask for skwir
+   build from source, test. Since 0.1.0, the formula builds the
+   release's source (`brew install skwir-org/tap/skwird`), its main
+   branch by `--HEAD`, and the workflow builds the release. skwir's session would add a cask for skwir
    there, once skwir tells a cask's copy from a downloaded one (its
    ADR-142), and never stripping macOS' quarantine: the user's to agree.
 3. **`tools/release`**, as skwir's: written on 2026-11-24 (`tools/release/release.sh`,
@@ -2606,10 +2627,10 @@ conditions, which are written where each is decided.
 6. **`CHANGELOG.md`** and the notes of 0.1.0: what skwird is, what each
    system has, and that Windows and macOS were tested on GitHub's
    runners, not on a machine of the user's.
-   Written on 2026-11-24, undated until it is released.
+   Written on 2026-11-24, and dated that day, the day it was released.
 7. Once tagged and published: the formula's stable source (its URL and
-   checksum), the AUR's PKGBUILD published, and nixpkgs asked, each the
-   user's to do or ask.
+   checksum), done on 2026-11-24. Left, each the user's to do or ask:
+   the AUR's PKGBUILD published, and nixpkgs asked.
 
 **Measured on the runners** (stand-ins, never step 8 of phases 4 and
 5): `measure.yml`, run by hand on Linux, macOS and Windows, over the
@@ -2704,10 +2725,11 @@ Idle is idle on every system. Two things to look at again:
     a machine (the flake's prove it on NixOS);
   - skwir.org's repositories and their signing, skwir's release tools'
     work, beside skwir's own packages;
-  - a release: its tag, notes and assets, and publishing to the AUR and
-    nixpkgs, each the user's to do or ask;
-  - Homebrew, once macOS has an engine (phase 5), and winget, once
-    Windows' is proven on a Windows machine (phase 4, paused).
+  - publishing to the AUR and nixpkgs, each the user's to do or ask (a
+    release's tag, notes and assets are 0.1.0's since 2026-11-24, and
+    Homebrew's formula with them: above, "The first release");
+  - winget, once Windows' engine is proven on a Windows machine (phase
+    4, paused).
 - CI once there are crates to check on three systems. The development
   shell (`flake.nix`) already carries the Windows and macOS targets.
 
