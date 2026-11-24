@@ -33,7 +33,13 @@ machine, the user having none (below, "Paused, and how it goes on"):
 its file table read and checked by, its journal followed and resumed
 from, its askers judged by their tokens, its users' exclusions kept, its
 volumes followed as they come and go. Left: step 8, the measurement, on
-a Windows machine.
+a Windows machine. Phase 5, macOS, is at its step 7 (2026-11-24), on
+GitHub's macOS runners as phase 4 went on Windows': a user's engine
+built and tested there, its walk by `getattrlistbulk`, its roots heard
+whole by one FSEvents stream, resumed from its history at a start, the
+folders macOS asks consent for left unread without Full Disk Access,
+started at login by a LaunchAgent. Left: the system service (a
+LaunchDaemon, macOS' ACLs judged), and the measurement, on a Mac.
 
 ## Phase 0: measure (done)
 

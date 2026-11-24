@@ -262,6 +262,30 @@ concerned, until that subtree is read again.
     read again so. Its log goes on, so clients' tokens hold.
   - The service manager's stop ends the engine cleanly: what was heard
     is applied and every root saved, its position with it.
+
+  **As built on macOS** (2026-11-24, phase 5, steps 3 and 4), a user's
+  engine's, whose events any user may replay:
+  - **One stream** (`FSEvents`) hears every root and the cookies' folder,
+    so that a cookie is heard in its turn after every root's changes,
+    and a sync of any root is a barrier. An event names a folder, not an
+    entry: a cookie is a folder of its own, a file made in it.
+  - **A stream is never made from a past event for the roots:** a
+    stream that replays history gives what is new before what it
+    replays (a cookie before a change made ahead of it, as the first
+    runner found), and folds a subtree's changes into one to read whole.
+    Made again for a root added, the stream starts from now, and the one
+    before gives what it holds back (`FlushSync`) before it stops.
+  - **A position** is the root's volume's event database (its UUID,
+    `FSEventsCopyUUIDForDevice`) and the last event the roots' stream
+    gave. A root whose position holds is replayed at the start on a
+    stream of its own until its history is given whole (`HistoryDone`),
+    and is live then with no check. No position is kept while it
+    replays: the roots' stream is ahead of the replay, where Windows'
+    follower replays in order and keeps its positions as it goes.
+  - A drop, wrapped event ids, `MustScanSubDirs` or a volume mounted
+    below a root lower the whole root until its check, where this
+    decision asks for the subtree alone: never overstated, more read
+    than need be, to narrow once a Mac measures how often they come.
 - **The barrier** makes "live" mean up to now. The client asks for a
   sync. skwird creates a cookie file in a folder of its own that shares
   the notification queue, and answers once it hears it. Where the
@@ -627,6 +651,21 @@ same rules, judged as Windows judges them:
   every folder on it is answered. ReFS keeps descriptors as NTFS does but
   has no file table: not a root of the service until its folders' ids
   can be told.
+
+**On macOS** (2026-11-24, phase 5):
+- **Who asks:** the socket's peer (`LOCAL_PEERCRED`), its user and its
+  groups, 16 at most, which grants a peer in more less, never more.
+- **A folder with an ACL** (macOS keeps extended ones) says so as it is
+  read where ACLs are asked (`ATTR_CMN_EXTENDED_SECURITY`), and is not
+  known to an asker, never judged by its mode alone, until macOS' ACLs
+  are read and judged. Folders above a root are not known either.
+- **Consent.** Without Full Disk Access, the folders macOS asks consent
+  for below the home (the user's documents, other programs', the
+  cloud's) are never opened: opening one asks the user and waits for
+  their answer, and no engine may wait on a person. Each is not covered,
+  as denied, so that a client walks it itself, which may ask. Decided
+  once a process, asked again at each start: no event follows a consent
+  given.
 
 ### 5. Private folders are never indexed
 
@@ -1391,7 +1430,10 @@ Linux, macOS and Windows:
 ### 10. Idle is idle, and nothing leaves the machine
 
 There is no polling loop: the engine sleeps until the system notifies
-it. It never uses the network.
+it. It never uses the network. On macOS, the system is told never to
+fetch a file's contents from the cloud for the engine
+(`setiopolicy_np`, dataless files not materialized): reading a
+placeholder would otherwise download it.
 
 **Budgets.** Set on 2026-11-21 from phase 1's measurement of a home of
 6.9 million entries in 867,000 folders: btrfs on a solid-state disk, 20
