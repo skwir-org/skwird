@@ -791,6 +791,20 @@ fn database_of(a: &Api, dev: u64) -> Option<u64> {
 }
 
 /// The newest event the system has numbered.
+/// What a replay of `path` from `from` would be refused for, said for a
+/// test that fails: the database there now and the system's current id.
+#[cfg(test)]
+pub(crate) fn why_refused(path: &Path, from: Position) -> String {
+    let Ok(a) = api() else {
+        return "no FSEvents".into();
+    };
+    let database = device_of(path).map(|dev| database_of(a, dev));
+    format!(
+        "kept {from:?}; the database now {database:?}, the current id {}",
+        current_id(a)
+    )
+}
+
 fn current_id(a: &Api) -> u64 {
     // SAFETY: a call that takes nothing.
     unsafe { (a.current_id)() }

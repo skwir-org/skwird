@@ -298,7 +298,11 @@ fn a_position_replays_what_changed_after_it() {
         !watcher.replay_root(0, &root, ahead).unwrap(),
         "ahead of every event"
     );
-    assert!(watcher.replay_root(0, &root, at).unwrap());
+    assert!(
+        watcher.replay_root(0, &root, at).unwrap(),
+        "{}",
+        crate::macos::watch::why_refused(&root, at)
+    );
     let heard = heard_until(&watcher, |h| *h == Heard::Replayed { scope: 0 });
     assert!(
         heard.contains(&Heard::Folder {
