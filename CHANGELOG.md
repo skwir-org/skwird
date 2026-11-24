@@ -4,7 +4,7 @@ skwird's releases. Each section is its release's notes on GitHub
 (`tools/release/release.sh`): the first is the release being made, dated
 the day it is released.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-24)
 
 The first release of skwird: an index of file names kept current by each
 system's change notifications, answered over a local socket. A client asks
