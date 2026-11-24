@@ -2274,8 +2274,10 @@ macOS 15, thrown away after its job. The gate lints for macOS
 
 1. **The walk and the check** (`skwird_crawl`, macOS).
    - A folder is opened beneath its root's handle by a path that may hold
-     no link (`O_NOFOLLOW_ANY`, macOS 11), a part at a time past 768
-     bytes (`PATH_MAX` is 1,024). macOS has no `RESOLVE_BENEATH` nor
+     no link (`O_NOFOLLOW_ANY`, macOS 11), in place of `O_NOFOLLOW`,
+     which macOS refuses beside it (`EINVAL`: the first run read no
+     folder), a part at a time past 768 bytes (`PATH_MAX` is 1,024).
+     macOS has no `RESOLVE_BENEATH` nor
      `RESOLVE_NO_XDEV`: the path is the names the listings gave, never
      `..`, and a folder opened on another device than its root's is a
      mount.

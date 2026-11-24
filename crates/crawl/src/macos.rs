@@ -48,9 +48,11 @@ fn dir_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW
 }
 
-/// A folder opened by a path that may hold no link at all.
+/// A folder opened by a path that may hold no link at all, its last name
+/// among them. In place of `O_NOFOLLOW`, never beside it: macOS refuses
+/// the two together (`EINVAL`), as the first runner found.
 fn beneath_flags() -> OFlags {
-    dir_flags() | OFlags::NOFOLLOW_ANY
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW_ANY
 }
 
 /// A root, opened: the folder a crawl reads below and a check proves.
