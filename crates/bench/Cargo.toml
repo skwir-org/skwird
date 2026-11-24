@@ -17,6 +17,14 @@ libc.workspace = true
 # fanotify mounts a btrfs filesystem's top-level subvolume, detached.
 rustix = { workspace = true, features = ["event", "mount"] }
 
+[target.'cfg(windows)'.dependencies]
+# A process's memory, as Windows counts it (`skwird-bench memory`).
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 skwird-testkit.workspace = true
 

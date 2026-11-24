@@ -196,6 +196,7 @@ dependencies = [
  "skwird-crawl",
  "skwird-index",
  "skwird-testkit",
+ "windows-sys",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ mod churn;
 #[cfg(target_os = "linux")]
 mod fanotify;
 mod index;
+mod memory;
 mod said;
 mod tree;
 mod walk;
@@ -24,6 +25,7 @@ usage: skwird-bench walk ROOT [--threads N] [--stat]
        skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
        skwird-bench churn FOLDER -- COMMAND [ARG]...
        skwird-bench tree DIR [--entries N]
+       skwird-bench memory PID
 
 walk      read every folder under ROOT with skwird's crawl, and size the
           index it would keep (--stat: stat every entry, as an index of
@@ -52,6 +54,10 @@ churn     watch FOLDER as the engine is to watch it, run COMMAND (a
 tree      make a synthetic tree of N entries (1,040,000 by default) in DIR,
           which must be empty, shaped as a home is, the same on every
           system: what the runners are measured on
+
+memory    what the process PID, of the same user, holds of memory, as its
+          system counts it: resident, and its own, what no file backs
+          (Linux's RssAnon, macOS' footprint, Windows' private bytes)
 
 It prints counts, sizes and times, never a name or a path.";
 
@@ -131,6 +137,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
     if parsed.path.as_os_str().is_empty() {
         return Err(USAGE.into());
     }
+    // A process's number, no path.
+    if parsed.command == "memory" {
+        return Ok(parsed);
+    }
     // A tree's folder, made if it is not there.
     if parsed.command == "tree" {
         std::fs::create_dir_all(&parsed.path)
@@ -182,6 +192,20 @@ fn run(args: &Args) -> Result<(), String> {
                 .into(),
         ),
         "index" => index::run(&args.path, args.threads, args.keep.clone()),
+        "memory" => {
+            let pid = args
+                .path
+                .to_str()
+                .and_then(|p| p.parse::<u32>().ok())
+                .ok_or("memory takes a process's number")?;
+            let held = memory::of(pid)?;
+            println!(
+                "memory: {} resident, {} its own",
+                said::bytes(held.resident),
+                said::bytes(held.own)
+            );
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         "fanotify" => fanotify::probe(&args.path, args.seconds, &args.probes),
         #[cfg(not(target_os = "linux"))]

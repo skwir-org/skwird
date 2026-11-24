@@ -90,13 +90,11 @@ trap 'kill "$engine" 2>/dev/null || true' EXIT
 pid="$engine"
 if [ "$system" = windows ]; then pid="$(cat "/proc/$engine/winpid")"; fi
 
-# Its memory resident, in MB; its processor time, in seconds.
+# Its memory, resident and its own, what no file backs, as its system
+# counts it (skwird-bench memory: Linux's RssAnon, macOS' footprint,
+# Windows' private bytes); its processor time, in seconds.
 memory() {
-    case "$system" in
-    linux) awk '/^VmRSS:/ { printf "%.0f MB", $2 / 1000 }' "/proc/$pid/status" ;;
-    macos) ps -o rss= -p "$pid" | awk '{ printf "%.0f MB", $1 * 1024 / 1e6 }' ;;
-    windows) powershell -NoProfile -Command "[math]::Round((Get-Process -Id $pid).WorkingSet64 / 1e6)" | tr -d '\r' | sed 's/$/ MB/' ;;
-    esac
+    "$bench" memory "$pid" | tr -d '\r' | sed 's/^memory: //'
 }
 processor() {
     case "$system" in
