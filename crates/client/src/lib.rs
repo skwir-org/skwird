@@ -531,6 +531,36 @@ impl Client {
         }
     }
 
+    /// What the folder at `root` holds (`docs/DESIGN.md`, Protocol,
+    /// `totals`): each batch of its children, with their totals, handed to
+    /// `each` as it comes, `each` giving false cancelling the rest; then
+    /// the folder's own totals and how far they hold. With `largest`, only
+    /// so many children come, the rest summed in the answer.
+    pub fn totals(
+        &mut self,
+        root: &Path,
+        largest: Option<protocol::Largest>,
+        mut each: impl FnMut(&[protocol::Child]) -> bool,
+    ) -> Result<protocol::TotalsDone, Error> {
+        let id = self.ask(Ask::Totals {
+            root: WirePath::of(root),
+            largest,
+        })?;
+        let mut cancelled = false;
+        loop {
+            match self.answer(id)? {
+                Answer::Children(batch) => {
+                    if !cancelled && !each(&batch) {
+                        self.ask(Ask::Cancel { id })?;
+                        cancelled = true;
+                    }
+                }
+                Answer::TotalsDone(done) => return Ok(*done),
+                _ => return Err(Error::Unexpected),
+            }
+        }
+    }
+
     /// What changed below `root` since `since`, or none if the token is
     /// too old: walk again.
     pub fn changes(&mut self, root: &Path, since: &str) -> Result<Option<Changes>, Error> {

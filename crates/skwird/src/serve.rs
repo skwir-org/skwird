@@ -688,6 +688,10 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
                 // cancelled.
                 continue;
             }
+            // Totals' protocol comes before the engine's answer to them
+            // (docs/PLAN.md, skwir's step E): a client builds against the
+            // fake engine meanwhile.
+            Ask::Totals { .. } => failure("unsupported", "this engine does not answer totals yet"),
             Ask::Watch { add, .. } if shared.system => watching_all(shared, add, who),
             Ask::Changes { root, since } => changes(shared, commands, &root, since, who),
             Ask::Exclude { add, remove } => {

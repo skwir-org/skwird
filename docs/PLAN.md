@@ -686,6 +686,12 @@ its ADR-050). Its sessions build them, in its repository:
   2. **The protocol:** `totals`, its batches and its `done`, in
      `skwird-protocol`, the client's call, the fake engine's answer from
      its script, and the transcript.
+
+     Done on 2026-11-24: `Ask::Totals`, `Answer::Children` and
+     `Answer::TotalsDone`; `largest` picks the children to send and sums
+     the rest, for engine and fake alike; `Client::totals`; the fake
+     answers its script's totals, in batches of 512, so many with
+     `largest`. Until step 3, the engine answers `unsupported`.
   3. **The engine:** the totals computed from the snapshot, per asker at
      the system service, streamed, the coverage and holes as `query`
      gives them.
