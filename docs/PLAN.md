@@ -2595,8 +2595,14 @@ conditions, which are written where each is decided.
    Windows and macOS programs taken from the draft onto GitHub's
    runners, each started, asked a query, and started at login on a
    runner thrown away.
-   Written on 2026-11-24 (`tools/release/try-draft.sh`): run by hand, it
-   must be on `main` to be run; tried on a draft made for it, once it is.
+   Written on 2026-11-24 (`tools/release/try-draft.sh`), and tried that
+   day on a draft made for it alone (`trial-try`, deleted after), the
+   programs `release.sh programs` built on the workstation:
+   - macOS: the signature valid, Gatekeeper's refusal said (not
+     notarized), the engine live, the query answered, launchd's agent
+     taken and taken back;
+   - Windows: the same, its logon task registered and deleted, once
+     the zip was unzipped by PowerShell (Git's tar reads none).
 6. **`CHANGELOG.md`** and the notes of 0.1.0: what skwird is, what each
    system has, and that Windows and macOS were tested on GitHub's
    runners, not on a machine of the user's.
@@ -2623,6 +2629,29 @@ above, counts and times alone, tried on the workstation on a tree of
 `ci/measure/...`. A user's engine on Linux keeps live what a client
 asks it to: the script asks (`skwird watch`), and the runner is given
 enough inotify watches for the tree's folders.
+
+Measured on 2026-11-24 (the runners of that day; shared machines, a
+synthetic tree):
+
+| 1,040,000 entries | Linux, ext4, 4 cores | Windows, NTFS, 4 cores | macOS, APFS, 3 cores |
+|---|---|---|---|
+| the tree made | 14.5 s | 93 s | 83 s |
+| a walk | 0.55 s | 5.2 s | 12.5 s |
+| the index | 32.9 MB | 30.2 MB | 30.3 MB |
+| a first answer | 0.02 s | 0.50 s | 0.28 s |
+| live | 2.7 s | 2.7 s | 12.6 s |
+| a sync after a change | 0.01 s | 0.92 s | 0.51 s |
+| memory, live, then 10 idle minutes after | 47, 47 MB | 46, 17 MB | 114, 119 MB |
+| the processor over 10 idle minutes | 0.00 s | 0.00 s | 0.00 s |
+
+Idle is idle on every system. Two things to look at again:
+- **A sync waits on macOS and Windows** for about the stream's latency
+  (0.5 s) and nearly a second, where Linux answers at once. A sync
+  flushes the stream (above, "a latency of 0.5 s"), and should not wait
+  for it.
+- **macOS' engine holds twice and more Linux's memory,** and gives none
+  back idle: Linux's gives back what its crawl took (`malloc_trim`), and
+  macOS' has no such call there yet.
 
 **For 0.2, with skwir's session:**
 - **Names in both Unicode forms** (open question 5): skwird's matcher
