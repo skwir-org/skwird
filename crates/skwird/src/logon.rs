@@ -219,7 +219,9 @@ mod tests {
         );
         assert!(plist.contains("<string>serve</string>"));
         assert!(plist.contains("<string>--forever</string>"));
-        assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"));
+        // Its spacing aside: a checkout on Windows ends its lines with CRLF.
+        let flat = plist.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("<key>RunAtLoad</key> <true/>"), "{flat}");
         assert!(plist.contains(&format!("<string>{AGENT}</string>")));
         assert!(plist.contains("<string>/Users/someone/.local/state/skwird/engine.log</string>"));
         assert!(

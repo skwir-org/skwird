@@ -62,6 +62,7 @@
           ./dist/systemd
           ./dist/sysusers
           ./dist/windows
+          ./dist/macos
           ./LICENSE-MIT
           ./LICENSE-APACHE
         ];
