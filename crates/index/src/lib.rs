@@ -19,6 +19,7 @@ pub mod packed;
 pub mod packer;
 pub mod pages;
 pub mod store;
+pub mod totals;
 pub mod tree;
 pub mod update;
 

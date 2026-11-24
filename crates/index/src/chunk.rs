@@ -780,7 +780,7 @@ impl View<'_> {
     /// decoded a run at a time: a large folder read again decodes its
     /// block, and a value at a time cost most of it.
     #[allow(clippy::cast_possible_truncation)] // as `item`: the values were packed from these types
-    fn items(&self, range: Range<usize>) -> Vec<Item> {
+    pub(crate) fn items(&self, range: Range<usize>) -> Vec<Item> {
         // Shorter than a run, a value at a time is the cheaper.
         if range.len() < crate::packed::RUN {
             return range.map(|i| self.item(i)).collect();

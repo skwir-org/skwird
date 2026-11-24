@@ -1759,10 +1759,14 @@ repositories, their versions their own.
       sent. Usage asks N = 64, M = 16, and folds `rest` into its "other"
       item, so a folder of a million entries is cheap on the wire. Without
       it, every child is sent.
-    - **Totals:** `size`, `alloc`, `files`, `folders`, `newest_mtime` (the
-      folders' own included), `by_extension: [{ext, files, alloc}]` (the
-      name's last dot on, lowercased; none for a name with none: the
-      client types files, rule 5), and `shared`.
+    - **Totals:** `size` and `alloc` of its files (every entry but
+      folders), `files`, `folders` (below it, itself not counted),
+      `newest_file_mtime` (its files' alone), `by_extension: [{ext, files,
+      alloc}]` (the name's last dot past its first byte on, lowercased;
+      none for a name with none: the client types files, rule 5), and
+      `shared`. Each child carries its own `mtime`, and `done` the
+      folder's: Usage dates a folder by its newest file, by its own time
+      where it holds none (skwir's rule, asked on 2026-11-24).
     - **Hard links:** a file of several names counts once in a subtree, by
       its identity. `shared` is the alloc of its files with a name inside
       and more names than the subtree holds: those deleting it would not
@@ -1774,6 +1778,8 @@ repositories, their versions their own.
     - **Proof:** the coverage's `attrs` proof, the index's, and holes by
       path for the folders not counted (excluded, private, denied, not
       covered, not read): a client shows those as unknown, never empty.
+      A folder another root holds (a mount below) is a hole too: asked
+      there, that root answers.
     - **Per asker,** at the system service: what they could list alone is
       counted. A folder they may not list is a hole, denied, and nothing
       below it counts, so no total says what it holds.

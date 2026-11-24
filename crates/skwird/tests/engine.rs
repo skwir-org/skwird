@@ -1137,3 +1137,74 @@ fn an_engine_watching_its_own_folders_stays_idle() {
         .collect();
     assert!(own.is_empty(), "the engine's own folders indexed: {own:?}");
 }
+
+/// `totals` through a user's engine (`docs/DESIGN.md`, Protocol): every
+/// child of the folder asked, with its subtree's totals, a file's its own;
+/// the folder's own totals every child's, its token one `changes` goes on
+/// from, its private folder a hole; with `largest`, the heaviest child
+/// alone, the rest summed whole.
+#[test]
+fn totals_are_every_child_and_the_folders_own() {
+    let mut env = Env::new("engine-totals");
+    tree(&env);
+    let home = env.home();
+    env.s.write(home.join("docs/d00/big.bin"), &vec![1; 40_000]);
+    env.s.file(home.join(".ssh/id_test"));
+    env.engine(30);
+    let mut c = env.client("a test");
+    let mut children = Vec::new();
+    let done = c
+        .totals(&home, None, |batch| {
+            children.extend_from_slice(batch);
+            true
+        })
+        .unwrap();
+    let names: BTreeSet<PathBuf> = children.iter().map(|c| c.path.to_path()).collect();
+    let listed: BTreeSet<PathBuf> = std::fs::read_dir(&home)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(names, listed, "every child");
+    let docs = children
+        .iter()
+        .find(|c| c.path.to_path() == home.join("docs"))
+        .unwrap();
+    assert_eq!((docs.totals.files, docs.totals.folders), (41, 40));
+    assert_eq!(docs.totals.size, 40_000);
+    let mut summed = skwird_protocol::Totals::default();
+    for child in &children {
+        summed.add_child(child);
+    }
+    assert_eq!(done.totals, summed, "the folder's own, every child's");
+    assert_eq!(done.count, children.len() as u64);
+    assert_eq!(done.nlink, skwird_protocol::Nlink::Complete);
+    assert!(
+        done.coverage
+            .holes
+            .iter()
+            .any(|h| h.path.to_path() == home.join(".ssh")),
+        "{:?}",
+        done.coverage.holes
+    );
+    assert!(
+        c.changes(&home, &done.token).unwrap().is_some(),
+        "a token to go on from"
+    );
+    let mut few = Vec::new();
+    let heaviest = c
+        .totals(
+            &home,
+            Some(skwird_protocol::Largest { alloc: 1, files: 0 }),
+            |batch| {
+                few.extend(batch.iter().map(|c| c.path.to_path()));
+                true
+            },
+        )
+        .unwrap();
+    assert_eq!(few, [home.join("docs")]);
+    let rest = heaviest.rest.unwrap();
+    assert_eq!(rest.count, children.len() as u64 - 1);
+    let mut again = rest.totals;
+    again.add_child(docs);
+    assert_eq!(again, done.totals, "what is sent and the rest, the whole");
+}

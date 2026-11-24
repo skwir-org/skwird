@@ -11,6 +11,7 @@ const USAGE: &str = "\
 usage: skwird serve [--system] [--root PATH]... [--idle SECONDS | --forever] [--threads N]
        skwird find TERM [--in PATH] [--limit N] [--case]
        skwird coverage [PATH]
+       skwird totals [PATH]
        skwird sync [PATH]
        skwird watch [--remove] FOLDER...
        skwird status
@@ -23,6 +24,9 @@ serve     the user's engine: it indexes the roots (the home by default),
 find      the entries whose names hold TERM (a glob where it holds * ? or
           [), as skwir matches them, below PATH (the current folder)
 coverage  how far answers below PATH can be trusted
+totals    what PATH holds (the current folder): each child's allocated
+          bytes, files and folders, the largest first, then its own and
+          the folders not counted
 sync      prove PATH current now, then say how far it can be trusted
 watch     keep FOLDER live: changes in it heard and applied as they come,
           within the engine's share of watches (--remove: take it back)
@@ -257,6 +261,7 @@ fn run(args: &Args) -> Result<(), String> {
             );
             Ok(())
         }
+        "totals" => totals(args),
         "coverage" => {
             let c = client()?
                 .coverage(&folder(args)?)
@@ -384,5 +389,44 @@ fn watch(args: &Args) -> Result<(), String> {
     if let Some(share) = watching.share {
         println!("watches: {} of {}", share.used, share.size);
     }
+    Ok(())
+}
+
+/// What the folder asked holds, as the engine sums it: each child, the
+/// largest by allocated bytes first, then the folder's own totals and the
+/// folders not counted.
+fn totals(args: &Args) -> Result<(), String> {
+    let root = folder(args)?;
+    let mut children = Vec::new();
+    let done = client()?
+        .totals(&root, None, |batch| {
+            children.extend_from_slice(batch);
+            true
+        })
+        .map_err(|e| e.to_string())?;
+    children.sort_by_key(|c| std::cmp::Reverse(c.totals.alloc));
+    for c in &children {
+        println!(
+            "{:>14} {:>9} files {:>7} folders  {}",
+            c.totals.alloc,
+            c.totals.files,
+            c.totals.folders,
+            c.path.to_path().display()
+        );
+    }
+    let t = &done.totals;
+    println!(
+        "total: {} bytes allocated, {} files, {} folders, {} shared{}",
+        t.alloc,
+        t.files,
+        t.folders,
+        t.shared,
+        if done.nlink == skwird_protocol::Nlink::Partial {
+            " at least"
+        } else {
+            ""
+        }
+    );
+    print_coverage(&done.coverage);
     Ok(())
 }

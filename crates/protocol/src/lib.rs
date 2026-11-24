@@ -386,10 +386,12 @@ pub struct Totals {
     pub files: u64,
     /// Folders below, the subtree's own not counted.
     pub folders: u64,
-    /// The newest modification time of what it holds, its folders' own
-    /// among them: none for an empty subtree.
+    /// The newest modification time of its files (every entry but
+    /// folders): none where it holds none. A folder's own time is its
+    /// [`Child::mtime`], or [`TotalsDone::mtime`] for the one asked, so that
+    /// a client dates a folder holding no file by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub newest_mtime: Option<Instant>,
+    pub newest_file_mtime: Option<Instant>,
     /// Its files by their names' extensions, the largest alloc first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_extension: Vec<Extension>,
@@ -418,6 +420,10 @@ pub struct Child {
     pub path: WirePath,
     pub kind: Kind,
     pub id: Id,
+    /// Its own modification time: a file's, or a folder's own, whatever it
+    /// holds. None where the index holds no attributes for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<Instant>,
     pub totals: Totals,
 }
 
@@ -459,7 +465,7 @@ impl Totals {
         self.files += other.files;
         self.folders += other.folders;
         self.shared += other.shared;
-        self.newest_mtime = match (self.newest_mtime, other.newest_mtime) {
+        self.newest_file_mtime = match (self.newest_file_mtime, other.newest_file_mtime) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
@@ -515,6 +521,9 @@ pub fn largest(children: Vec<Child>, largest: Largest) -> (Vec<Child>, Option<Re
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TotalsDone {
     pub totals: Totals,
+    /// The folder's own modification time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<Instant>,
     /// The journal's token as of the snapshot answered from: `changes`
     /// since it says what moved the totals since.
     pub token: String,
@@ -775,12 +784,13 @@ mod tests {
             path: WirePath(format!("/home/user/{name}").into_bytes()),
             kind,
             id: Id::default(),
+            mtime: None,
             totals: Totals {
                 size: alloc,
                 alloc,
                 files,
                 folders: u64::from(kind == Kind::Folder),
-                newest_mtime: Some(Instant {
+                newest_file_mtime: Some(Instant {
                     sec: i64::try_from(alloc).unwrap(),
                     nsec: 0,
                 }),

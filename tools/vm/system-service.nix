@@ -77,6 +77,15 @@ pkgs.testers.runNixOSTest {
         assert "names: not covered: Denied" in said, said
         found = lines(machine.succeed("SKWIRD_NO_START=1 skwird find 'the plan' --in /home"))
         assert found == ["/home/someone/notes/the plan.txt"], found
+        # Totals, per asker: the owner is counted their file; the other
+        # user, who may not list the home, is told it is denied, and
+        # nothing in it is counted.
+        said = as_user("someone", "skwird totals ~")
+        assert any(l.endswith(" /home/someone/notes") and " 1 files" in l for l in lines(said)), said
+        said = as_user("other", "skwird totals /home")
+        home = [l for l in lines(said) if l.endswith(" /home/someone")]
+        assert home and " 0 files" in home[0], said
+        assert "not covered: /home/someone (Denied)" in said, said
 
     with subtest("a folder its group may read is answered to the group alone"):
         machine.succeed(

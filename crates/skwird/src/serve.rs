@@ -24,7 +24,7 @@ use crate::engine::{Command, Config, Published, Shared, log, writer};
 use crate::transport::{Listener, Stream};
 
 /// Results sent at a time.
-const BATCH: usize = 512;
+pub(crate) const BATCH: usize = 512;
 
 /// At the system service, which answers any local user (DESIGN 4): the
 /// most results a query gives, and the most queries a user runs at once.
@@ -276,21 +276,21 @@ fn sources(
     (watcher, group)
 }
 
-type Writer = Arc<Mutex<Stream>>;
+pub(crate) type Writer = Arc<Mutex<Stream>>;
 
-fn send(to: &Writer, id: u64, answer: Answer) -> bool {
+pub(crate) fn send(to: &Writer, id: u64, answer: Answer) -> bool {
     let mut stream = to.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     wire::write(&mut *stream, &Response { id, answer }).is_ok()
 }
 
-fn failure(what: &str, message: impl Into<String>) -> Answer {
+pub(crate) fn failure(what: &str, message: impl Into<String>) -> Answer {
     Answer::Error(wire::Failure {
         what: what.to_owned(),
         message: message.into(),
     })
 }
 
-fn outside() -> wire::Coverage {
+pub(crate) fn outside() -> wire::Coverage {
     wire::Coverage {
         names: wire::Proof::NotCovered(wire::Why::Outside),
         attrs: wire::Proof::NotCovered(wire::Why::Outside),
@@ -362,7 +362,12 @@ fn coverage_one(shared: &Shared, root: &WirePath, asker: &Asker) -> Result<wire:
 
 /// What the asker sees of root `i`'s index: none where they see all of it
 /// (a user's engine, or root asking the system service).
-fn seeing<'a>(shared: &Shared, i: usize, index: &'a Index, asker: &'a Asker) -> Option<Seeing<'a>> {
+pub(crate) fn seeing<'a>(
+    shared: &Shared,
+    i: usize,
+    index: &'a Index,
+    asker: &'a Asker,
+) -> Option<Seeing<'a>> {
     (shared.system && !asker.is_root()).then(|| Seeing {
         index,
         asker,
@@ -411,7 +416,7 @@ fn above(shared: &Shared, i: usize, asker: &Asker) -> Sight {
 }
 
 /// How far an asker reaches the folder at a path.
-enum Reached {
+pub(crate) enum Reached {
     /// They may list it.
     Listed(FolderId),
     /// The index holds no folder there, and they may list the nearest one
@@ -422,7 +427,11 @@ enum Reached {
     Denied,
 }
 
-fn reached(seeing: &Seeing<'_>, rel: &Path, memo: &mut HashMap<FolderId, Sight>) -> Reached {
+pub(crate) fn reached(
+    seeing: &Seeing<'_>,
+    rel: &Path,
+    memo: &mut HashMap<FolderId, Sight>,
+) -> Reached {
     let Some((at, folder)) = rel
         .ancestors()
         .find_map(|a| seeing.index.folder_at(a).map(|f| (a, f)))
@@ -447,7 +456,7 @@ fn reached(seeing: &Seeing<'_>, rel: &Path, memo: &mut HashMap<FolderId, Sight>)
 }
 
 /// Not covered, for an asker who may not list the folder asked.
-fn denied() -> wire::Coverage {
+pub(crate) fn denied() -> wire::Coverage {
     wire::Coverage {
         names: wire::Proof::NotCovered(wire::Why::Denied),
         attrs: wire::Proof::NotCovered(wire::Why::Denied),
@@ -589,6 +598,23 @@ fn too_soon(shared: &Shared, who: &Asker) -> bool {
     false
 }
 
+/// What a request answered on a thread of its own does: a query, or a
+/// `totals`, which asks the writer for its journal's token.
+fn apart(
+    commands: &Sender<Command>,
+    id: u64,
+    ask: Ask,
+) -> impl FnOnce(&Shared, &Writer, &AtomicBool, &Asker) -> Answer + Send + 'static {
+    let commands = commands.clone();
+    move |shared: &Shared, writer: &Writer, flag: &AtomicBool, who: &Asker| match ask {
+        Ask::Query(query) => answer_query(shared, writer, id, &query, flag, who),
+        Ask::Totals { root, largest } => {
+            crate::totals::answer(shared, &commands, writer, id, &root, largest, flag, who)
+        }
+        _ => failure("internal", "not a query"),
+    }
+}
+
 /// A query answered on a thread of its own, so that a `cancel` can reach
 /// it, its flag kept in `cancels` while it runs.
 fn spawn_query(
@@ -596,9 +622,9 @@ fn spawn_query(
     writer: &Writer,
     cancels: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     id: u64,
-    query: wire::Query,
     who: &Asker,
     running: Running,
+    work: impl FnOnce(&Shared, &Writer, &AtomicBool, &Asker) -> Answer + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     let flag = Arc::new(AtomicBool::new(false));
     cancels
@@ -612,7 +638,7 @@ fn spawn_query(
         who.clone(),
     );
     named("skwird-query", move || {
-        let answer = answer_query(&shared, &writer, id, &query, &flag, &who);
+        let answer = work(&shared, &writer, &flag, &who);
         cancels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -659,7 +685,7 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
                 failure("busy", "the system service takes this once a second a user")
             }
             Ask::Sync { root } => sync(shared, commands, &root, who),
-            Ask::Query(query) => {
+            ask @ (Ask::Query(_) | Ask::Totals { .. }) => {
                 let Some(running) = Running::query(shared, who.uid) else {
                     send(
                         &writer,
@@ -671,8 +697,9 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
                 // A thread that ended is let go of now: kept to the end of a
                 // long connection, each would hold its stack until then.
                 queries.retain(|q: &std::thread::JoinHandle<()>| !q.is_finished());
+                let work = apart(commands, id, ask);
                 queries.push(spawn_query(
-                    shared, &writer, &cancels, id, query, who, running,
+                    shared, &writer, &cancels, id, who, running, work,
                 ));
                 continue;
             }
@@ -688,10 +715,6 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
                 // cancelled.
                 continue;
             }
-            // Totals' protocol comes before the engine's answer to them
-            // (docs/PLAN.md, skwir's step E): a client builds against the
-            // fake engine meanwhile.
-            Ask::Totals { .. } => failure("unsupported", "this engine does not answer totals yet"),
             Ask::Watch { add, .. } if shared.system => watching_all(shared, add, who),
             Ask::Changes { root, since } => changes(shared, commands, &root, since, who),
             Ask::Exclude { add, remove } => {

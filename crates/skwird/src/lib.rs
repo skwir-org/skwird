@@ -32,6 +32,8 @@ pub mod serve;
 pub mod service;
 pub mod system;
 #[cfg(any(target_os = "linux", windows))]
+pub mod totals;
+#[cfg(any(target_os = "linux", windows))]
 pub mod transport;
 
 /// Serve a user's engine: Linux's and Windows' alone so far (rule 7).

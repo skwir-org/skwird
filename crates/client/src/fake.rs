@@ -481,6 +481,7 @@ mod tests {
                 path: WirePath(format!("/home/user/file {n}").into_bytes()),
                 kind: Kind::File,
                 id: Id::default(),
+                mtime: None,
                 totals: Totals {
                     size: n,
                     alloc: n,
@@ -494,6 +495,7 @@ mod tests {
             whole.add_child(c);
         }
         let done = TotalsDone {
+            mtime: None,
             totals: whole.clone(),
             token: "0000000000000001.9".into(),
             coverage: Coverage {

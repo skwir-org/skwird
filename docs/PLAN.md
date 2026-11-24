@@ -699,6 +699,29 @@ its ADR-050). Its sessions build them, in its repository:
      newest time, extensions, a file of two names inside and one of a
      name outside, a hole where a folder is excluded, private or denied.
 
+     Done on 2026-11-24 (`skwird_index::totals`, `skwird::totals`):
+     - summed over each child's subtree in pre-order, once a request,
+       never kept; a folder not covered, or one the asker may not list,
+       a hole whose subtree is passed over;
+     - a file of several known names held apart, by its identity, to be
+       counted once a subtree; one whose count is not known (Windows'
+       listings) counted at each name, the answer partial;
+     - the journal's token asked of the writer before the snapshot is
+       read, so that the snapshot is at least as new;
+     - answered on a thread of its own, as a query, counted among the
+       user's queries at once, cancelled likewise;
+     - `skwird totals [PATH]`, each child the largest first.
+
+     Dated as Usage dates (skwir's ask the same day): files alone date a
+     subtree, each child and the folder asked carry their own times.
+     Tested: against a tree of known sums (sizes, allocs, counts, the
+     newest file, extensions, a file of two names inside and one with a
+     name outside, an excluded folder); through a user's engine (every
+     child, the folder's own every child's, the private folder a hole,
+     the token, `largest` and the rest); at the system service in its
+     machine, as two users: the owner counted their file, the other told
+     the home is denied, nothing in it counted.
+
 Kept alike in both: the four coverage words; name matching (DESIGN 7),
 so a change to one is a change to the other; and how a network mount
 is told (DESIGN 2).
