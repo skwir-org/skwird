@@ -393,22 +393,26 @@ fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
     crate::asker::owned_at(path)
 }
 
-/// On Windows, a folder there, its security id not read (0). An asker is
-/// asked only to pass through it, which a token that may bypass traverse
-/// checking does unchecked (`SeChangeNotifyPrivilege`, every user's by
-/// default), as Windows lets it; a token that may not is not known to,
-/// and is answered nothing below (DESIGN 4, "On Windows"). None where no
-/// folder is there.
+/// On Windows, a folder there, judged by its descriptor
+/// (`skwird_crawl::judged_by`): an asker is asked only to pass through
+/// it, which a token that may bypass traverse checking does unchecked
+/// (`SeChangeNotifyPrivilege`, every user's by default), as Windows lets
+/// it; one that may not is judged by the folder's descriptor. Where it
+/// cannot be read, its security id is none (0), and such a token is not
+/// known to, and is answered nothing below (DESIGN 4, "On Windows"). None
+/// where no folder is there.
 #[cfg(windows)]
 fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|m| m.is_dir())
-        .then_some(crate::asker::Owned {
-            owner: 0,
-            group: 0,
-            mode: 0,
-            dev: 0,
-        })
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let (dev, owner) = skwird_crawl::judged_by(path).unwrap_or((0, 0));
+    Some(crate::asker::Owned {
+        owner,
+        group: 0,
+        mode: 0,
+        dev,
+    })
 }
 
 fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {

@@ -96,3 +96,71 @@ fn each_asker_is_judged_by_its_own_token() {
         Sight::Seen
     );
 }
+
+/// `token`, its privilege to bypass traverse checking deleted
+/// (`CreateRestrictedToken`): a token that passes through a folder only
+/// where its descriptor lets it.
+fn without_bypass(token: HANDLE) -> OwnedHandle {
+    use windows_sys::Win32::Foundation::LUID;
+    use windows_sys::Win32::Security::{
+        CreateRestrictedToken, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+    };
+    let name: Vec<u16> = "SeChangeNotifyPrivilege\0".encode_utf16().collect();
+    let mut luid = LUID::default();
+    // SAFETY: no system named; a NUL-terminated name; the LUID ours.
+    assert_ne!(
+        unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &raw mut luid) },
+        0
+    );
+    let delete = [LUID_AND_ATTRIBUTES {
+        Luid: luid,
+        Attributes: 0,
+    }];
+    let mut restricted: HANDLE = std::ptr::null_mut();
+    // SAFETY: a token of ours; no SID disabled or restricted; the one
+    // privilege to delete; the new token ours.
+    let ok = unsafe {
+        CreateRestrictedToken(
+            token,
+            0,
+            0,
+            std::ptr::null(),
+            1,
+            delete.as_ptr(),
+            0,
+            std::ptr::null(),
+            &raw mut restricted,
+        )
+    };
+    assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: the token the call made, ours alone.
+    unsafe { OwnedHandle::from_raw_handle(restricted) }
+}
+
+/// A folder above a root, judged by its descriptor
+/// (`skwird_crawl::judged_by`): a token that may not bypass traverse
+/// checking passes through one every user may pass through, not one the
+/// administrators alone may; a token that may bypass passes through both,
+/// unchecked. On a test machine alone, on its NTFS volume.
+#[test]
+fn a_folder_above_a_root_is_passed_through_as_its_descriptor_says() {
+    let Some(volume) = skwird_testkit::ntfs() else {
+        return;
+    };
+    let s = Scratch::under(&volume, "above");
+    let open = s.dir("open");
+    let walled = s.dir("walled");
+    skwird_testkit::administrators_alone(&walled);
+    let user = User::make("skwird-above", "Sk-1wird.abv!");
+    let logged_on = user.logon();
+    let bypassing = identification(logged_on.as_raw_handle());
+    let restricted = without_bypass(logged_on.as_raw_handle());
+    let checked = identification(restricted.as_raw_handle());
+    let (dev, open_id) = skwird_crawl::judged_by(&open).expect("judged by its descriptor");
+    let (_, walled_id) = skwird_crawl::judged_by(&walled).expect("judged by its descriptor");
+    assert_ne!(open_id, walled_id, "two descriptors");
+    assert!(skwird_crawl::descriptor_on(dev, open_id).is_some(), "held");
+    assert_eq!(checked.may(dev, open_id, Access::Traverse), Sight::Seen);
+    assert_eq!(checked.may(dev, walled_id, Access::Traverse), Sight::Hidden);
+    assert_eq!(bypassing.may(dev, walled_id, Access::Traverse), Sight::Seen);
+}

@@ -165,6 +165,31 @@ static DESCRIPTORS: Mutex<Option<Descriptors>> = Mutex::new(None);
 /// Descriptors by volume and security id.
 type Descriptors = HashMap<(u64, u32), Arc<[u8]>>;
 
+/// What the folder at `path` is judged by where no root holds it (a folder
+/// above a root, the system service's, DESIGN 4): its volume, and its
+/// security id, its descriptor fetched and held as a root's are
+/// ([`descriptor_on`]). [`OPEN_TO_ALL`] on a volume with no security (FAT,
+/// exFAT). None where they cannot be read: it is not known.
+pub fn judged_by(path: &Path) -> Option<(u64, u32)> {
+    let handle = open_path(path).ok()?;
+    let (stat, _) = stat_of(&handle).ok()?;
+    let dev = stat.id.dev;
+    if matches!(filesystem(&handle).as_str(), "FAT" | "FAT32" | "exFAT") {
+        return Some((dev, OPEN_TO_ALL));
+    }
+    let volume = journal::open_device(&journal::device_of(path).ok()?, 0).ok()?;
+    let id = security::security_id(&volume, stat.id.ino).ok()??;
+    if descriptor_on(dev, id).is_none() {
+        let descriptor = security::descriptor_of(&handle, stat.id.ino).ok()?;
+        DESCRIPTORS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert((dev, id), descriptor.into());
+    }
+    Some((dev, id))
+}
+
 /// The security descriptor of security id `id` on the volume `dev` (its
 /// serial), where a folder holding it was read: none otherwise.
 pub fn descriptor_on(dev: u64, id: u32) -> Option<Arc<[u8]>> {

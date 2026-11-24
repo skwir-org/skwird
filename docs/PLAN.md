@@ -26,15 +26,14 @@ crawled, no crate on crates.io. skwir released
 "skwir, the first client"), and skwird answers what it asked of it: links
 taken unfiltered, how far a journal's events are every change, and
 folder totals for its Usage view (step E, done on 2026-11-24). Phase 4
-is at its step 7, all but one of its gaps closed (2026-11-24): a user's
+has its step 7 done (2026-11-24): a user's
 engine on Windows built and tested under Wine; the system service built
 and tested on GitHub's Windows runners, which stand in for a Windows
 machine, the user having none (below, "Paused, and how it goes on"):
 its file table read and checked by, its journal followed and resumed
 from, its askers judged by their tokens, its users' exclusions kept, its
-volumes followed as they come and go. Left: folders above a root for a
-token that may not bypass traverse checking, and step 8, the
-measurement, on a Windows machine.
+volumes followed as they come and go. Left: step 8, the measurement, on
+a Windows machine.
 
 ## Phase 0: measure (done)
 
@@ -2097,7 +2096,9 @@ above).
      folders are left out.
    - **Folders above a root,** which no root holds, are passed through by
      a token that may bypass traverse checking, as Windows lets it; one
-     that may not is not known to, and is answered nothing below.
+     that may not is judged by their descriptors (below, "Folders above a
+     root").
+
    - Under Wine, its parts that are not the system's pass: the roots
      chosen from volumes, the numbers kept, a command line read back
      whole. The rest is proven on the runners
@@ -2149,9 +2150,17 @@ above).
    disk's says; the service, its journal deleted while it was stopped,
    checks by the table at its start, and answers what was made meanwhile.
 
-   **Left of step 7:**
-   - **Folders above a root** judged by their descriptors, for a token
-     that may not bypass traverse checking.
+   **Folders above a root,** judged by their descriptors (2026-11-24): a
+   folder above a root that no root holds is read as the service starts,
+   as Linux stats it then (`skwird_crawl::judged_by`): its security id
+   from its record, its descriptor fetched and held as a root's are, so
+   that a token that may not bypass traverse checking passes through it
+   only where its descriptor lets it. Tested on a runner with the test
+   user's token, that privilege deleted: it passes through a folder every
+   user may, not one the administrators alone may; with the privilege, it
+   passes through both, unchecked.
+
+   Step 7 is done, its every gap closed.
 
    **Volumes coming and going** (2026-11-24, DESIGN 4, "On Windows"):
    - the service registers for every volume's arrival and removal

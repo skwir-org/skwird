@@ -619,7 +619,9 @@ same rules, judged as Windows judges them:
   (`FILE_LIST_DIRECTORY`). Every folder above it must grant traversal
   (`FILE_TRAVERSE`) unless the token may bypass traverse checking
   (`SeChangeNotifyPrivilege`, every user's by default). Windows checks it
-  so too, which a walk by the user would meet.
+  so too, which a walk by the user would meet. A folder above a root,
+  which no root holds, is judged by its own descriptor, read as the
+  service starts, as Linux stats such a folder then.
 - **Holes, existence, limits:** as on Linux.
 - A volume with no security of its own (FAT, exFAT) is listed by anyone:
   every folder on it is answered. ReFS keeps descriptors as NTFS does but
