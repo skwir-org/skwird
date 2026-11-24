@@ -273,6 +273,18 @@ impl Volume {
         open_device(&device_of(path)?, 0).map(Volume)
     }
 
+    /// A handle on the volume holding `path`, for the caller to keep: the
+    /// system service registers it to be told when the volume's removal is
+    /// asked, and closes it then.
+    pub fn handle_of(path: &Path) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        use std::os::windows::io::FromRawHandle;
+        let handle = open_device(&device_of(path)?, 0)?;
+        let raw = handle.0;
+        std::mem::forget(handle);
+        // SAFETY: a handle of ours alone, open, given away whole.
+        Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw) })
+    }
+
     /// Make its journal, where it has none (`FSCTL_CREATE_USN_JOURNAL`):
     /// at most `max` bytes, grown and cut by `delta`. One there already is
     /// kept, its records with it.

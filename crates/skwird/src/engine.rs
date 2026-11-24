@@ -268,8 +268,16 @@ pub enum Command {
         remove: Vec<PathBuf>,
         reply: Sender<skwird_protocol::Watching>,
     },
-    /// The mount table changed ([`crate::live::listen`]).
+    /// The mount table changed ([`crate::live::listen`]); on Windows, a
+    /// volume arrived or went (`crate::serve::volumes_changed`).
     Mounts,
+    /// The removal of root `root`'s volume is asked (Windows' service
+    /// manager): its handles let go of, then `reply` answered.
+    #[cfg(windows)]
+    LetGo {
+        root: usize,
+        reply: Sender<()>,
+    },
     /// What the watcher of this generation heard ([`crate::live::listen`]).
     Heard {
         generation: u64,
@@ -964,6 +972,9 @@ struct Journals {
     /// The roots resumed from a position kept, live once their replay
     /// ends, from when they were followed.
     replaying: HashMap<usize, Time>,
+    /// Each followed root's volume, held to be told when its removal is
+    /// asked (`crate::service::hold_volume`).
+    held: HashMap<usize, crate::service::Held>,
 }
 
 #[cfg(windows)]
@@ -1125,6 +1136,8 @@ impl Writing<'_> {
                 self.serve_heard();
             }
             Command::Mounts => self.mounts_changed(),
+            #[cfg(windows)]
+            Command::LetGo { root, reply } => self.let_go_of_volume(root, &reply),
         }
         true
     }
@@ -1746,6 +1759,46 @@ impl Writing<'_> {
         }
     }
 
+    /// Root `i`'s volume held, to be told when its removal is asked
+    /// (Windows' system service): where it is followed.
+    #[cfg(windows)]
+    fn hold_volume(&mut self, i: usize, path: &Path) {
+        if !self.config.system || self.marked.get(i).copied().flatten().is_none() {
+            return;
+        }
+        if let Some(held) = crate::service::hold_volume(i, path) {
+            self.journals.held.insert(i, held);
+        }
+    }
+
+    /// The removal of root `i`'s volume is asked (Windows): its watch and
+    /// every handle of it let go of, so that the removal goes on, and
+    /// `reply` answered. Not live
+    /// from now; once its volume is back, it is checked and followed
+    /// again ([`Writing::mounts_changed`]).
+    #[cfg(windows)]
+    fn let_go_of_volume(&mut self, i: usize, reply: &Sender<()>) {
+        if let Some(w) = &self.watcher {
+            w.unwatch_root(i);
+        }
+        if let Some(m) = self.marked.get_mut(i) {
+            *m = None;
+        }
+        // Its handle closed now; its registration ended once the
+        // manager's call is over ([`Writing::mounts_changed`]).
+        if let Some(held) = self.journals.held.get_mut(&i) {
+            held.release();
+        }
+        self.journals.doubt(i);
+        if let Some(keeper) = self.keepers.get_mut(i).and_then(Option::as_mut) {
+            keeper.unheard();
+            keeper.root().let_go();
+        }
+        self.publish(i);
+        log(&format!("root {i}: its volume is being removed, let go of"));
+        let _ = reply.send(());
+    }
+
     /// Root `i`'s tree watched again where its watch ended (Windows): since
     /// when, if it is. What its journal says proves nothing until it is
     /// checked.
@@ -1759,6 +1812,7 @@ impl Writing<'_> {
         let since = Time::now();
         self.journals.doubt(i);
         self.marked[i] = watch_whole(watcher, i, &path, self.config.system, None).0;
+        self.hold_volume(i, &path);
         self.marked[i].map(|_| since)
     }
 }
@@ -2007,6 +2061,22 @@ impl Writing<'_> {
         self.unfound.clear();
         self.marks_followed();
         self.roots_followed();
+        // On Windows, the registrations of volumes let go of ended, out of
+        // the manager's call that asked; and a root whose volume is back
+        // checked, and followed again: one let go of as its volume was taken
+        // away, or whose watch ended.
+        #[cfg(windows)]
+        self.journals.held.retain(|_, held| !held.released());
+        #[cfg(windows)]
+        for i in 0..self.keepers.len() {
+            let unheard = self.marked.get(i).copied().flatten().is_none();
+            let back = self.keepers[i]
+                .as_ref()
+                .is_some_and(|k| k.root().path().exists());
+            if self.config.system && unheard && back {
+                self.check_root(i);
+            }
+        }
         for root in 0..self.keepers.len() {
             let Some(keeper) = self.keepers[root].as_mut() else {
                 continue;
@@ -2131,6 +2201,8 @@ impl Writing<'_> {
     /// the writer's (AGENTS.md, "Blocking"). It comes back as
     /// [`Command::Opened`].
     fn open_later(&mut self, i: usize, path: PathBuf, since: Time, ex: Exclusions) {
+        #[cfg(windows)]
+        self.hold_volume(i, &path);
         self.opening.insert(
             i,
             Opening {
@@ -2269,6 +2341,43 @@ impl Writing<'_> {
         }
     }
 
+    /// The system service's roots as found now: its mount table's on Linux,
+    /// read again; the machine's volumes on Windows.
+    // Linux's keeps the table it read.
+    #[cfg_attr(windows, allow(clippy::unused_self))]
+    fn found_roots(&mut self) -> Vec<PathBuf> {
+        #[cfg(windows)]
+        return crate::system::volume_roots()
+            .iter()
+            .filter_map(|r| skwird_crawl::canonical(r).ok())
+            .collect();
+        #[cfg(not(windows))]
+        {
+            if self.group.is_none()
+                && let Ok(table) = Table::read()
+            {
+                self.table = table;
+            }
+            crate::system::roots(&self.table, crate::system::removable)
+        }
+    }
+
+    /// A root found as the service runs, `i` at `path`, marked before it is
+    /// read: its filesystem on Linux; on Windows, followed through its
+    /// journal, proving nothing until it is built.
+    fn mark_new(&mut self, i: usize, path: &Path) -> Option<(u32, u32)> {
+        #[cfg(windows)]
+        {
+            self.journals.doubt(i);
+            let watcher = self.watcher.as_ref()?;
+            watch_whole(watcher, i, path, true, None).0
+        }
+        #[cfg(not(windows))]
+        self.group
+            .as_ref()
+            .and_then(|g| mark(g, i, path, &self.table))
+    }
+
     /// The system service's roots followed as filesystems are mounted and
     /// unmounted, where they are found in the mount table, not named: one
     /// mounted is marked, opened and heard as at the start; one unmounted
@@ -2278,12 +2387,7 @@ impl Writing<'_> {
             return;
         }
         self.unfound.clear();
-        if self.group.is_none()
-            && let Ok(table) = Table::read()
-        {
-            self.table = table;
-        }
-        let now = crate::system::roots(&self.table, crate::system::removable);
+        let now = self.found_roots();
         let there = self.shared.roots();
         for path in there.iter().filter(|p| !now.contains(p)) {
             if let Some((i, rel)) = self.shared.locate(path)
@@ -2291,6 +2395,14 @@ impl Writing<'_> {
             {
                 self.keepers[i] = None;
                 self.marked[i] = None;
+                #[cfg(windows)]
+                {
+                    if let Some(w) = &self.watcher {
+                        w.unwatch_root(i);
+                    }
+                    self.journals.held.remove(&i);
+                    self.journals.doubt(i);
+                }
                 self.shared.drop_root(i);
                 // Being opened, it is let go of as it comes back; its syncs
                 // are answered now, as of a root that is none.
@@ -2312,10 +2424,7 @@ impl Writing<'_> {
                 self.marked.push(None);
             }
             log(&format!("root {i}: mounted, a root from now on"));
-            self.marked[i] = self
-                .group
-                .as_ref()
-                .and_then(|g| mark(g, i, path, &self.table));
+            self.marked[i] = self.mark_new(i, path);
             let since = Time::now();
             self.open_later(i, path.clone(), since, ex.clone());
         }

@@ -2143,11 +2143,25 @@ above).
    checks by the table at its start, and answers what was made meanwhile.
 
    **Left of step 7:**
-   - **A volume attached or taken away while the service runs**
-     (`RegisterDeviceNotification`): a root from then on, or let go of.
-     Until then, the roots are those at its start.
    - **Folders above a root** judged by their descriptors, for a token
      that may not bypass traverse checking.
+
+   **Volumes coming and going** (2026-11-24, DESIGN 4, "On Windows"):
+   - the service registers for every volume's arrival and removal
+     (`RegisterDeviceNotificationW`, the service's status handle), and the
+     writer follows its roots again on each (`Command::Mounts`), and once
+     more 3 s after, a volume arrived being given its letter after it is
+     told of: a volume found is a root where the roots were not named, one
+     gone is let go of, a root whose volume is back checked and followed;
+   - each followed root's volume is held, a handle registered: as its
+     removal is asked, the writer lets go of the root's watch and handles
+     before the service answers (`Command::LetGo`), and the root is not
+     live until its volume is back. The registration ends after the
+     manager's call, never from within it, which could wait for itself.
+   - Tested on a runner: the spare volume a root is on, its virtual disk
+     detached while the service runs, is let go of and the detach goes
+     on; attached again, the root is live. Volumes found while it runs
+     are not tested there: the runner's own drives would be roots.
 8. **Measured,** on a Windows machine when one is at hand: the user's
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.

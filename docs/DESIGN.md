@@ -538,9 +538,16 @@ proved as root in the test machine on Linux 6.18.58):
     Never one on a USB, SD or MMC bus, or of a removable medium (open
     question 8), nor a share, a disc, memory, or ReFS. On NTFS, each is
     built from its volume's file table and followed through its journal;
-    on FAT and exFAT, walked and watched (`ReadDirectoryChangesW`). A
-    volume attached while it runs is not a root until it starts again
-    (PLAN).
+    on FAT and exFAT, walked and watched (`ReadDirectoryChangesW`).
+  - **Volumes coming and going** (2026-11-24): the service manager tells
+    the service of every volume's arrival and removal, as Linux's mount
+    table tells of mounts. A volume found then is a root from then on,
+    where the roots were not named; one gone is let go of; a root whose
+    volume is back is checked and followed again. Each followed root's
+    volume is held, a handle registered to be told when its removal is
+    asked: the root then lets go of every handle of it before the service
+    answers, so that the removal goes on, where a handle kept open would
+    have it refused, the volume in use. A user's engine is told of none.
 
 **As built** (phase 3, step 5, 2026-11-22: `skwird::asker`):
 - Root, and a user asking their own engine, see the index whole. Any

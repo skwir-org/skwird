@@ -52,12 +52,12 @@ use windows_sys::Win32::System::Services::{
     SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_CONFIG_DESCRIPTION,
     SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
-    SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
-    SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
-    SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW,
-    SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP,
-    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
-    StartServiceW,
+    SERVICE_CONTROL_DEVICEEVENT, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN,
+    SERVICE_CONTROL_STOP, SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DESCRIPTIONW,
+    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_STATUS,
+    SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_STATUS,
+    SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED,
+    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 
 use crate::engine::{Config, log};
@@ -195,6 +195,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut windows_sys::core::PWSTR)
         return;
     }
     STATUS.store(handle as usize, Ordering::Release);
+    hear_volumes(handle);
     let Some(config) = CONFIG.lock().unwrap_or_else(PoisonError::into_inner).take() else {
         report(SERVICE_STOPPED, 1);
         return;
@@ -232,8 +233,10 @@ unsafe extern "system" fn service_main(_: u32, _: *mut windows_sys::core::PWSTR)
 /// ([`dispatch`]), and the process ends with `main`. Ended here, the
 /// process would end before the manager's call returned, which then fails
 /// (`ERROR_BROKEN_PIPE`), as a runner's first stop did.
-unsafe extern "system" fn control(code: u32, _: u32, _: *mut c_void, _: *mut c_void) -> u32 {
+unsafe extern "system" fn control(code: u32, event: u32, data: *mut c_void, _: *mut c_void) -> u32 {
     match code {
+        // SAFETY: what the manager gives with a device's event.
+        SERVICE_CONTROL_DEVICEEVENT => unsafe { device_event(event, data) },
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             log("stopped by the service manager");
             report(SERVICE_STOP_PENDING, 0);
@@ -670,6 +673,166 @@ fn take_own(dir: &Path, name: &[u16], security: &Descriptor) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// Every volume's arrival and removal, told the service by the manager
+/// (`SERVICE_CONTROL_DEVICEEVENT`): through `status`, its handle, for as
+/// long as it runs.
+fn hear_volumes(status: windows_sys::Win32::System::Services::SERVICE_STATUS_HANDLE) {
+    use windows_sys::Win32::System::Ioctl::GUID_DEVINTERFACE_VOLUME;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DBT_DEVTYP_DEVICEINTERFACE, DEV_BROADCAST_DEVICEINTERFACE_W, DEVICE_NOTIFY_SERVICE_HANDLE,
+        RegisterDeviceNotificationW,
+    };
+    let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
+        dbcc_size: u32::try_from(size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>()).unwrap_or(0),
+        dbcc_devicetype: DBT_DEVTYP_DEVICEINTERFACE,
+        dbcc_reserved: 0,
+        dbcc_classguid: GUID_DEVINTERFACE_VOLUME,
+        dbcc_name: [0],
+    };
+    // SAFETY: the service's status handle, the manager's; the filter read
+    // for the call. The registration is kept as long as the process runs.
+    let notify = unsafe {
+        RegisterDeviceNotificationW(
+            status,
+            (&raw const filter).cast(),
+            DEVICE_NOTIFY_SERVICE_HANDLE,
+        )
+    };
+    if notify.is_null() {
+        log(&last_error(
+            "volumes arriving or going are not heard, roots are those at the start",
+        ));
+    }
+}
+
+/// Each registration on a root's volume ([`hold_volume`]), and its root.
+static HELD: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// A root's volume, a handle on it registered to tell the service when
+/// its removal is asked ([`Held`]).
+pub struct Held {
+    notify: windows_sys::Win32::UI::WindowsAndMessaging::HDEVNOTIFY,
+    /// Closed as its removal is asked ([`Held::release`]), or after the
+    /// registration ends.
+    volume: Option<std::os::windows::io::OwnedHandle>,
+}
+
+impl Held {
+    /// Its handle closed, its registration kept: ended from within the
+    /// manager's call that asks the removal, it could wait for that call
+    /// to end, which waits for this. Dropped later, it ends.
+    pub fn release(&mut self) {
+        self.volume = None;
+    }
+
+    pub fn released(&self) -> bool {
+        self.volume.is_none()
+    }
+}
+
+// SAFETY: a registration and a handle, the process's, used by the thread
+// holding them alone.
+unsafe impl Send for Held {}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        HELD.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|&(n, _)| n != self.notify as usize);
+        // SAFETY: the registration made, ended once; the handle closed with
+        // `volume`, after it.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::UnregisterDeviceNotification(self.notify)
+        };
+    }
+}
+
+/// The volume of root `root`, at `path`, held to be told when its removal
+/// is asked, so that the root lets go of it first and the removal goes on
+/// (a volume a handle is open on is in use). Under the service manager
+/// alone: none from a console, which nothing tells.
+pub fn hold_volume(root: usize, path: &Path) -> Option<Held> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEVICE_NOTIFY_SERVICE_HANDLE,
+        RegisterDeviceNotificationW,
+    };
+    let status = STATUS.load(Ordering::Acquire);
+    if status == 0 {
+        return None;
+    }
+    let volume = skwird_crawl::journal::Volume::handle_of(path).ok()?;
+    let filter = DEV_BROADCAST_HANDLE {
+        dbch_size: u32::try_from(size_of::<DEV_BROADCAST_HANDLE>()).unwrap_or(0),
+        dbch_devicetype: DBT_DEVTYP_HANDLE,
+        dbch_handle: std::os::windows::io::AsRawHandle::as_raw_handle(&volume),
+        ..DEV_BROADCAST_HANDLE::default()
+    };
+    // SAFETY: the service's status handle; the filter, naming a handle of
+    // ours, read for the call.
+    let notify = unsafe {
+        RegisterDeviceNotificationW(
+            status as *mut c_void,
+            (&raw const filter).cast(),
+            DEVICE_NOTIFY_SERVICE_HANDLE,
+        )
+    };
+    if notify.is_null() {
+        log(&last_error(&format!(
+            "root {root}: its volume's removal is not heard"
+        )));
+        return None;
+    }
+    HELD.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((notify as usize, root));
+    Some(Held {
+        notify,
+        volume: Some(volume),
+    })
+}
+
+/// A device's event (`SERVICE_CONTROL_DEVICEEVENT`):
+/// - a volume arrived, or went: the engine follows its roots again
+///   (`crate::serve::volumes_changed`);
+/// - the removal of a root's volume is asked: the root lets go of it
+///   before this answers, so that the removal goes on; refused by another,
+///   it is followed again.
+///
+/// # Safety
+///
+/// `data` is what the manager gives with the event: a device broadcast's
+/// header, and the rest of its kind.
+unsafe fn device_event(event: u32, data: *mut c_void) -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DBT_DEVICEARRIVAL, DBT_DEVICEQUERYREMOVE, DBT_DEVICEQUERYREMOVEFAILED,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
+    };
+    match event {
+        DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE | DBT_DEVICEQUERYREMOVEFAILED => {
+            crate::serve::volumes_changed();
+        }
+        DBT_DEVICEQUERYREMOVE if !data.is_null() => {
+            // SAFETY: every broadcast begins with its header.
+            let header = unsafe { &*data.cast::<DEV_BROADCAST_HDR>() };
+            if header.dbch_devicetype == DBT_DEVTYP_HANDLE {
+                // SAFETY: a handle's broadcast, as its header says.
+                let handle = unsafe { &*data.cast::<DEV_BROADCAST_HANDLE>() };
+                let root = HELD
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .find(|&&(n, _)| n == handle.dbch_hdevnotify as usize)
+                    .map(|&(_, root)| root);
+                if let Some(root) = root {
+                    crate::serve::volume_leaving(root);
+                }
+            }
+        }
+        _ => {}
+    }
+    NO_ERROR
 }
 
 #[cfg(test)]

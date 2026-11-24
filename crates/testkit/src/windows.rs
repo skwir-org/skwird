@@ -552,3 +552,29 @@ pub fn administrators_alone(folder: &Path) {
         String::from_utf8_lossy(&granted.stdout)
     );
 }
+
+/// The virtual disk the spare volume is on ([`ntfs_spare`],
+/// `SKWIRD_TEST_NTFS_SPARE_DISK`), for a test that detaches it and attaches
+/// it again, as a volume taken away and given back. None anywhere but on a
+/// machine of the tests'.
+pub fn ntfs_spare_disk() -> Option<PathBuf> {
+    std::env::var_os("SKWIRD_TEST_NTFS_SPARE_DISK")
+        .filter(|_| throwaway())
+        .map(PathBuf::from)
+}
+
+/// `diskpart` run with the script `lines`, written to `folder`: what it
+/// said, and whether it succeeded.
+pub fn diskpart(lines: &[String], folder: &Path) -> (bool, String) {
+    let script = folder.join("diskpart.txt");
+    std::fs::write(&script, lines.join("\r\n")).expect("cannot write a diskpart script");
+    let out = std::process::Command::new("diskpart")
+        .arg("/s")
+        .arg(&script)
+        .output()
+        .expect("cannot run diskpart");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}

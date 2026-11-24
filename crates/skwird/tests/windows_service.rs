@@ -168,7 +168,7 @@ fn stopped_and_started_it_resumes(s: &Scratch, root: &Path) {
         std::thread::sleep(Duration::from_millis(100));
     }
     let logged = log();
-    let restart = logged.rfind("serving 1 roots").unwrap();
+    let restart = logged.rfind("serving 2 roots").unwrap();
     let since = &logged[restart..];
     assert!(
         since.contains("resumed from its journal's position kept"),
@@ -206,10 +206,44 @@ fn a_journal_made_again_is_checked_by_the_table(s: &Scratch, volume: &Path, root
         std::thread::sleep(Duration::from_millis(100));
     }
     let logged = log();
-    let since = &logged[logged.rfind("serving 1 roots").unwrap()..];
+    let since = &logged[logged.rfind("serving 2 roots").unwrap()..];
     assert!(!since.contains("resumed from"), "{since}");
     assert!(since.contains("to check it by"), "{since}");
     assert!(since.contains("checked in"), "{since}");
+}
+
+/// A volume a root is on, taken away while the service runs and given
+/// back: its removal asked of the service, the root lets go of every
+/// handle of it, so that the removal goes on, and is not live; given back,
+/// the root is checked and followed again, live. The spare volume's
+/// virtual disk detached and attached again (`diskpart`).
+fn a_volume_taken_away_is_let_go_of(s: &Scratch, root: &Path) {
+    let disk = skwird_testkit::ntfs_spare_disk().expect("the spare volume's disk");
+    let select = format!("select vdisk file=\"{}\"", disk.display());
+    let live = |c: &mut Client| matches!(c.coverage(root).map(|c| c.names), Ok(Proof::Live(_)));
+    let mut c = ready(root);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !live(&mut c) {
+        assert!(Instant::now() < deadline, "never live:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (detached, said) =
+        skwird_testkit::diskpart(&[select.clone(), "detach vdisk".into()], s.path());
+    assert!(detached, "the volume in use?\n{said}\n{}", log());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !log().contains("its volume is being removed, let go of") {
+        assert!(Instant::now() < deadline, "never let go of:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!live(&mut c), "not live while it is away");
+    let (attached, said) = skwird_testkit::diskpart(&[select, "attach vdisk".into()], s.path());
+    assert!(attached, "{said}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !live(&mut c) {
+        assert!(Instant::now() < deadline, "never live again:\n{}", log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(log().contains("watched again, live"), "{}", log());
 }
 
 /// The service, registered and started by `skwird service add`, as
@@ -228,6 +262,8 @@ fn a_journal_made_again_is_checked_by_the_table(s: &Scratch, volume: &Path, root
 ///   kept, with no check ([`stopped_and_started_it_resumes`]); its journal
 ///   made again meanwhile, it checks by the table
 ///   ([`a_journal_made_again_is_checked_by_the_table`]);
+/// - a volume a root is on taken away and given back, let go of, then
+///   live again ([`a_volume_taken_away_is_let_go_of`]);
 /// - taken back by `skwird service remove`, its pipe gone.
 #[test]
 fn the_service_answers_each_user_what_they_could_list() {
@@ -253,7 +289,20 @@ fn the_service_answers_each_user_what_they_could_list() {
     let secret = root.join(r"theirs\secret");
     kept_out_by(&user, &secret, &root.join("open"), &bin);
     let registered = Registered;
-    let said = run(&["service", "add", "--root", root.to_str().unwrap()]);
+    // A second root, on the spare volume, which is taken away and given
+    // back ([`a_volume_taken_away_is_let_go_of`]).
+    let spare = skwird_testkit::ntfs_spare().expect("a spare volume beside S:");
+    let away = Scratch::under(&spare, "service-away");
+    away.write(r"there\notes-away.txt", b"");
+    let away_root = skwird_crawl::canonical(away.path()).unwrap();
+    let said = run(&[
+        "service",
+        "add",
+        "--root",
+        root.to_str().unwrap(),
+        "--root",
+        away_root.to_str().unwrap(),
+    ]);
     assert!(said.contains("registered and started"), "{said}");
     let mut c = ready(&root);
     assert_eq!(c.welcome().scope, Scope::System);
@@ -309,6 +358,7 @@ fn the_service_answers_each_user_what_they_could_list() {
     assert!(!said.contains("notes-closed.txt"), "{said}");
     stopped_and_started_it_resumes(&s, &root);
     a_journal_made_again_is_checked_by_the_table(&s, &volume, &root);
+    a_volume_taken_away_is_let_go_of(&s, &away_root);
     let said = run(&["service", "remove"]);
     assert!(said.contains("stopped and taken back"), "{said}");
     std::mem::forget(registered);

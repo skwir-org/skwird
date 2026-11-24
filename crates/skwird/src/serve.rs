@@ -37,6 +37,47 @@ const MOST_CONNECTIONS: usize = 64;
 /// [`stop`]): its loop ends at its next wake, as when it is idle.
 static STOPPING: AtomicBool = AtomicBool::new(false);
 
+/// The writer's channel, for what the service manager tells of volumes
+/// (Windows): set as the engine serves.
+#[cfg(windows)]
+static COMMANDS: Mutex<Option<Sender<Command>>> = Mutex::new(None);
+
+/// A volume arrived, or went (Windows' service manager): the writer
+/// follows its roots again, as when Linux's mount table changes; and
+/// again a few seconds after, a volume arrived being given its letter
+/// after it is told of.
+#[cfg(windows)]
+pub fn volumes_changed() {
+    let sender = COMMANDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(sender) = sender else { return };
+    let _ = sender.send(Command::Mounts);
+    let _ = std::thread::Builder::new()
+        .name("skwird-volumes".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            let _ = sender.send(Command::Mounts);
+        });
+}
+
+/// The removal of root `root`'s volume is asked (Windows' service
+/// manager): the writer lets go of the root's handles, and this gives
+/// back once it did, so that the removal goes on, or after 10 s.
+#[cfg(windows)]
+pub fn volume_leaving(root: usize) {
+    let sender = COMMANDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(sender) = sender else { return };
+    let (reply, done) = channel();
+    if sender.send(Command::LetGo { root, reply }).is_ok() {
+        let _ = done.recv_timeout(Duration::from_secs(10));
+    }
+}
+
 /// Stop serving on `pipe` (Windows' service manager's stop): the loop
 /// that waits for clients is woken by a connection to its own pipe, and
 /// ends as when idle, the writer applying what it heard and saving every
@@ -115,6 +156,12 @@ pub fn serve(config: &Config) -> Result<(), String> {
     log(&format!("serving {} roots", config.roots.len()));
     let shared = Arc::new(Shared::new(config.roots.clone(), config.system));
     let (commands, received) = channel();
+    #[cfg(windows)]
+    {
+        *COMMANDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(commands.clone());
+    }
     let (watcher, group) = sources(config, &commands, &shared);
     let writing = {
         let (config, shared, sender) = (config.clone(), Arc::clone(&shared), commands.clone());

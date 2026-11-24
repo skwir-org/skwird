@@ -60,3 +60,6 @@ jobs:
           SKWIRD_TEST_MACHINE: "1"
           SKWIRD_TEST_NTFS: 'S:\'
           SKWIRD_TEST_NTFS_SPARE: 'T:\'
+          # The spare volume's virtual disk, which a test detaches and
+          # attaches again (skwird_testkit::ntfs_spare_disk).
+          SKWIRD_TEST_NTFS_SPARE_DISK: ${{ runner.temp }}\skwird-tests-T.vhdx
