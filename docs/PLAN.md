@@ -2374,6 +2374,35 @@ macOS 15, thrown away after its job. The gate lints for macOS
    at the next start, used only where the event database is the same
    (`FSEventsCopyUUIDForDevice`) and the position not ahead of its
    current id; otherwise the check.
+
+   Done on 2026-11-24, on the runners, a user's engine's as the system
+   service's will be: any user may replay the events of what they see.
+   - **A position** is the root's volume's event database, by its UUID
+     folded to 64 bits, and the last event the roots' stream gave. It is
+     said as a root is watched (the newest event numbered before its
+     stream was made: what came before was there to be read) and after
+     each batch. It is kept in the manifest as Windows' is, the event id
+     in its signed number: one past it is a position ahead of every
+     event, which the next start refuses.
+   - **At a start,** a root whose position holds is replayed on a stream
+     of its own, from there until its history is given whole
+     (`HistoryDone`), beside the roots' stream, and is live then with no
+     check. Not in the roots' stream: a replay gives what is new before
+     what it replays (step 3). A position of another database, or ahead
+     of the current event, is refused, and the root checked.
+   - **No position is kept while a root replays:** the roots' stream is
+     ahead of the replay, and a position kept past history not replayed
+     would lose it at the next start. Windows' follower replays in order
+     and keeps its positions as it goes; macOS' cannot.
+   - The writer's bookkeeping of histories is Windows' and macOS' alike
+     (`Journals`, `replayed`, `positions_applied`); `follow` is each
+     system's way to watch a root and resume it.
+   - **Tested on the runners:** a position replays a change made after it,
+     then its end; one of another database, or ahead of every event, is
+     refused; an engine that went, started again, resumes, answers what
+     was made while none ran, and is live with no check.
+   - **Not tested:** a database made afresh (`/.fseventsd` removed, or a
+     volume's events turned off), which needs root.
 5. **Consent** (DESIGN 4): folders macOS asks consent for, not covered
    for want of it, and tried again at each start.
 6. **A LaunchAgent,** the user's engine started at login.
