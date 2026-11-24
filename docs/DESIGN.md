@@ -723,7 +723,9 @@ same rules, judged as Windows judges them:
   their answer, and no engine may wait on a person. Each is not covered,
   as denied, so that a client walks it itself, which may ask. Decided
   once a process, asked again at each start: no event follows a consent
-  given.
+  given. At the system service, root without Full Disk Access, they are
+  withheld below every home in `/Users`, one made while it runs among
+  them.
 
 ### 5. Private folders are never indexed
 

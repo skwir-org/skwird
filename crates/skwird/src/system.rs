@@ -135,9 +135,9 @@ pub fn removable(_: &Mount) -> bool {
 
 /// Where users' homes are: `/home` on Linux, `/Users` on macOS.
 #[cfg(target_os = "linux")]
-const HOMES: &str = "/home";
+pub const HOMES: &str = "/home";
 #[cfg(target_os = "macos")]
-const HOMES: &str = "/Users";
+pub const HOMES: &str = "/Users";
 
 /// The users the system service keeps exclusions for (DESIGN 5): each
 /// entry's id and home of the user database's file, and each folder in

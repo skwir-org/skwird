@@ -504,3 +504,30 @@ fn a_folders_extended_acl_is_read_whole() {
     );
     assert_eq!(root.access_acl(Path::new("plain"), id("plain")), None);
 }
+
+/// At the system service, a folder macOS asks consent for is withheld
+/// below each home decided as it started, and below a home made since in
+/// its folder of homes; the home itself, and its other folders, are not.
+/// A user's engine withholds below its own home alone.
+#[test]
+fn consent_is_withheld_below_any_home_of_the_service() {
+    use std::path::PathBuf;
+    let service = super::Withheld {
+        folders: vec![PathBuf::from("/Users/alice/Desktop")],
+        homes_in: Some(PathBuf::from("/Users")),
+    };
+    assert!(service.holds(Path::new("/Users/alice/Desktop/a")));
+    assert!(
+        service.holds(Path::new("/Users/bob/Documents")),
+        "a home made since"
+    );
+    assert!(service.holds(Path::new("/Users/bob/Library/Mobile Documents/x")));
+    assert!(!service.holds(Path::new("/Users/bob")));
+    assert!(!service.holds(Path::new("/Users/bob/Projects")));
+    assert!(!service.holds(Path::new("/Users/Desktop")), "not in a home");
+    let engine = super::Withheld {
+        folders: vec![PathBuf::from("/Users/alice/Desktop")],
+        homes_in: None,
+    };
+    assert!(!engine.holds(Path::new("/Users/bob/Documents")));
+}

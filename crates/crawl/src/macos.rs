@@ -741,10 +741,7 @@ pub(crate) fn read(
     }
     // Never opened without consent: opening it would ask the user, and
     // wait for their answer.
-    if consent_withheld()
-        .iter()
-        .any(|f| root.path.join(rel).starts_with(f))
-    {
+    if is_withheld(&root.path.join(rel)) {
         return not_covered(None, Why::Denied);
     }
     let read_at = Time::now();
@@ -942,25 +939,67 @@ pub fn full_disk_access() -> bool {
 /// A folder whose listing the cloud alone holds then fails to list, and
 /// is not covered.
 pub fn consent_withheld() -> &'static [PathBuf] {
-    WITHHELD.get_or_init(|| {
-        let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
-        withheld(home.iter().map(PathBuf::from))
-    })
+    &decided().folders
 }
 
 /// [`consent_withheld`], below each home of `homes` in place of the
-/// user's: the system service's, every user's home. Taken if it is asked
-/// before any folder is read, as the service asks it as it starts. A home
-/// made later, a user added while it runs, is not among them: its folders
-/// are read as any, and those the system refuses are denied.
-pub fn withhold_consent_below(homes: &[PathBuf]) -> &'static [PathBuf] {
-    WITHHELD.get_or_init(|| withheld(homes.iter().cloned()))
+/// user's, and below any home in `homes_in` too, one made while it runs
+/// among them: the system service's, every user's home (`/Users`). Taken
+/// if it is asked before any folder is read, as the service asks it as it
+/// starts.
+pub fn withhold_consent_below(homes: &[PathBuf], homes_in: &Path) -> &'static [PathBuf] {
+    &WITHHELD
+        .get_or_init(|| withheld(homes.iter().cloned(), Some(homes_in.to_path_buf())))
+        .folders
 }
 
-/// What [`consent_withheld`] decided, once a process.
-static WITHHELD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+/// Whether the folder at `path` is never opened, for want of consent
+/// ([`consent_withheld`]): at or below one of the folders decided, or, at
+/// the system service, one of a home in its folder of homes.
+pub fn is_withheld(path: &Path) -> bool {
+    decided().holds(path)
+}
 
-fn withheld(homes: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
+impl Withheld {
+    fn holds(&self, path: &Path) -> bool {
+        if self.folders.iter().any(|f| path.starts_with(f)) {
+            return true;
+        }
+        let Some(rest) = self
+            .homes_in
+            .as_ref()
+            .and_then(|h| path.strip_prefix(h).ok())
+        else {
+            return false;
+        };
+        let mut names = rest.components();
+        // The home's own name, then what is in it.
+        names.next().is_some() && {
+            let below = names.as_path();
+            ASKED_CONSENT.iter().any(|rel| below.starts_with(rel))
+        }
+    }
+}
+
+/// What was withheld, once a process: the folders decided, and the folder
+/// of homes any of whose homes' are.
+struct Withheld {
+    folders: Vec<PathBuf>,
+    homes_in: Option<PathBuf>,
+}
+
+static WITHHELD: std::sync::OnceLock<Withheld> = std::sync::OnceLock::new();
+
+/// What was withheld: as the system service decided it, or below the
+/// user's home.
+fn decided() -> &'static Withheld {
+    WITHHELD.get_or_init(|| {
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+        withheld(home.iter().map(PathBuf::from), None)
+    })
+}
+
+fn withheld(homes: impl Iterator<Item = PathBuf>, homes_in: Option<PathBuf>) -> Withheld {
     unsafe extern "C" {
         fn setiopolicy_np(
             iotype: libc::c_int,
@@ -973,15 +1012,23 @@ fn withheld(homes: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
     // SAFETY: three numbers; the call changes this process' policy.
     unsafe { setiopolicy_np(3, 0, 1) };
     if full_disk_access() {
-        return Vec::new();
+        return Withheld {
+            folders: Vec::new(),
+            homes_in: None,
+        };
     }
-    homes
+    // As roots are named, resolved: a home spelled through a link.
+    let resolved = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let folders = homes
         .flat_map(|home| {
-            // As roots are named, resolved: a home spelled through a link.
-            let home = std::fs::canonicalize(&home).unwrap_or(home);
+            let home = resolved(home);
             ASKED_CONSENT.iter().map(move |rel| home.join(rel))
         })
-        .collect()
+        .collect();
+    Withheld {
+        folders,
+        homes_in: homes_in.map(resolved),
+    }
 }
 
 /// Whether the folder at `path` has an ACL (an extended one, macOS'),

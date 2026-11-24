@@ -2539,9 +2539,12 @@ macOS 15, thrown away after its job. The gate lints for macOS
    folder whose ACL denies `nobody` listing hidden from them, and one
    closed by its mode that an ACL lets them into shown.
 
-   Left: a home made while the service runs, whose consent folders are
-   not withheld; the tests of a database of events made afresh, and of
-   Full Disk Access given, which need a Mac.
+   Without Full Disk Access, the consent folders are withheld below any
+   home in `/Users`, one made while the service runs among them
+   (`skwird_crawl::is_withheld`), not below those of its start alone.
+
+   Left: the tests of a database of events made afresh, and of Full Disk
+   Access given, which need a Mac.
 8. **Measured,** on a Mac when one is at hand.
 
 ## Later

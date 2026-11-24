@@ -164,7 +164,8 @@ pub fn serve(config: &Config) -> Result<(), String> {
                 .into_iter()
                 .map(|(_, home)| home)
                 .collect();
-            skwird_crawl::withhold_consent_below(&homes).len()
+            skwird_crawl::withhold_consent_below(&homes, std::path::Path::new(crate::system::HOMES))
+                .len()
         } else {
             skwird_crawl::consent_withheld().len()
         };
