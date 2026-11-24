@@ -268,6 +268,16 @@ pub enum Command {
         remove: Vec<PathBuf>,
         reply: Sender<skwird_protocol::Watching>,
     },
+    /// A client's removable volumes to keep, forget and release
+    /// (`crate::volumes`): answered what it keeps after, and what is
+    /// mounted, or why not.
+    Volumes {
+        client: String,
+        keep: Vec<String>,
+        forget: Vec<String>,
+        release: Vec<String>,
+        reply: Sender<Result<skwird_protocol::Volumes, String>>,
+    },
     /// The mount table changed ([`crate::live::listen`]); on Windows, a
     /// volume arrived or went (`crate::serve::volumes_changed`).
     Mounts,
@@ -311,6 +321,7 @@ impl Command {
                 | Command::Changes { .. }
                 | Command::Exclude { .. }
                 | Command::Watch { .. }
+                | Command::Volumes { .. }
         )
     }
 }
@@ -379,7 +390,7 @@ const FOUND_KEPT: usize = 4096;
 const MOST_REGISTERED: usize = 256;
 
 /// What clients registered, kept across restarts.
-fn registered(dirs: &Dirs, file: &str) -> Vec<Registration> {
+fn registered<T: serde::de::DeserializeOwned>(dirs: &Dirs, file: &str) -> Vec<T> {
     std::fs::read(dirs.state.join(file))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -415,7 +426,7 @@ fn owned_at(path: &Path) -> Option<crate::asker::Owned> {
     })
 }
 
-fn save_registered(dirs: &Dirs, file: &str, all: &[Registration]) {
+fn save_registered<T: Serialize>(dirs: &Dirs, file: &str, all: &[T]) {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -578,6 +589,14 @@ fn log_reconciled(root: usize, r: Reconciled) {
     }
 }
 
+/// `wait` passed, or `cancel` asked sooner.
+fn pause(wait: std::time::Duration, cancel: &Cancel) {
+    let until = Instant::now() + wait;
+    while Instant::now() < until && !cancel.is_cancelled() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Where a root's index is kept: a folder named by its path's hash.
 pub fn index_dir(dirs: &Dirs, root: &Path) -> PathBuf {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -629,6 +648,8 @@ fn turns(w: &mut Writing<'_>, commands: &Receiver<Command>) {
             // Asked to stop while roots are opening, it stops once they are,
             // so that a first build is kept.
             if !w.answer(commands, command) {
+                // A kept volume's first read is not waited for: it stops.
+                w.cancel_volumes();
                 if w.opening.is_empty() {
                     break;
                 }
@@ -741,6 +762,12 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
+        volumes: crate::volumes::State::kept(if config.system {
+            Vec::new()
+        } else {
+            registered(&config.dirs, crate::volumes::FILE)
+        }),
+        volume_roots: HashMap::new(),
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
         done: Done {
@@ -761,6 +788,7 @@ pub fn writer(
     for (i, path) in config.roots.iter().enumerate() {
         w.open_later(i, path.clone(), since, ex.clone());
     }
+    w.volumes_followed();
     w.apply_scopes();
     turns(&mut w, commands);
     w.flush_all();
@@ -786,11 +814,13 @@ fn resolved(registrations: &[Registration]) -> Vec<PathBuf> {
 
 /// Open root `i`, at `path`: its index read back, or crawled; published
 /// once ready. Says whether it was built.
+#[allow(clippy::too_many_arguments)] // A root's own: one call, of the writer's state.
 fn open_one(
     config: &Config,
     shared: &Shared,
     i: usize,
     path: &Path,
+    dir: &Path,
     ex: &Exclusions,
     opts: &Options,
     cancel: &Cancel,
@@ -807,16 +837,12 @@ fn open_one(
         .system
         .then_some(&table as skwird_index::keeper::Builder);
     #[cfg(not(windows))]
-    let builder = None;
+    let builder = {
+        let _ = config;
+        None
+    };
     let opened = Root::open(path, ex.clone()).and_then(|root| {
-        Keeper::open_by(
-            &index_dir(&config.dirs, path),
-            root,
-            opts.clone(),
-            Limits::default(),
-            cancel,
-            builder,
-        )
+        Keeper::open_by(dir, root, opts.clone(), Limits::default(), cancel, builder)
     });
     match opened {
         Ok((keeper, how)) => {
@@ -927,6 +953,11 @@ struct Writing<'a> {
     next_cookie: u64,
     /// Syncs waiting for their cookie.
     waiting: Vec<Waiting>,
+    /// The removable volumes clients keep, those mounted, those released
+    /// (`crate::volumes`): none kept at the system service.
+    volumes: crate::volumes::State,
+    /// The kept volumes that are roots, by identity.
+    volume_roots: HashMap<String, VolumeRoot>,
     /// Syncs whose cookie was heard, to be served once what was heard is
     /// found ([`Writing::serve_heard`]): a client's ask, not charged.
     served: Vec<Waiting>,
@@ -1069,6 +1100,7 @@ const HELD_MOST: usize = 65_536;
 
 impl Writing<'_> {
     /// Answer one command: false to stop.
+    #[allow(clippy::too_many_lines)] // One arm a command: the dispatcher of them all.
     fn answer(&mut self, commands: &Receiver<Command>, command: Command) -> bool {
         match command {
             Command::Stop => return false,
@@ -1147,6 +1179,15 @@ impl Writing<'_> {
             } => {
                 self.register(&client, uid, &add, &remove);
                 let _ = reply.send(theirs(&self.registrations, &client, uid));
+            }
+            Command::Volumes {
+                client,
+                keep,
+                forget,
+                release,
+                reply,
+            } => {
+                let _ = reply.send(self.volumes_asked(&client, &keep, &forget, &release));
             }
             Command::Watch {
                 client,
@@ -1497,6 +1538,9 @@ impl Writing<'_> {
     /// overflow, a save.
     fn on_time(&mut self) {
         let now = Instant::now();
+        if self.volumes.released.values().any(|until| *until <= now) {
+            self.volumes_followed();
+        }
         // A cookie not heard in time: the barrier failed, the check serves.
         let (late, waiting): (Vec<Waiting>, Vec<Waiting>) = std::mem::take(&mut self.waiting)
             .into_iter()
@@ -1971,6 +2015,153 @@ impl Writing<'_> {
         log(&format!("root {i}: its volume {goes}, let go of"));
     }
 
+    /// The kept volumes mounted made roots, and those no longer mounted,
+    /// kept, or let be (released) let go of (`crate::volumes`). A volume
+    /// mounted where a root of the engine's own is, is that root's.
+    fn volumes_followed(&mut self) {
+        if self.config.system {
+            return;
+        }
+        let now = Instant::now();
+        self.volumes.seen = Table::read()
+            .ok()
+            .and_then(|t| skwird_crawl::removable::seen(&t).ok())
+            .unwrap_or_default();
+        // A release ends as its volume is seen unmounted.
+        let seen = &self.volumes.seen;
+        self.volumes.released.retain(|id, until| {
+            *until > now && seen.iter().any(|s| s.id.as_deref() == Some(id.as_str()))
+        });
+        let rooted: HashMap<String, PathBuf> = self
+            .volume_roots
+            .iter()
+            .map(|(id, v)| (id.clone(), v.at.clone()))
+            .collect();
+        let mut plan = crate::volumes::plan(
+            &self.volumes.kept,
+            &self.volumes.seen,
+            &self.volumes.released,
+            now,
+            &rooted,
+        );
+        let own: Vec<PathBuf> = self.config.roots.clone();
+        plan.roots.retain(|(_, at)| !own.contains(at));
+        let gone: Vec<String> = self
+            .volume_roots
+            .iter()
+            .filter(|(id, v)| !plan.roots.iter().any(|(i, at)| i == *id && *at == v.at))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            self.let_go_of_kept(&id);
+        }
+        let added: Vec<(String, PathBuf)> = plan
+            .roots
+            .iter()
+            .filter(|(id, _)| !self.volume_roots.contains_key(id))
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            let (ex, refused) = exclusions(self.config, &self.registrations);
+            log_refused(refused);
+            for (id, at) in added {
+                let i = self.shared.add_root(&at);
+                while self.keepers.len() <= i {
+                    self.keepers.push(None);
+                    self.marked.push(None);
+                }
+                self.volume_roots.insert(
+                    id,
+                    VolumeRoot {
+                        root: i,
+                        at: at.clone(),
+                        cancel: Cancel::default(),
+                    },
+                );
+                log(&format!(
+                    "root {i}: a kept volume mounted, a root from now on"
+                ));
+                self.open_later(i, at, Time::now(), ex.clone());
+            }
+        }
+        self.volumes.plan = plan;
+    }
+
+    /// The kept volume `id` a root no more: what reads it cancelled, its
+    /// keeper let go of (its index kept), nothing held on it.
+    fn let_go_of_kept(&mut self, id: &str) {
+        let Some(v) = self.volume_roots.remove(id) else {
+            return;
+        };
+        let i = v.root;
+        v.cancel.cancel();
+        // Heard whole where roots are; on Linux, the watches of the folders
+        // clients keep live there go with the scopes, and a watch holds no
+        // mount.
+        #[cfg(any(windows, target_os = "macos"))]
+        if let Some(w) = &self.watcher {
+            w.unwatch_root(i);
+        }
+        self.keepers[i] = None;
+        self.marked[i] = None;
+        self.shared.drop_root(i);
+        // Being opened, it is let go of as it comes back; its syncs are
+        // answered now, as of a root that is none.
+        self.opening.remove(&i);
+        self.unpark(i);
+        #[cfg(target_os = "linux")]
+        self.apply_scopes();
+        log(&format!("root {i}: a kept volume, a root no more"));
+    }
+
+    /// What reads every kept volume cancelled: the engine is stopping.
+    fn cancel_volumes(&self) {
+        for v in self.volume_roots.values() {
+            v.cancel.cancel();
+        }
+    }
+
+    /// A client's `volumes`: `forget` taken back, a volume no client keeps
+    /// let go of and its index removed; `keep` kept; `release` let be
+    /// until it is seen unmounted, or a while; then followed again, and the
+    /// client answered.
+    fn volumes_asked(
+        &mut self,
+        client: &str,
+        keep: &[String],
+        forget: &[String],
+        release: &[String],
+    ) -> Result<skwird_protocol::Volumes, String> {
+        if self.config.system {
+            return Err("the system service keeps no removable volume".into());
+        }
+        skwird_crawl::mounts::Table::read()
+            .map_err(|e| e.to_string())
+            .and_then(|t| skwird_crawl::removable::seen(&t))?;
+        if crate::volumes::changed(&mut self.volumes.kept, client, keep, forget) {
+            save_registered(&self.config.dirs, crate::volumes::FILE, &self.volumes.kept);
+        }
+        for id in forget {
+            if !crate::volumes::is_kept(&self.volumes.kept, id) {
+                self.let_go_of_kept(id);
+                let _ = std::fs::remove_dir_all(crate::volumes::index_dir(&self.config.dirs, id));
+            }
+        }
+        let until = Instant::now() + crate::volumes::RELEASED_FOR;
+        for id in release {
+            self.volumes.released.insert(id.clone(), until);
+        }
+        self.volumes_followed();
+        Ok(crate::volumes::answer(
+            &self.volumes.kept,
+            client,
+            &self.volumes.seen,
+            &self.volumes.plan,
+            &self.volumes.released,
+            Instant::now(),
+        ))
+    }
+
     /// Root `i`'s tree watched again where its watch ended (Windows): since
     /// when, if it is. What its journal says proves nothing until it is
     /// checked.
@@ -2188,6 +2379,14 @@ const HEARD_WHOLE: bool = cfg!(any(windows, target_os = "macos"));
 /// How long a sync waits for its cookie before the check serves it.
 const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A kept volume that is a root: its number, its mount point, and what
+/// cancels its reading, its own.
+struct VolumeRoot {
+    root: usize,
+    at: PathBuf,
+    cancel: Cancel,
+}
+
 /// A sync of a live folder, waiting for its cookie to be heard.
 struct Waiting {
     cookie: u64,
@@ -2232,7 +2431,12 @@ impl Writing<'_> {
     /// sync whose cookie is late.
     fn deadline(&self) -> Option<Instant> {
         let late = self.waiting.iter().map(|w| w.until).min();
-        [self.gather.deadline(), late].into_iter().flatten().min()
+        // A volume released, and still mounted, is a root again then.
+        let released = self.volumes.released.values().min().copied();
+        [self.gather.deadline(), late, released]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether answers at `rel` below root `root` are live, and a sync of
@@ -2350,6 +2554,7 @@ impl Writing<'_> {
         self.unfound.clear();
         self.marks_followed();
         self.roots_followed();
+        self.volumes_followed();
         // On Windows, the registrations of volumes let go of ended, out of
         // the manager's call that asked; and a root whose volume is back
         // checked, and followed again: one let go of as its volume was taken
@@ -2496,6 +2701,23 @@ impl Writing<'_> {
     fn open_later(&mut self, i: usize, path: PathBuf, since: Time, ex: Exclusions) {
         #[cfg(windows)]
         self.hold_volume(i, &path);
+        // A kept volume: its index by its identity, its reading cancelled
+        // apart, read at its pace (`crate::volumes`).
+        let volume = self
+            .volume_roots
+            .iter()
+            .find(|(_, v)| v.root == i)
+            .map(|(id, v)| {
+                (
+                    crate::volumes::index_dir(&self.config.dirs, id),
+                    v.cancel.clone(),
+                )
+            });
+        let paced = volume.is_some();
+        let (dir, own_cancel) = match volume {
+            Some((dir, cancel)) => (dir, Some(cancel)),
+            None => (index_dir(&self.config.dirs, &path), None),
+        };
         self.opening.insert(
             i,
             Opening {
@@ -2505,7 +2727,12 @@ impl Writing<'_> {
             },
         );
         let (config, shared) = (self.config.clone(), Arc::clone(&self.shared_arc));
-        let (opts, cancel, sender) = (self.opts.clone(), self.cancel.clone(), self.sender.clone());
+        let (mut opts, cancel, sender) = (
+            self.opts.clone(),
+            own_cancel.unwrap_or_else(|| self.cancel.clone()),
+            self.sender.clone(),
+        );
+        opts.background = paced;
         // Heard whole once marked (the system service): an index read back
         // is checked first. A user's engine hears its scopes alone.
         let marked = self.marked.get(i).copied().flatten().is_some();
@@ -2516,7 +2743,11 @@ impl Writing<'_> {
         #[cfg(not(any(windows, target_os = "macos")))]
         let resumed = false;
         crate::serve::named("skwird-open", move || {
-            let (mut keeper, built) = open_one(&config, &shared, i, &path, &ex, &opts, &cancel);
+            if paced {
+                pause(crate::volumes::PAUSE, &cancel);
+            }
+            let (mut keeper, built) =
+                open_one(&config, &shared, i, &path, &dir, &ex, &opts, &cancel);
             // A crawl proves it current; an index read back, its check.
             let mut current = built;
             if let Some(keeper) = keeper.as_mut().filter(|_| !built && marked && !resumed) {

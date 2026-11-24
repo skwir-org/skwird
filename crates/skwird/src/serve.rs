@@ -565,7 +565,7 @@ fn hello(reader: &mut BufReader<Stream>, writer: &Writer, shared: &Shared) -> Op
                 },
                 engine: concat!("skwird ", env!("CARGO_PKG_VERSION")).to_owned(),
                 roots: shared.roots().iter().map(|r| WirePath::of(r)).collect(),
-                features: vec![wire::NAMES_BOTH_FORMS.to_owned()],
+                features: features(shared.system),
             };
             send(writer, id, Answer::Hello(welcome)).then_some(hello.client)
         }
@@ -717,6 +717,51 @@ fn spawn_query(
     })
 }
 
+/// A client's `volumes` (`keep`, `forget`, `release`), asked of the
+/// writer, which keeps them: each volume indexed answered its coverage as
+/// `coverage` answers it. The system service keeps none.
+fn volumes(
+    shared: &Shared,
+    commands: &Sender<Command>,
+    client: &str,
+    ask: Ask,
+    who: &Asker,
+) -> Answer {
+    let Ask::Volumes {
+        keep,
+        forget,
+        release,
+    } = ask
+    else {
+        return failure("internal", "not a volumes");
+    };
+    if shared.system {
+        return failure("not_here", "the system service keeps no removable volume");
+    }
+    let (reply, answer) = channel();
+    let asked = commands.send(Command::Volumes {
+        client: client.to_owned(),
+        keep,
+        forget,
+        release,
+        reply,
+    });
+    match asked.ok().and_then(|()| answer.recv().ok()) {
+        Some(Ok(mut volumes)) => {
+            for v in &mut volumes.kept {
+                if v.standing == wire::Standing::Indexed
+                    && let Some(at) = &v.at
+                {
+                    v.coverage = coverage(shared, at, who).ok();
+                }
+            }
+            Answer::Volumes(volumes)
+        }
+        Some(Err(why)) => failure("not_here", why),
+        None => failure("internal", "the engine is going"),
+    }
+}
+
 /// One client: hello first, then its requests in turn, each query on a
 /// thread of its own.
 fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, who: &Asker) {
@@ -803,6 +848,7 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
                     None => failure("internal", "the engine is going"),
                 }
             }
+            ask @ Ask::Volumes { .. } => volumes(shared, commands, &client, ask, who),
             Ask::Watch { add, remove } => {
                 let (reply, answer) = channel();
                 let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
@@ -1126,6 +1172,18 @@ pub(crate) fn named<T: Send + 'static>(
         .name(name.to_owned())
         .spawn(f)
         .expect("a thread starts, as std::thread::spawn would have it")
+}
+
+/// What this engine says it does beyond its version (`Welcome::features`):
+/// names in both forms everywhere; removable volumes at a user's engine
+/// where its system's are seen (`skwird_crawl::removable`), Linux's so
+/// far.
+fn features(system: bool) -> Vec<String> {
+    let mut said = vec![wire::NAMES_BOTH_FORMS.to_owned()];
+    if !system && cfg!(target_os = "linux") {
+        said.push(wire::VOLUMES.to_owned());
+    }
+    said
 }
 
 #[cfg(test)]

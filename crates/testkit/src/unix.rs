@@ -429,6 +429,10 @@ pub struct Machine {
     /// slow ([`Machine::cold`]).
     pub slow: PathBuf,
     slow_device: PathBuf,
+    /// A USB stick QEMU emulates, removable, its FAT filesystem made whole
+    /// on the device and labelled `TEST STICK`, mounted nowhere: the
+    /// device, for a test to mount.
+    pub stick: PathBuf,
 }
 
 impl Machine {
@@ -482,6 +486,7 @@ pub fn machine() -> Option<Machine> {
         btrfs: path("btrfs"),
         slow: path("slow"),
         slow_device: path("slow_device"),
+        stick: path("stick"),
     })
 }
 

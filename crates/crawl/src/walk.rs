@@ -163,6 +163,9 @@ pub fn crawl_by(
     std::thread::scope(|scope| {
         for _ in 0..opts.threads.max(1) {
             scope.spawn(|| {
+                if opts.background {
+                    crate::pace::background();
+                }
                 while let Some(job) = queue.next() {
                     if cancel.is_cancelled() {
                         stopped.store(true, Ordering::Relaxed);
@@ -397,7 +400,7 @@ pub fn check(
     let start = Instant::now();
     let points = root.points();
     let stale = Mutex::new(Vec::new());
-    shared(stored.len(), opts.threads, cancel, |i| {
+    shared(stored.len(), opts, cancel, |i| {
         if let Some(why) = sys::verdict(root, &points, &stored.rel(i), stored.folder(i)) {
             stale.lock().unwrap().push((i, why));
         }
@@ -429,7 +432,7 @@ pub fn check_watched(
     let points = root.points();
     let stale = Mutex::new(Vec::new());
     let watches = Mutex::new(vec![Watch::Unasked; stored.len()]);
-    shared(stored.len(), opts.threads, cancel, |i| {
+    shared(stored.len(), opts, cancel, |i| {
         let (why, watch) =
             sys::verdict_watched(root, &points, &stored.rel(i), stored.folder(i), opts);
         if let Some(why) = why {
@@ -451,14 +454,18 @@ pub fn check_watched(
     ))
 }
 
-/// Run `each` on every index below `len`, shared by `threads` threads in
-/// runs of 256, until done or cancelled.
-fn shared(len: usize, threads: usize, cancel: &Cancel, each: impl Fn(usize) + Sync) {
+/// Run `each` on every index below `len`, shared by `opts.threads`
+/// threads in runs of 256, until done or cancelled, each at the priority
+/// `opts` asks.
+fn shared(len: usize, opts: &Options, cancel: &Cancel, each: impl Fn(usize) + Sync) {
     const RUN: usize = 256;
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        for _ in 0..threads.max(1) {
+        for _ in 0..opts.threads.max(1) {
             scope.spawn(|| {
+                if opts.background {
+                    crate::pace::background();
+                }
                 while !cancel.is_cancelled() {
                     let from = next.fetch_add(RUN, Ordering::Relaxed);
                     if from >= len {

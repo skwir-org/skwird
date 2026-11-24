@@ -887,3 +887,145 @@ fn a_root_slow_to_open_delays_itself_alone() {
         "written to in a later batch"
     );
 }
+
+/// A user's engine, as root in the machine, of `home`, its folders below
+/// `dirs`: killed when dropped.
+struct UserEngine {
+    child: Child,
+    socket: PathBuf,
+}
+
+impl UserEngine {
+    fn start(dirs: &Path, home: &Path) -> UserEngine {
+        let mut c = Command::new(program());
+        c.args(["serve", "--forever", "--threads", "2", "--root"])
+            .arg(home)
+            .env("HOME", home)
+            .env("SKWIRD_NO_START", "1");
+        for (var, sub) in [
+            ("XDG_RUNTIME_DIR", "run"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_STATE_HOME", "state"),
+            ("XDG_CONFIG_HOME", "config"),
+        ] {
+            std::fs::create_dir_all(dirs.join(sub)).unwrap();
+            c.env(var, dirs.join(sub));
+        }
+        UserEngine {
+            child: c.spawn().expect("cannot start the engine"),
+            socket: dirs.join("run/skwird/socket"),
+        }
+    }
+
+    fn client(&self) -> Client {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(c) = Client::at(&self.socket, "a test") {
+                return c;
+            }
+            assert!(Instant::now() < deadline, "the engine never answered");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for UserEngine {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn run(program: &str, args: &[&std::ffi::OsStr]) {
+    let done = Command::new(program).args(args).status().unwrap();
+    assert!(done.success(), "{program} {args:?}");
+}
+
+/// A removable volume a client keeps (DESIGN, Protocol, "Removable
+/// volumes"): the machine's USB stick, seen by its FAT serial with its
+/// label, not indexed until kept; kept, a root at its mount point, its
+/// names answered; released, a root no more, and unmounted with nothing
+/// held on it; mounted again, a root again, its index read back; forgotten,
+/// its index removed.
+#[test]
+fn a_kept_stick_is_a_root_while_it_is_mounted() {
+    let Some(m) = machine() else { return };
+    let home = Place::new(&m.ext4, "volumes-home");
+    std::fs::create_dir_all(&home.0).unwrap();
+    let dirs = Place::new(&m.ext4, "volumes-dirs");
+    let at = Place::new(&m.ext4, "volumes-stick");
+    std::fs::create_dir_all(&at.0).unwrap();
+    let device = m.stick.as_os_str();
+    run("mount", &[device, at.0.as_os_str()]);
+    std::fs::create_dir_all(at.join("photos")).unwrap();
+    std::fs::write(at.join("photos/on the stick.jpg"), b"x").unwrap();
+    let engine = UserEngine::start(&dirs.0, &home.0);
+    let mut c = engine.client();
+    assert!(
+        c.welcome()
+            .features
+            .iter()
+            .any(|f| f == skwird_protocol::VOLUMES)
+    );
+    // Seen, not kept: no root, nothing answered there.
+    let v = c.volumes(&[], &[], &[]).unwrap();
+    let seen = v
+        .seen
+        .iter()
+        .find(|s| s.at == WirePath::of(&at.0))
+        .unwrap_or_else(|| panic!("the stick is not seen: {v:?}"));
+    assert_eq!(seen.filesystem, "vfat");
+    assert_eq!(seen.label.as_deref(), Some("TEST STICK"));
+    assert!(!seen.kept);
+    let id = seen.id.clone().expect("a FAT serial");
+    assert!(id.len() == 9 && id.as_bytes()[4] == b'-', "{id}");
+    assert!(answered(&mut c, &named(&at.0, "on the stick")).is_empty());
+    // Kept: a root at its mount point, read a few seconds after.
+    let v = c.volumes(&[&id], &[], &[]).unwrap();
+    assert_eq!(v.kept.len(), 1, "{v:?}");
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Indexed);
+    assert_eq!(v.kept[0].at, Some(WirePath::of(&at.0)));
+    let photo = at.join("photos/on the stick.jpg");
+    wait_for(30, "the kept stick indexed", || {
+        answered(&mut c, &named(&at.0, "on the stick")) == [photo.clone()].into()
+    });
+    assert!(
+        matches!(
+            c.coverage(&at.0).unwrap().names,
+            Proof::Checked(_) | Proof::Live(_)
+        ),
+        "{:?}",
+        c.coverage(&at.0)
+    );
+    // Released before an eject: a root no more, and the unmount goes.
+    let v = c.volumes(&[], &[], &[&id]).unwrap();
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Released);
+    assert!(answered(&mut c, &named(&at.0, "on the stick")).is_empty());
+    run("umount", &[at.0.as_os_str()]);
+    wait_for(10, "the stick away", || {
+        c.volumes(&[], &[], &[])
+            .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
+    });
+    // Mounted again: a root again, its index read back.
+    run("mount", &[device, at.0.as_os_str()]);
+    wait_for(30, "the stick indexed again", || {
+        answered(&mut c, &named(&at.0, "on the stick")) == [photo.clone()].into()
+    });
+    let indexes = || {
+        std::fs::read_dir(dirs.join("cache/skwird"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("volume-"))
+            .count()
+    };
+    assert_eq!(indexes(), 1);
+    // Forgotten: a root no more, its index removed.
+    let v = c.volumes(&[], &[&id], &[]).unwrap();
+    assert!(v.kept.is_empty(), "{v:?}");
+    assert!(answered(&mut c, &named(&at.0, "on the stick")).is_empty());
+    assert_eq!(indexes(), 0);
+    drop(c);
+    drop(engine);
+    run("umount", &[at.0.as_os_str()]);
+}

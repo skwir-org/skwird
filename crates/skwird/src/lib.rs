@@ -36,6 +36,7 @@ pub mod system;
 pub mod totals;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod transport;
+pub mod volumes;
 
 /// Serve a user's engine: Linux's, macOS' and Windows' alone (rule 7).
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

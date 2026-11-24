@@ -751,6 +751,32 @@ impl Client {
     }
 }
 
+impl Client {
+    /// Forget `forget`, keep `keep`, then release `release`, each a
+    /// removable volume by the identity the engine spelled
+    /// ([`protocol::SeenVolume::id`]): the volumes this client keeps after,
+    /// and those mounted. Released before the client asks for its unmount,
+    /// a volume holds nothing the engine opened. An engine whose hello says
+    /// no `volumes` ([`protocol::VOLUMES`]) refuses it.
+    pub fn volumes(
+        &mut self,
+        keep: &[&str],
+        forget: &[&str],
+        release: &[&str],
+    ) -> Result<protocol::Volumes, Error> {
+        let owned = |ids: &[&str]| ids.iter().map(|&id| id.to_owned()).collect();
+        let id = self.ask(Ask::Volumes {
+            keep: owned(keep),
+            forget: owned(forget),
+            release: owned(release),
+        })?;
+        match self.answer(id)? {
+            Answer::Volumes(volumes) => Ok(volumes),
+            _ => Err(Error::Unexpected),
+        }
+    }
+}
+
 /// The program to start, a path relative to the client's folder made
 /// absolute: from the folder the engine starts in, it would name another
 /// program. A bare name is looked for on the `PATH`.

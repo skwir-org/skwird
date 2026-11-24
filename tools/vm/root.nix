@@ -34,6 +34,8 @@ in
         cores = 4;
         # /dev/vdb, /dev/vdc and /dev/vdd, in MiB.
         emptyDiskImages = [1024 1024 256];
+        # A USB controller, for the stick the test script plugs in.
+        qemu.options = ["-device qemu-xhci,id=xhci"];
         sharedDirectories = lib.optionalAttrs shared {
           skwird-tests = {
             source = ''"$SKWIRD_VM_TESTS"'';
@@ -43,17 +45,31 @@ in
       };
       boot.supportedFilesystems = ["btrfs"];
       boot.kernelModules = ["dm-delay"];
-      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs pkgs.acl pkgs.lvm2];
+      environment.systemPackages = [pkgs.btrfs-progs pkgs.e2fsprogs pkgs.acl pkgs.lvm2 pkgs.dosfstools];
       environment.etc."skwird-test-machine".text = ''
         ext4=/mnt/ext4
         btrfs=/mnt/btrfs
         slow=/mnt/slow
         slow_device=/dev/mapper/slow
+        stick=/dev/sda
       '';
     };
 
     testScript = ''
+      import os
       machine.wait_for_unit("multi-user.target")
+      # A USB stick of 64 MiB, plugged in as a user plugs one in: removable,
+      # on the USB bus, the machine's one SCSI disk (/dev/sda).
+      stick = os.path.join(os.environ.get("TMPDIR", "/tmp"), "stick.img")
+      with open(stick, "wb") as f:
+          f.truncate(64 << 20)
+      machine.send_monitor_command(f"drive_add 0 if=none,id=stick,format=raw,file={stick}")
+      machine.send_monitor_command("device_add usb-storage,bus=xhci.0,drive=stick,id=stick,removable=on")
+      machine.wait_until_succeeds("test -b /dev/sda")
+      machine.succeed(
+          "mkfs.vfat -n 'TEST STICK' /dev/sda",
+          "udevadm trigger --settle /dev/sda",
+      )
       machine.succeed(
           "mkfs.ext4 -q /dev/vdb",
           "mkdir -p /mnt/ext4 && mount /dev/vdb /mnt/ext4",

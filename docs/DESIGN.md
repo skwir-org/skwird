@@ -2042,6 +2042,47 @@ ADR-053, 074, 075):
       never harvests a remote.
     - **Nothing is written on it:** its index is in the engine's own
       cache, by its identity.
+
+    **As built on Linux** (2026-11-25, for 0.2; `skwird_crawl::removable`,
+    `skwird::volumes`):
+    - **The messages:** `volumes {keep, forget, release}`, `forget` first,
+      then `keep`, then `release`, each a list of identities; answered
+      `volumes {kept, seen}`. Each kept volume: its identity, its
+      standing (`away`, not mounted; `indexed`, a root; `released`;
+      `twin`, refused), where it is mounted, and its coverage where it is
+      a root. Each seen: its identity (none where it has none), where it
+      is mounted, its filesystem's type, its label, and whether any client
+      keeps it. The engine says `volumes` in its hello where it does
+      them: a user's engine on Linux, so far. The system service, and an
+      engine whose system's volumes are not seen yet, refuse it
+      (`not_here`).
+    - **No reason more:** a path on a kept volume away, released or a
+      twin is in no root, and not covered, `outside`, as anything outside
+      every root: a client that knows no `volumes` reads every coverage
+      as before.
+    - **Removable** where its disk says so (`removable` in sysfs), or sits
+      on a USB or an SD card's bus (an MMC host): USB hard drives and SSDs
+      say they are not removable. A device mapper's (an encrypted volume)
+      is its underlying devices', removable where one is; a loop device's
+      never is (snaps' packages are mounted from them). A block device's
+      filesystem alone, mounted at its root: a bind of a folder of it is
+      not the volume, and one mounted twice is seen once.
+    - **The identity** is udev's name in `/dev/disk/by-uuid`, as blkid
+      spells it; the label, udev's in `/dev/disk/by-label`, unescaped.
+    - **Kept** in the state folder (`volumes`), each client's, as its
+      exclusions are. Its index is in the cache, named by its identity's
+      hash (`volume-…`).
+    - **Read 3 s after it is seen mounted,** and every thread its crawl
+      reads on in the idle I/O class (`skwird_crawl::pace`, the crawl's
+      `background`), which a check of it keeps.
+    - **Released** until it is seen unmounted, or 60 s have passed: what
+      reads it is cancelled (its own cancel, apart from the engine's), its
+      keeper let go of.
+    - **Proven in the root tests' machine** on a USB stick QEMU emulates,
+      plugged in through its monitor: seen by its FAT serial and label,
+      kept and answered, released and unmounted with nothing held on it,
+      mounted again and its index read back, forgotten and its index
+      removed.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
@@ -2232,7 +2273,9 @@ ADR-053, 074, 075):
    plugged in, would be answered to whoever may list it, and FAT lets
    everyone. On macOS, DiskArbitration tells a disk inside the machine
    from one plugged in: an internal one is the system service's, as on
-   Linux.
+   Linux. Built on Linux on 2026-11-25 (Protocol, "Removable volumes",
+   as built); macOS and Windows next, each with its own follower of
+   mounts for a user's engine.
 9. **The name:** whether `skwird` is free in the distributions. No
    crate is published on crates.io (the user's choice, 2026-11-11).
    Answered on 2026-11-24: free in Debian, Ubuntu, Fedora, Arch, the

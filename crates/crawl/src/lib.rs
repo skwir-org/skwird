@@ -47,6 +47,8 @@ pub mod acl;
 pub mod exclude;
 pub mod fanotify;
 pub mod mounts;
+pub mod pace;
+pub mod removable;
 pub mod wtf8;
 
 // What every system does alike (`walk`), and what each does its own way
@@ -378,6 +380,10 @@ pub struct Options {
     /// security id instead, as its owner, and the root fetches the
     /// descriptor of each id met ([`Root::descriptor`]).
     pub acls: bool,
+    /// Read at the lowest priority the system's I/O has, on every thread
+    /// that reads ([`pace`]): a removable volume, whose copy the user
+    /// plugged it in for comes first.
+    pub background: bool,
 }
 
 /// The bit of a folder's mode, above its permission bits, that says it
@@ -393,6 +399,7 @@ impl Default for Options {
             attrs: true,
             tick: Duration::from_secs(2),
             acls: false,
+            background: false,
         }
     }
 }
