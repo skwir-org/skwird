@@ -341,6 +341,15 @@ fn sources(
             crate::live::listen(&w, &commands, &shared.readers);
         });
     }
+    // macOS' mounts, followed for the removable volumes a user's engine
+    // keeps (`crate::volumes`).
+    #[cfg(target_os = "macos")]
+    if !config.system {
+        let commands = commands.clone();
+        named("skwird-mounts", move || {
+            crate::live::follow_mounts(&commands);
+        });
+    }
     (watcher, group)
 }
 
@@ -1189,11 +1198,11 @@ pub(crate) fn named<T: Send + 'static>(
 
 /// What this engine says it does beyond its version (`Welcome::features`):
 /// names in both forms everywhere; removable volumes at a user's engine
-/// where its system's are seen (`skwird_crawl::removable`), Linux's so
-/// far.
+/// where its system's are seen (`skwird_crawl::removable`), Linux's and
+/// macOS' so far.
 fn features(system: bool) -> Vec<String> {
     let mut said = vec![wire::NAMES_BOTH_FORMS.to_owned()];
-    if !system && cfg!(target_os = "linux") {
+    if !system && cfg!(any(target_os = "linux", target_os = "macos")) {
         said.push(wire::VOLUMES.to_owned());
     }
     said

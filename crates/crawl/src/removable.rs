@@ -20,7 +20,10 @@
 //!   none is seen, and never indexed.
 //! - **Its label:** udev's, in `/dev/disk/by-label`, its escapes undone.
 //!
-//! Elsewhere, not yet: macOS and Windows say so.
+//! On macOS: each volume the Finder shows, from a disk `DiskArbitration`
+//! says is plugged in ([`seen`]).
+//!
+//! On Windows, not yet: it says so.
 
 use std::path::PathBuf;
 
@@ -49,8 +52,46 @@ pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
     Ok(seen_in(table, Path::new("/sys"), Path::new("/dev/disk")))
 }
 
+/// The removable volumes mounted, in the mount table's order (macOS):
+/// each the Finder shows, from a disk `DiskArbitration` says is plugged
+/// in: its device not inside the machine, its media removable (an SD card
+/// in a reader inside it), or a disk image. Its identity is its volume's
+/// UUID, the one `DiskArbitration` derives from a FAT or exFAT serial; its
+/// label, its volume's name.
+#[cfg(target_os = "macos")]
+pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
+    let hidden = crate::sys::not_browsed();
+    let mut seen: Vec<Removable> = Vec::new();
+    for m in table.mounts() {
+        if !m.local || hidden.contains(&m.point) || seen.iter().any(|r| r.point == m.point) {
+            continue;
+        }
+        let Some(bsd) = m
+            .source
+            .to_str()
+            .and_then(|s| s.strip_prefix("/dev/"))
+            .filter(|b| b.starts_with("disk"))
+        else {
+            continue;
+        };
+        let Some(disk) = crate::sys::disks::describe(bsd) else {
+            continue;
+        };
+        if !(!disk.internal || disk.removable || disk.protocol.as_deref() == Some("Disk Image")) {
+            continue;
+        }
+        seen.push(Removable {
+            id: disk.uuid,
+            point: m.point.clone(),
+            fstype: m.fstype.clone(),
+            label: disk.name,
+        });
+    }
+    Ok(seen)
+}
+
 /// Not yet on this system.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn seen(_: &Table) -> Result<Vec<Removable>, String> {
     Err(format!(
         "removable volumes are not seen on {} yet",

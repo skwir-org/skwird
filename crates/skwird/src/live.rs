@@ -1117,3 +1117,33 @@ mod turn_cost {
         }
     }
 }
+
+/// The system's mounts followed for the writer (macOS): each volume
+/// mounted or unmounted said, so that the removable volumes a user's
+/// engine keeps are followed (`crate::volumes`), and said again a second
+/// after, `DiskArbitration` describing a volume a while after it is
+/// mounted. Idle, it waits.
+#[cfg(target_os = "macos")]
+pub fn follow_mounts(commands: &Sender<Command>) {
+    let mounts = match skwird_crawl::MountsHeard::new() {
+        Ok(m) => m,
+        Err(e) => {
+            log(&format!(
+                "the mounts cannot be followed, so a kept volume is a root from the next start: {e}"
+            ));
+            return;
+        }
+    };
+    while mounts.wait().is_ok() {
+        if commands.send(Command::Mounts).is_err() {
+            return;
+        }
+        let again = commands.clone();
+        let _ = std::thread::Builder::new()
+            .name("skwird-mounts".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = again.send(Command::Mounts);
+            });
+    }
+}

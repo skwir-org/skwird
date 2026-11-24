@@ -2090,6 +2090,12 @@ impl Writing<'_> {
                 log(&format!(
                     "root {i}: a kept volume mounted, a root from now on"
                 ));
+                // Heard whole from now on, as every root is on macOS: its
+                // index, read back, is checked first. No history is resumed.
+                #[cfg(target_os = "macos")]
+                if let Some(w) = &self.watcher {
+                    self.marked[i] = watch_whole(w, i, &at, None).0;
+                }
                 self.open_later(i, at, Time::now(), ex.clone());
             }
         }

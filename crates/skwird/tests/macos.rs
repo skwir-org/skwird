@@ -565,3 +565,116 @@ fn a_name_is_found_by_a_term_in_either_form() {
         );
     }
 }
+
+fn hdiutil(args: &[&std::ffi::OsStr]) -> bool {
+    Command::new("hdiutil")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// A removable volume a client keeps (DESIGN, Protocol, "Removable
+/// volumes"), on macOS: a FAT disk image attached as a user attaches one,
+/// seen by its UUID with its label, not indexed until kept. Kept, a root
+/// at its mount point, its names answered; released by its mount point,
+/// the engine holds nothing there, and it is detached with no force;
+/// attached again, a root again, its index read back; forgotten.
+#[test]
+fn a_kept_disk_image_is_a_root_while_it_is_attached() {
+    use std::ffi::OsStr;
+    let mut env = Env::new("mac-volumes");
+    tree(&env);
+    let image = env.s.join("stick.dmg");
+    assert!(hdiutil(&[
+        OsStr::new("create"),
+        OsStr::new("-quiet"),
+        OsStr::new("-size"),
+        OsStr::new("16m"),
+        OsStr::new("-fs"),
+        OsStr::new("MS-DOS"),
+        OsStr::new("-volname"),
+        OsStr::new("TESTSTICK"),
+        image.as_os_str(),
+    ]));
+    let at = env.s.dir("stick");
+    let attach = || {
+        assert!(hdiutil(&[
+            OsStr::new("attach"),
+            OsStr::new("-quiet"),
+            OsStr::new("-mountpoint"),
+            at.as_os_str(),
+            image.as_os_str(),
+        ]));
+    };
+    // Detached with no force: a program holding a file there refuses it.
+    // Spotlight, which may read a volume just attached, is asked not to.
+    let detach = || {
+        (0..10).any(|_| {
+            hdiutil(&[OsStr::new("detach"), OsStr::new("-quiet"), at.as_os_str()]) || {
+                std::thread::sleep(Duration::from_secs(1));
+                false
+            }
+        })
+    };
+    attach();
+    std::fs::write(at.join(".metadata_never_index"), b"").unwrap();
+    std::fs::write(at.join("on the stick.txt"), b"x").unwrap();
+    let at = std::fs::canonicalize(&at).unwrap();
+    env.engine(60);
+    let mut c = env.client();
+    assert!(
+        c.welcome()
+            .features
+            .iter()
+            .any(|f| f == skwird_protocol::VOLUMES)
+    );
+    let v = c.volumes(&[], &[], &[]).unwrap();
+    let seen = v
+        .seen
+        .iter()
+        .find(|s| s.at == WirePath::of(&at))
+        .unwrap_or_else(|| panic!("the image is not seen: {v:?}"));
+    assert_eq!(seen.filesystem, "msdos");
+    assert_eq!(seen.label.as_deref(), Some("TESTSTICK"));
+    assert!(!seen.kept);
+    let id = seen.id.clone().expect("a UUID");
+    assert!(answered(&mut c, &named(&at, "on the stick")).is_empty());
+    let v = c.volumes(&[&id], &[], &[]).unwrap();
+    assert_eq!(
+        v.kept[0].standing,
+        skwird_protocol::Standing::Indexed,
+        "{v:?}"
+    );
+    let file = at.join("on the stick.txt");
+    wait_for(&env, 30, "the kept image indexed", || {
+        answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
+    });
+    let v = c.release_at(&[&at]).unwrap();
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Released);
+    let pid = env.engines[0].id().to_string();
+    let held = Command::new("lsof")
+        .args(["-Fn", "-p", &pid])
+        .output()
+        .unwrap();
+    let held = String::from_utf8_lossy(&held.stdout);
+    assert!(
+        !held.lines().any(|l| l
+            .strip_prefix('n')
+            .is_some_and(|p| Path::new(p).starts_with(&at))),
+        "the engine holds something on the image"
+    );
+    assert!(detach(), "hdiutil detach");
+    wait_for(&env, 10, "the image away", || {
+        c.volumes(&[], &[], &[])
+            .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
+    });
+    attach();
+    wait_for(&env, 30, "the image indexed again", || {
+        answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
+    });
+    let v = c.volumes(&[], &[&id], &[]).unwrap();
+    assert!(v.kept.is_empty(), "{v:?}");
+    assert!(answered(&mut c, &named(&at, "on the stick")).is_empty());
+    drop(c);
+    assert!(detach(), "hdiutil detach");
+}

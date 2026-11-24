@@ -536,3 +536,48 @@ fn consent_is_withheld_below_any_home_of_the_service() {
     };
     assert!(!engine.holds(Path::new("/Users/bob/Documents")));
 }
+
+/// A FAT disk image the Finder shows, attached as a user attaches one, is
+/// a removable volume, seen by the UUID `DiskArbitration` derives from its
+/// serial, with its label; the system's own volume is not.
+#[test]
+fn a_disk_image_attached_is_a_removable_volume() {
+    let s = Scratch::new("macos-removable");
+    let image = s.join("stick.dmg");
+    let made = Command::new("hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-size",
+            "16m",
+            "-fs",
+            "MS-DOS",
+            "-volname",
+            "TESTSTICK",
+        ])
+        .arg(&image)
+        .status()
+        .unwrap();
+    assert!(made.success(), "hdiutil create");
+    let at = s.dir("stick");
+    let attached = Command::new("hdiutil")
+        .args(["attach", "-quiet", "-mountpoint"])
+        .arg(&at)
+        .arg(&image)
+        .status()
+        .unwrap();
+    assert!(attached.success(), "hdiutil attach");
+    let _attached = Attached { at: &at };
+    let at = crate::canonical(&at).unwrap();
+    let seen = crate::removable::seen(&Table::read().unwrap()).unwrap();
+    let stick = seen
+        .iter()
+        .find(|r| r.point == at)
+        .unwrap_or_else(|| panic!("not seen: {seen:?}"));
+    assert_eq!(stick.fstype, "msdos");
+    assert_eq!(stick.label.as_deref(), Some("TESTSTICK"));
+    let id = stick.id.as_deref().expect("a UUID");
+    assert_eq!(id.len(), 36, "{id}");
+    assert_eq!(id, id.to_lowercase());
+    assert!(!seen.iter().any(|r| r.point == Path::new("/")), "{seen:?}");
+}

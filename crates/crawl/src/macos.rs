@@ -264,20 +264,7 @@ fn dev(dev: libc::dev_t) -> u64 {
 /// without waiting on any volume (`MNT_NOWAIT`), a dead server's among
 /// them.
 pub(crate) fn mounts() -> std::io::Result<Vec<Mount>> {
-    // SAFETY: no buffer given: the count of mounts alone.
-    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    let count = usize::try_from(count).map_err(|_| std::io::Error::last_os_error())?;
-    // Room for mounts made since the count.
-    let mut all: Vec<libc::statfs> = Vec::with_capacity(count + 16);
-    let size = i32::try_from(all.capacity() * std::mem::size_of::<libc::statfs>())
-        .map_err(|_| std::io::Error::other("too many mounts"))?;
-    // SAFETY: a buffer of `size` bytes, its capacity, which the call fills
-    // with whole entries alone, and says how many.
-    let got = unsafe { libc::getfsstat(all.as_mut_ptr(), size, libc::MNT_NOWAIT) };
-    let got = usize::try_from(got).map_err(|_| std::io::Error::last_os_error())?;
-    // SAFETY: the call filled the first `got` entries, at most its capacity.
-    unsafe { all.set_len(got.min(all.capacity())) };
-    Ok(all
+    Ok(statfs_all()?
         .iter()
         .map(|s| {
             // SAFETY: an fsid is two 32-bit numbers, whose first is its
@@ -300,6 +287,38 @@ pub(crate) fn mounts() -> std::io::Result<Vec<Mount>> {
             }
         })
         .collect())
+}
+
+/// Where the volumes the Finder does not show are mounted
+/// (`MNT_DONTBROWSE`): the system's own, and the disk images programs
+/// attach for themselves (Xcode's simulators').
+pub(crate) fn not_browsed() -> Vec<PathBuf> {
+    const MNT_DONTBROWSE: u32 = 0x0010_0000;
+    statfs_all()
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| s.f_flags & MNT_DONTBROWSE != 0)
+        .map(|s| PathBuf::from(OsStr::from_bytes(&bytes_of(&s.f_mntonname))))
+        .collect()
+}
+
+/// Every mount's `statfs`, as `getfsstat` gives them without waiting on
+/// any volume.
+fn statfs_all() -> std::io::Result<Vec<libc::statfs>> {
+    // SAFETY: no buffer given: the count of mounts alone.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    let count = usize::try_from(count).map_err(|_| std::io::Error::last_os_error())?;
+    // Room for mounts made since the count.
+    let mut all: Vec<libc::statfs> = Vec::with_capacity(count + 16);
+    let size = i32::try_from(all.capacity() * std::mem::size_of::<libc::statfs>())
+        .map_err(|_| std::io::Error::other("too many mounts"))?;
+    // SAFETY: a buffer of `size` bytes, its capacity, which the call fills
+    // with whole entries alone, and says how many.
+    let got = unsafe { libc::getfsstat(all.as_mut_ptr(), size, libc::MNT_NOWAIT) };
+    let got = usize::try_from(got).map_err(|_| std::io::Error::last_os_error())?;
+    // SAFETY: the call filled the first `got` entries, at most its capacity.
+    unsafe { all.set_len(got.min(all.capacity())) };
+    Ok(all)
 }
 
 /// The folder at `rel` below the root, opened by a path that may hold no
@@ -898,7 +917,85 @@ pub(crate) fn path_of(bytes: &[u8]) -> std::borrow::Cow<'_, Path> {
     std::borrow::Cow::Borrowed(Path::new(OsStr::from_bytes(bytes)))
 }
 
+pub(crate) mod disks;
 pub mod watch;
+
+/// The system's mounts followed (a kqueue's `EVFILT_FS`): a volume mounted
+/// or unmounted ends [`MountsHeard::wait`]. Idle, it waits.
+pub struct MountsHeard {
+    kq: OwnedFd,
+}
+
+impl MountsHeard {
+    /// Mounts heard from now on.
+    pub fn new() -> std::io::Result<MountsHeard> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: no argument: a new kqueue, ours to close.
+        let raw = unsafe { libc::kqueue() };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor just made, owned here alone.
+        let kq = unsafe { OwnedFd::from_raw_fd(raw) };
+        let change = libc::kevent {
+            ident: 0,
+            filter: libc::EVFILT_FS,
+            flags: libc::EV_ADD | libc::EV_CLEAR,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: the queue made above, one change given, no event asked.
+        let done = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                &raw const change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if done < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(MountsHeard { kq })
+    }
+
+    /// Wait until a volume is mounted or unmounted.
+    pub fn wait(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // `sys/mount.h`'s `VQ_MOUNT` and `VQ_UNMOUNT`.
+        const MOUNTED: u32 = 0x0008;
+        const UNMOUNTED: u32 = 0x0010;
+        loop {
+            // SAFETY: an all-zero event is a valid one, for the call to fill.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            // SAFETY: the queue of ours, no change, room for one event,
+            // no time limit.
+            let n = unsafe {
+                libc::kevent(
+                    self.kq.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &raw mut event,
+                    1,
+                    std::ptr::null(),
+                )
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if n > 0 && event.fflags & (MOUNTED | UNMOUNTED) != 0 {
+                return Ok(());
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;
