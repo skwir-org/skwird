@@ -2296,13 +2296,14 @@ macOS 15, thrown away after its job. The gate lints for macOS
      listing's attributes are a stat's, a folder of more than one batch,
      the mount table, and a disk image attached below a root
      (`hdiutil`, which a user may run), told as a mount with the table
-     and without it. APFS keeps names in UTF-8 alone, so the shared
+     and without it. All pass on the runners (2026-11-24), 91 tests
+     with the engine's. APFS keeps names in UTF-8 alone, so the shared
      tests' odd name there is an accent decomposed beside one composed.
 2. **The engine on macOS**, a user's: compiled there, its socket, a
    client that starts it; unwatched at first, so that a sync runs the
    check, as phase 1's engine did on Linux.
 
-   Built on 2026-11-24 (linted here; its tests run on the runners):
+   Done on 2026-11-24, its tests passing on the runners:
    - the engine's modules are compiled on macOS beside Linux's and
      Windows'. What a watcher does waits for step 3: no watcher is made,
      and a sync checks;
@@ -2327,6 +2328,48 @@ macOS 15, thrown away after its job. The gate lints for macOS
    MustScanSubDirs` and the drops as an overflow of the subtree, the
    stream flushed for a sync (`FSEventStreamFlushSync`). Each stream with
    its generation (DESIGN 2).
+
+   Done on 2026-11-24, on the runners (`crates/crawl/src/macos/watch.rs`):
+   - **One stream** for every root and the cookies' folder, so that a
+     cookie is heard in its turn after every root's changes before it,
+     and a sync of any root is a barrier. Its calls are fsearch's:
+     CoreServices loaded on first use, the callback on a queue of
+     user-initiated priority, a latency of 0.5 s with `NoDefer`.
+   - **An event names a folder:** it is read again, or the nearest the
+     index holds above it, read whole. Drops and wrapped ids are an
+     overflow of every root; `MustScanSubDirs`, or a volume mounted or
+     unmounted below a root, an overflow of that root, which its check
+     ends. That is the whole root, where DESIGN 2 asks for the subtree:
+     never overstated, but more read than need be, to narrow when a Mac
+     measures how often it comes. A root's own folder moved or removed
+     (`WatchRoot`), or its volume gone, is lost: not live, and watched
+     again by its next check.
+   - **A cookie** is a folder of its own with a file made in it, since an
+     event names a folder, not an entry; the stream gives what it holds
+     back at once (`FlushAsync`), so that a sync waits no latency.
+   - **A stream's paths are fixed** when it is made: a root watched, or
+     let go of, makes it again from now on, and the one before is made to
+     give what it holds back (`FlushSync`), then stopped, so that nothing
+     between the two is missed.
+   - **What the runs found:**
+     - a stream made again from a past event (`sinceWhen`) gives what is
+       new before what it replays: the stream's test heard a cookie
+       before a change made ahead of it. And the history it replays folds
+       a subtree's changes into one to read whole. Hence from now on;
+       a position kept (step 4) is replayed while its root proves
+       nothing, never as a barrier;
+     - the writer set what a user's engine keeps live from its clients'
+       scopes after each root opened, on every system but Windows
+       (`if cfg!(windows)`), and so undid each root heard whole. One
+       constant says it now (`engine::HEARD_WHOLE`), and AGENTS the rule:
+       ask the property, not the system.
+   - **Tested on the runners:** the stream names a folder changed before
+     a cookie made after it; a root moved away is lost; the engine
+     answers a change and a removal live without a sync; five syncs in
+     turn answer live, each well before the cookie would be given up on;
+     a root moved away is not live.
+   - **Not tested:** drops and `MustScanSubDirs`, which no test can make
+     the system give; a volume mounted below a root while it is heard.
 4. **A history** (DESIGN 2): the position kept with the index, replayed
    at the next start, used only where the event database is the same
    (`FSEventsCopyUUIDForDevice`) and the position not ahead of its
