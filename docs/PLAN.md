@@ -33,13 +33,17 @@ machine, the user having none (below, "Paused, and how it goes on"):
 its file table read and checked by, its journal followed and resumed
 from, its askers judged by their tokens, its users' exclusions kept, its
 volumes followed as they come and go. Left: step 8, the measurement, on
-a Windows machine. Phase 5, macOS, is at its step 7 (2026-11-24), on
+a Windows machine. Phase 5, macOS, has its step 7 done (2026-11-24), on
 GitHub's macOS runners as phase 4 went on Windows': a user's engine
 built and tested there, its walk by `getattrlistbulk`, its roots heard
 whole by one FSEvents stream, resumed from its history at a start, the
 folders macOS asks consent for left unread without Full Disk Access,
-started at login by a LaunchAgent. Left: the system service (a
-LaunchDaemon, macOS' ACLs judged), and the measurement, on a Mac.
+started at login by a LaunchAgent; the system service, a LaunchDaemon
+run as root, its roots `/` and the Data volume's firmlinks, its askers
+judged by their modes and macOS' ACLs as the kernel judges them, its
+users' exclusions kept. Left: step 8, the measurement, on a Mac, and
+what a Mac alone can test (Full Disk Access given, an event database
+made afresh).
 
 ## Phase 0: measure (done)
 
@@ -2316,7 +2320,8 @@ macOS 15, thrown away after its job. The gate lints for macOS
    - who asks, from the socket (`LOCAL_PEERCRED`): the peer's user and
      its groups, 16 at most, which grants a peer in more less, never
      more. A folder's extended ACL is not read yet (step 7): any folder
-     may have one, and is not known, never judged by its mode alone;
+     may have one, and is not known, never judged by its mode alone
+     (read and judged since, in step 7);
    - the socket's folder (DESIGN, Protocol, "Transport"): the one
      `XDG_RUNTIME_DIR` names, or the user's own temporary folder, read
      by the client and the engine alike (`skwird_client::runtime_folder`).
@@ -2409,6 +2414,12 @@ macOS 15, thrown away after its job. The gate lints for macOS
      was made while none ran, and is live with no check.
    - **Not tested:** a database made afresh (`/.fseventsd` removed, or a
      volume's events turned off), which needs root.
+   - **Once refused** (2026-11-24, at `7c301d9`): a replay of a kept
+     position, on a runner where other tests attached disk images beside
+     it, passing at every run before and after. Most likely the event
+     database's UUID was not given for a moment; the engine would check
+     the root then, never overstate it. The test says why if it fails
+     again: what was kept, the database there then, the current id.
 5. **Consent** (DESIGN 4): folders macOS asks consent for, not covered
    for want of it, and tried again at each start.
 
