@@ -1362,7 +1362,8 @@ Linux, macOS and Windows:
 - Code for one system sits behind `cfg`, with the others' answer
   beside it: their own code, or an error naming the system.
 - Windows is tried under Wine as far as Wine goes.
-- macOS is compiled only, until someone with a Mac helps.
+- macOS is tested on GitHub's macOS runners from phase 5 (2026-11-24),
+  as Windows was in phase 4, until someone with a Mac helps.
 
 **As built** (phase 4, step 1):
 - The gate lints the workspace for Windows and macOS, and runs its

@@ -34,8 +34,9 @@
 //! - **Private folders are never read into what a crawl gives** (decision
 //!   5): an exclusion, or a `.private` file in the folder.
 //!
-//! On systems other than Linux, [`Root::open`] answers that the crawl
-//! does not read their folders yet (rule 7).
+//! Linux's, Windows' and macOS' folders are read (`linux`, `windows`,
+//! `macos`). On other systems, [`Root::open`] answers that the crawl does
+//! not read their folders (rule 7).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,15 +83,22 @@ pub use windows::{
     volumes,
 };
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as sys;
+#[cfg(target_os = "macos")]
+pub use macos::Root;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod other;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 use other as sys;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub use other::Root;
 
-// No watcher but Linux's and Windows' yet (rule 7): macOS's comes with
-// phase 5.
+// No watcher but Linux's and Windows' yet (rule 7): macOS' comes with
+// phase 5, its step 3.
 #[cfg(not(any(target_os = "linux", windows)))]
 mod unwatched;
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -212,9 +220,6 @@ pub struct Listing {
 }
 
 impl Listing {
-    // Only Linux's crawl builds listings so far (rule 7: the others'
-    // answer that they read no folder yet).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn new(stat: FolderStat, read_at: Time, again: bool) -> Listing {
         Listing {
             stat,
@@ -226,7 +231,6 @@ impl Listing {
         }
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn push(&mut self, name: &[u8], entry: Entry) {
         self.names.extend_from_slice(name);
         self.ends.push(self.names.len() as u32);
@@ -423,8 +427,8 @@ impl std::fmt::Display for Error {
         match self {
             Error::Unsupported(system) => write!(
                 f,
-                "skwird does not read {system}'s folders yet: it reads Linux's \
-                 (macOS comes with phase 5, Windows with phase 4)"
+                "skwird does not read {system}'s folders: it reads Linux's, \
+                 macOS' and Windows'"
             ),
             Error::Root(e) => write!(f, "the root cannot be read: {e}"),
             Error::Network => write!(

@@ -1,6 +1,5 @@
-//! The crawl's answer on systems that read no folder yet (rule 7): the
-//! same calls, and a root that cannot be opened, with the system named.
-//! macOS comes with phase 5 (`getattrlistbulk`), Windows with phase 4.
+//! The crawl's answer on systems that read no folder (rule 7): the same
+//! calls, and a root that cannot be opened, with the system named.
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -9,11 +8,6 @@ use crate::mounts::Table;
 use crate::walk::{Reuse, Stale, StoredFolder};
 use crate::{Error, Exclusions, FileId, FolderStat, Options, Outcome, Watch};
 
-#[cfg(target_os = "macos")]
-const SYSTEM: &str = "macOS";
-#[cfg(windows)]
-const SYSTEM: &str = "Windows";
-#[cfg(not(any(target_os = "macos", windows)))]
 const SYSTEM: &str = "this system";
 
 /// A root, which this system does not open yet.

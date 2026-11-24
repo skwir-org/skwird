@@ -2264,6 +2264,58 @@ machine below, which stays the way to measure (step 8):
   fsearch does, since no event follows a consent given.
 - A LaunchAgent, and a LaunchDaemon for the system scope.
 
+### Steps
+
+Begun on 2026-11-24, the user's choice, on GitHub's macOS runners
+(`macos.yml`, a push to `ci/macos/...`), as phase 4 went on on
+Windows': the user has no Mac. A runner is an Apple Silicon machine on
+macOS 15, thrown away after its job. The gate lints for macOS
+(`aarch64-apple-darwin`), which compiles but links nothing.
+
+1. **The walk and the check** (`skwird_crawl`, macOS).
+   - A folder is opened beneath its root's handle by a path that may hold
+     no link (`O_NOFOLLOW_ANY`, macOS 11), a part at a time past 768
+     bytes (`PATH_MAX` is 1,024). macOS has no `RESOLVE_BENEATH` nor
+     `RESOLVE_NO_XDEV`: the path is the names the listings gave, never
+     `..`, and a folder opened on another device than its root's is a
+     mount.
+   - It is listed in batches (`getattrlistbulk`): each entry's name,
+     kind, identity, times, size, allocation and count of names, with no
+     stat for each entry. An entry whose attributes the listing cannot
+     give is stat-ed; one gone since is left out.
+   - A mount is told by its device, which each volume has of its own,
+     and the table is the system's (`getfsstat` with `MNT_NOWAIT`, which
+     waits on no volume). A volume the system says is not on the machine
+     (no `MNT_LOCAL`) reaches a network.
+   - The check stats each folder by its path, no link followed anywhere
+     in it (`AT_SYMLINK_NOFOLLOW_ANY`), through its parent's handle past
+     `PATH_MAX`.
+   - Its tests: the shared ones (`walk/tests.rs`), and macOS' own: a
+     listing's attributes are a stat's, a folder of more than one batch,
+     the mount table, and a disk image attached below a root
+     (`hdiutil`, which a user may run), told as a mount with the table
+     and without it. APFS keeps names in UTF-8 alone, so the shared
+     tests' odd name there is an accent decomposed beside one composed.
+2. **The engine on macOS**, a user's: compiled there, its socket, a
+   client that starts it; unwatched at first, so that a sync runs the
+   check, as phase 1's engine did on Linux.
+3. **Live** (FSEvents): one stream for the user's roots, a folder's
+   events heard as a folder to read again, `kFSEventStreamEventFlag
+   MustScanSubDirs` and the drops as an overflow of the subtree, the
+   stream flushed for a sync (`FSEventStreamFlushSync`). Each stream with
+   its generation (DESIGN 2).
+4. **A history** (DESIGN 2): the position kept with the index, replayed
+   at the next start, used only where the event database is the same
+   (`FSEventsCopyUUIDForDevice`) and the position not ahead of its
+   current id; otherwise the check.
+5. **Consent** (DESIGN 4): folders macOS asks consent for, not covered
+   for want of it, and tried again at each start.
+6. **A LaunchAgent,** the user's engine started at login.
+7. **The system service,** a LaunchDaemon: `getpeereid` for who asks,
+   what each folder is judged by (its mode, and its ACL, which macOS
+   keeps extended), Full Disk Access.
+8. **Measured,** on a Mac when one is at hand.
+
 ## Later
 
 - Packages, beside skwir's: skwir.org's apt and dnf repositories, the

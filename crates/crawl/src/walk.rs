@@ -473,5 +473,5 @@ fn shared(len: usize, threads: usize, cancel: &Cancel, each: impl Fn(usize) + Sy
     });
 }
 
-#[cfg(all(test, any(target_os = "linux", windows)))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) mod tests;

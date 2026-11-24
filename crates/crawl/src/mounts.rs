@@ -22,12 +22,16 @@ pub struct Mount {
     pub point: PathBuf,
     pub fstype: String,
     pub source: OsString,
+    /// Whether the system says it is on this machine: macOS does
+    /// (`MNT_LOCAL`); Linux says nothing, and every mount is taken so there.
+    pub local: bool,
 }
 
 impl Mount {
-    /// Whether it reaches a network ([`network`]).
+    /// Whether it reaches a network ([`network`]), or the system says it
+    /// is not on this machine.
     pub fn network(&self) -> bool {
-        network(&self.fstype, &self.source)
+        !self.local || network(&self.fstype, &self.source)
     }
 }
 
@@ -53,12 +57,18 @@ impl Table {
         std::fs::read("/proc/self/mountinfo").map(|text| Table::parse(&text))
     }
 
-    /// This process's mount table: Linux's alone so far.
-    #[cfg(not(target_os = "linux"))]
+    /// The system's mount table, as macOS holds it (`getfsstat`).
+    #[cfg(target_os = "macos")]
+    pub fn read() -> std::io::Result<Table> {
+        crate::sys::mounts().map(|mounts| Table { mounts })
+    }
+
+    /// This process's mount table: Linux's and macOS' alone so far.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn read() -> std::io::Result<Table> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "skwird reads Linux's mount table only so far",
+            "skwird reads Linux's and macOS' mount tables only so far",
         ))
     }
 
@@ -118,6 +128,7 @@ fn parse_line(line: &[u8]) -> Option<Mount> {
         point: PathBuf::from(os(unescape(fields[4]))),
         fstype: String::from_utf8_lossy(&unescape(fields[dash + 1])).into_owned(),
         source: os(unescape(fields[dash + 2])),
+        local: true,
     })
 }
 

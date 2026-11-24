@@ -112,15 +112,22 @@ pub(crate) fn verdicts(root: &Root, stored: &Stored) -> BTreeMap<PathBuf, Stale>
 }
 
 /// A name no walker may forget, `stem` first: bytes that are not UTF-8 on
-/// Unix, an unpaired surrogate on Windows. Wine's names are its host's
+/// Linux, an unpaired surrogate on Windows. macOS keeps names in UTF-8
+/// alone: there, an accent decomposed beside one composed, which a walker
+/// that normalized names would give otherwise. Wine's names are its host's
 /// UTF-8, which holds no unpaired surrogate: under Wine, a character
 /// beyond the 16 bits a unit takes, a surrogate pair.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn odd(stem: &str) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     PathBuf::from(std::ffi::OsStr::from_bytes(
         &[stem.as_bytes(), b"-\xe9t\xe9"].concat(),
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn odd(stem: &str) -> PathBuf {
+    PathBuf::from(format!("{stem}-e\u{301}t\u{e9}"))
 }
 
 #[cfg(windows)]

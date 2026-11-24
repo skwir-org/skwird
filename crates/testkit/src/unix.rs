@@ -305,7 +305,7 @@ fn walk_into(dir: &OwnedFd, rel: &Path, mount: u64, walk: &mut Walk) {
             path.clone(),
             Seen {
                 kind,
-                dev: st.st_dev as u64,
+                dev: device(st.st_dev),
                 ino: st.st_ino as u64,
                 size: st.st_size as u64,
             },
@@ -329,6 +329,23 @@ fn walk_into(dir: &OwnedFd, rel: &Path, mount: u64, walk: &mut Walk) {
     }
 }
 
+/// A device number, as the crawl keeps it: macOS gives it signed, and its
+/// bits are taken as they are.
+#[cfg(target_os = "macos")]
+#[allow(clippy::cast_sign_loss)] // a device number's bits
+fn device(dev: Device) -> u64 {
+    u64::from(dev as u32)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_cast)] // the types differ between systems
+fn device(dev: Device) -> u64 {
+    dev as u64
+}
+
+/// The type of a stat's device number.
+type Device = rustix::fs::Dev;
+
 /// The mount a folder is in: its mount id on Linux, its device elsewhere.
 #[cfg(target_os = "linux")]
 fn mount_id(dir: &impl AsFd, name: Option<&std::ffi::CStr>) -> rustix::io::Result<u64> {
@@ -348,7 +365,7 @@ fn mount_id(dir: &impl AsFd, name: Option<&std::ffi::CStr>) -> rustix::io::Resul
         Some(name) => rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?,
         None => rustix::fs::fstat(dir)?,
     };
-    Ok(st.st_dev as u64)
+    Ok(device(st.st_dev))
 }
 
 /// Whether this run of the calling test is the one in a user and mount
