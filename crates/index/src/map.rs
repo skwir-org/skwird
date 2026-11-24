@@ -16,10 +16,12 @@
 //!   reading and removal. Read into memory, the index was the engine's
 //!   own: 39.6 to 48.9 MB for 1.04 million entries on the runners
 //!   (2026-11-24), over the budget of 10 MB per million for memory at
-//!   rest (DESIGN 10). Windows may refuse to remove a file while a view
-//!   of it is alive (an older snapshot's): every save removes what its
-//!   manifest does not name, so such a file goes at a save after the
-//!   snapshot is let go of.
+//!   rest (DESIGN 10). A file the manifest no longer names is removed at
+//!   the save that let it go, as on Unix: Windows removes its name at once
+//!   while a view of it is alive (an older snapshot's), the view reading
+//!   as it was (tried on the runner, 2026-11-24). Were it refused, every
+//!   save removes what its manifest does not name, and it would go at a
+//!   later one.
 //! - Elsewhere, the file is read into memory.
 
 #![allow(unsafe_code)]
@@ -236,9 +238,10 @@ mod tests {
         assert!(empty.is_empty());
     }
 
-    /// A file whose view is alive may be removed or kept (Unix removes it;
-    /// Windows may refuse while its view is alive), and reads as it was
-    /// until the view is let go of; once it is, the file is removed.
+    /// A file whose view is alive is removed, its name gone at once, and
+    /// the view reads as it was until it is let go of: a purged name is in
+    /// no file once the save that purged it is done. Wine's answer is not
+    /// Windows'.
     #[test]
     fn a_mapped_file_is_removed_once_let_go_of() {
         let s = Scratch::new("map-removed");
@@ -247,7 +250,11 @@ mod tests {
         let while_mapped = std::fs::remove_file(&path);
         eprintln!("removed while mapped: {while_mapped:?}");
         #[cfg(unix)]
-        assert!(while_mapped.is_ok());
+        assert!(while_mapped.is_ok() && !path.exists());
+        #[cfg(windows)]
+        if !skwird_testkit::under_wine() {
+            assert!(while_mapped.is_ok() && !path.exists());
+        }
         assert!(map.iter().all(|&b| b == 7));
         drop(map);
         if while_mapped.is_err() {
