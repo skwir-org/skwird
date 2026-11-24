@@ -846,6 +846,8 @@ pub(crate) struct Item {
     pub(crate) alloc: u64,
     pub(crate) ctime: Time,
     pub(crate) mtime: Time,
+    /// Its count of names: none from a listing (0); the file table's.
+    pub(crate) links: u32,
 }
 
 /// The entries of the folder open as `dir`, `.` and `..` left out. A
@@ -960,6 +962,8 @@ fn record(bytes: &[u8], at: usize) -> Option<(Item, usize)> {
             FILE_ID_FULL_DIR_INFORMATION,
             LastWriteTime
         ))),
+        // A listing says no count of names.
+        links: 0,
     };
     Some((item, next as usize))
 }
@@ -1202,6 +1206,7 @@ pub(crate) fn listed(
             alloc: item.alloc,
             mtime: item.mtime,
             ctime: item.ctime,
+            links: item.links,
         };
         listing.push(
             &item.name,

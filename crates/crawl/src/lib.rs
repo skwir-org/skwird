@@ -167,6 +167,9 @@ pub struct Attrs {
     pub alloc: u64,
     pub mtime: Time,
     pub ctime: Time,
+    /// Its count of names, hard links (`nlink`): 0 where it is not known
+    /// (Windows' listings give none).
+    pub links: u32,
 }
 
 /// An entry of a folder.

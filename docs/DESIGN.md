@@ -1752,6 +1752,13 @@ repositories, their versions their own.
       path, kind and identity, and its totals (a file's own; a folder's,
       its subtree's). Then `done`: `root`'s own totals, the journal token
       as of the snapshot answered from, and a coverage.
+    - **Fewer, losing nothing** (skwir's shape, 2026-11-24): with
+      `largest: {alloc: N, files: M}`, only the N children heaviest by
+      alloc and the M with the most files are sent, and `done` says the
+      rest whole: `rest: {count, totals}`, summed over every child not
+      sent. Usage asks N = 64, M = 16, and folds `rest` into its "other"
+      item, so a folder of a million entries is cheap on the wire. Without
+      it, every child is sent.
     - **Totals:** `size`, `alloc`, `files`, `folders`, `newest_mtime` (the
       folders' own included), `by_extension: [{ext, files, alloc}]` (the
       name's last dot on, lowercased; none for a name with none: the

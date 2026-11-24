@@ -454,3 +454,30 @@ fn a_cancelled_crawl_says_so() {
         Err(Error::Cancelled)
     ));
 }
+
+/// A file's count of names (`nlink`) is what its stat says: 2 for each of
+/// a file's two names, 1 for a file of one. Windows' listings say none
+/// (0), and under Wine the crawl reads listings.
+#[test]
+fn a_files_count_of_names_is_its_stats() {
+    let s = Scratch::new("crawl-links");
+    s.file("one.txt");
+    s.file("first.txt");
+    s.hard_link("second.txt", "first.txt");
+    let root = open(&s);
+    let crawl = crawl_all(&root, &opts(1), &Cancel::default()).unwrap();
+    let Outcome::Listed(listing) = &crawl.folders[0].outcome else {
+        panic!("the root is listed");
+    };
+    let links = |name: &str| {
+        listing
+            .iter()
+            .find(|(n, _)| *n == name.as_bytes())
+            .and_then(|(_, e)| e.attrs)
+            .map(|a| a.links)
+    };
+    let (one, two) = if cfg!(windows) { (0, 0) } else { (1, 2) };
+    assert_eq!(links("one.txt"), Some(one));
+    assert_eq!(links("first.txt"), Some(two));
+    assert_eq!(links("second.txt"), Some(two));
+}

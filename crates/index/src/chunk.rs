@@ -4,7 +4,7 @@
 //!
 //! Its bytes, little-endian: `SKWC`, the layout's version (4 bytes), the
 //! number of columns (4), each column's offset and the end (8 each), then
-//! the columns. Seventeen columns hold one value a block, ten one an
+//! the columns. Seventeen columns hold one value a block, eleven one an
 //! entry, four one per zone of 1,024 entries (the largest size, the range
 //! of modification times, the kinds present), so that a query on size,
 //! time or kind passes over most of a chunk. A chunk whose bytes do not
@@ -20,7 +20,7 @@ use crate::packed::{Layout, Malformed, Packed, from_signed, pack, patch, to_sign
 
 const MAGIC: &[u8; 4] = b"SKWC";
 /// The layout's version: a change to the columns changes it.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Entries a zone sums up.
 pub const ZONE: usize = 1024;
 
@@ -53,12 +53,13 @@ const I_MTIME_NS: usize = 23;
 const I_CTIME: usize = 24;
 const I_CTIME_NS: usize = 25;
 const I_CHILD: usize = 26; // the folder's number and one, 0 for none
+const I_LINKS: usize = 27; // its count of names, 0 where not known
 // Columns with a value a zone.
-const Z_SIZE: usize = 27; // the largest size
-const Z_MTIME_MIN: usize = 28;
-const Z_MTIME_MAX: usize = 29;
-const Z_KINDS: usize = 30; // a bit for each kind present
-const COLUMNS: usize = 31;
+const Z_SIZE: usize = 28; // the largest size
+const Z_MTIME_MIN: usize = 29;
+const Z_MTIME_MAX: usize = 30;
+const Z_KINDS: usize = 31; // a bit for each kind present
+const COLUMNS: usize = 32;
 
 /// A chunk's bytes: its own, or its file's, mapped.
 pub enum Bytes {
@@ -189,6 +190,7 @@ fn item_values(item: &Item) -> [(usize, u64); Z_SIZE - I_NAME] {
         alloc: 0,
         mtime: Time::default(),
         ctime: Time::default(),
+        links: 0,
     });
     let kind = kind_code(item.kind) | if item.attrs.is_some() { 4 } else { 0 };
     [
@@ -202,6 +204,7 @@ fn item_values(item: &Item) -> [(usize, u64); Z_SIZE - I_NAME] {
         (I_CTIME, from_signed(attrs.ctime.sec)),
         (I_CTIME_NS, u64::from(attrs.ctime.nsec)),
         (I_CHILD, item.child.map_or(0, |c| u64::from(c) + 1)),
+        (I_LINKS, u64::from(attrs.links)),
     ]
 }
 
@@ -743,6 +746,7 @@ impl View<'_> {
                 alloc: self.cols[I_ALLOC].get(i),
                 mtime: self.time(I_MTIME, I_MTIME_NS, i),
                 ctime: self.time(I_CTIME, I_CTIME_NS, i),
+                links: u32::try_from(self.cols[I_LINKS].get(i)).unwrap_or(u32::MAX),
             }),
             child: self.item_child(i),
         }
@@ -783,7 +787,10 @@ impl View<'_> {
         }
         let col = |c: usize| self.values(c, range.clone());
         let (names, kinds, inos, children) = (col(I_NAME), col(I_KIND), col(I_INO), col(I_CHILD));
-        let attrs = [I_SIZE, I_ALLOC, I_MTIME, I_MTIME_NS, I_CTIME, I_CTIME_NS].map(col);
+        let attrs = [
+            I_SIZE, I_ALLOC, I_MTIME, I_MTIME_NS, I_CTIME, I_CTIME_NS, I_LINKS,
+        ]
+        .map(col);
         (0..range.len())
             .map(|k| Item {
                 name: names[k] as u32,
@@ -800,6 +807,7 @@ impl View<'_> {
                         sec: to_signed(attrs[4][k]),
                         nsec: attrs[5][k] as u32,
                     },
+                    links: u32::try_from(attrs[6][k]).unwrap_or(u32::MAX),
                 }),
                 child: children[k].checked_sub(1).map(|c| c as FolderId),
             })
@@ -869,6 +877,8 @@ mod tests {
                     sec: 1_700_000_100,
                     nsec: 0,
                 },
+                // A file of one name, of two, of three, read back each.
+                links: 1 + name % 3,
             }),
             child: None,
         };

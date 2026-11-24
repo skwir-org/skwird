@@ -535,6 +535,10 @@ impl Table {
                     alloc: r.alloc,
                     ctime: r.ctime,
                     mtime: r.mtime,
+                    // Its names but the short ones, the base record's and its
+                    // others': its hard links, as `nlink` counts them. The
+                    // record's own count holds the short names too.
+                    links: u32::try_from(r.names.len()).unwrap_or(u32::MAX),
                 }
             })
             .collect()

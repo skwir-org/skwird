@@ -240,6 +240,7 @@ fn put_item(out: &mut Vec<u8>, name: NameId, kind: Kind, ino: u64, attrs: Option
         put(out, a.alloc);
         put_time(out, a.mtime);
         put_time(out, a.ctime);
+        put(out, u64::from(a.links));
     }
 }
 
@@ -252,6 +253,7 @@ fn take_item(bytes: &[u8], at: &mut usize) -> Item {
         alloc: take(bytes, at),
         mtime: take_time(bytes, at),
         ctime: take_time(bytes, at),
+        links: u32::try_from(take(bytes, at)).unwrap_or(u32::MAX),
     });
     Item {
         name,

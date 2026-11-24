@@ -351,6 +351,7 @@ fn attrs_of(st: &Statx) -> Attrs {
         alloc: st.stx_blocks.saturating_mul(512),
         mtime: time(st.stx_mtime),
         ctime: time(st.stx_ctime),
+        links: st.stx_nlink,
     }
 }
 

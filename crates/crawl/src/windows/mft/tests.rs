@@ -525,6 +525,26 @@ fn a_crawl_of_the_table_is_a_crawl_of_the_folders() {
         &|r, rel, id, o| reader.read(r, rel, id, o),
     )
     .unwrap();
+    // A file's count of names, the table's alone: 2 for the file of two
+    // names, by either; a listing says none.
+    let links = |crawl: &crate::Crawl, folder: &str, name: &str| {
+        crawl
+            .folders
+            .iter()
+            .find(|f| f.rel == Path::new(folder))
+            .and_then(|f| match &f.outcome {
+                Outcome::Listed(listing) => listing
+                    .iter()
+                    .find(|(n, _)| *n == name.as_bytes())
+                    .and_then(|(_, e)| e.attrs),
+                Outcome::NotCovered(_) => None,
+            })
+            .map(|a| a.links)
+    };
+    assert_eq!(links(&read, "a b", "second name.txt"), Some(2));
+    assert_eq!(links(&read, r"a b\été 2026", "notes 1.txt"), Some(2));
+    assert_eq!(links(&read, "a b", "big.bin"), Some(1));
+    assert_eq!(links(&walked, "a b", "second name.txt"), Some(0));
     let (walked, read) = (summary(&walked), summary(&read));
     // The root first, with both volumes' names: what the rest hangs on.
     assert_eq!(

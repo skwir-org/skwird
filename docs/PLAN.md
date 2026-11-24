@@ -673,6 +673,16 @@ its ADR-050). Its sessions build them, in its repository:
      the file table's record on NTFS, unknown from Windows' listings),
      and the chunk's layout gains a column for it, so that every index
      is built once again after the upgrade.
+
+     Done on 2026-11-24 (`Attrs::links`, 0 where not known). On NTFS it
+     is the file's long names, which the table gathers from all its
+     records: the record's own count holds the short DOS names too. The
+     chunk's layout is version 2, its column bit-packed as the rest, so
+     that a column of ones costs nothing; the log writes a tag with it,
+     and reads its older one as none known. Tested: a file of two names
+     says 2 by either, on Linux and from the table on a runner, and 0
+     from Windows' listings; the chunk and the log read back a count of
+     1, 2 and 3.
   2. **The protocol:** `totals`, its batches and its `done`, in
      `skwird-protocol`, the client's call, the fake engine's answer from
      its script, and the transcript.

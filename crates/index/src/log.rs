@@ -140,11 +140,14 @@ impl Writer {
         match e.attrs {
             None => self.u8(0),
             Some(a) => {
-                self.u8(1);
+                // 2: with its count of names; 1, before it was kept, reads
+                // as none known.
+                self.u8(2);
                 self.u64(a.size);
                 self.u64(a.alloc);
                 self.time(a.mtime);
                 self.time(a.ctime);
+                self.u32(a.links);
             }
         }
     }
@@ -197,11 +200,12 @@ impl Reader<'_> {
         };
         let attrs = match self.u8()? {
             0 => None,
-            1 => Some(Attrs {
+            tag @ (1 | 2) => Some(Attrs {
                 size: self.u64()?,
                 alloc: self.u64()?,
                 mtime: self.time()?,
                 ctime: self.time()?,
+                links: if tag == 2 { self.u32()? } else { 0 },
             }),
             _ => return None,
         };
@@ -539,6 +543,7 @@ mod tests {
                 alloc: 4096,
                 mtime: Time { sec: -5, nsec: 1 },
                 ctime: Time { sec: 7, nsec: 2 },
+                links: 2,
             }),
         };
         vec![
