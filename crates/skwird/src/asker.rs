@@ -8,7 +8,7 @@
 //! every folder above it. A folder with an access ACL is judged by it,
 //! as read (`skwird_crawl::acl`); one whose ACL was not read is not
 //! known: never answered as its mode alone says, and not covered.
-#![cfg_attr(unix, allow(unsafe_code))] // SO_PEERGROUPS has no safe binding; the one block says why it is sound.
+#![cfg_attr(unix, allow(unsafe_code))] // SO_PEERGROUPS and LOCAL_PEERCRED have no safe binding; each block says why it is sound.
 
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -59,13 +59,57 @@ pub struct Owned {
 
 impl Asker {
     /// The peer of `stream`, as the kernel held it when it connected.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub fn of(stream: &Stream) -> std::io::Result<Asker> {
         let cred = rustix::net::sockopt::socket_peercred(stream)?;
         Ok(Asker {
             uid: cred.uid.as_raw(),
             gid: cred.gid.as_raw(),
             groups: peer_groups(stream)?,
+            token: None,
+        })
+    }
+
+    /// The peer of `stream`, as the kernel held it when it connected
+    /// (`LOCAL_PEERCRED`, macOS' `getpeereid` with its groups): its user,
+    /// and its groups, the first of which is its own. The kernel gives 16
+    /// at most: a peer in more is judged by those alone, which grants it
+    /// less, never more.
+    #[cfg(target_os = "macos")]
+    pub fn of(stream: &Stream) -> std::io::Result<Asker> {
+        let mut cred = std::mem::MaybeUninit::<libc::xucred>::zeroed();
+        let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::xucred>())
+            .unwrap_or(libc::socklen_t::MAX);
+        // SAFETY: `cred` is valid for writes of `len` bytes, its size, the
+        // most getsockopt writes, and `len` is a word it writes the length
+        // to.
+        let done = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERCRED,
+                cred.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        if done != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: zeroed, then written by the call, which succeeded.
+        let cred = unsafe { cred.assume_init() };
+        if cred.cr_version != libc::XUCRED_VERSION {
+            return Err(std::io::Error::other(
+                "a peer's credentials of another version",
+            ));
+        }
+        let n = usize::try_from(cred.cr_ngroups)
+            .unwrap_or(0)
+            .min(cred.cr_groups.len());
+        let groups = cred.cr_groups[..n].to_vec();
+        Ok(Asker {
+            uid: cred.cr_uid,
+            gid: groups.first().copied().unwrap_or(u32::MAX),
+            groups,
             token: None,
         })
     }
@@ -183,7 +227,7 @@ impl Asker {
 }
 
 /// The peer's groups, every one, as the kernel holds them.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn peer_groups(stream: &Stream) -> std::io::Result<Vec<u32>> {
     let mut groups = vec![0u32; 64];
     loop {
@@ -219,18 +263,37 @@ fn peer_groups(stream: &Stream) -> std::io::Result<Vec<u32>> {
 pub fn owned_at(path: &Path) -> Option<Owned> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::symlink_metadata(path).ok()?;
-    let mut none: [u8; 0] = [];
-    let acl = match rustix::fs::lgetxattr(path, "system.posix_acl_access", &mut none[..]) {
-        Ok(len) => len > 0,
-        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => false,
-        Err(_) => true,
-    };
+    let acl = has_acl(path);
     Some(Owned {
         owner: meta.uid(),
         group: meta.gid(),
         mode: (meta.mode() & 0o7777) as u16 | if acl { skwird_crawl::ACL } else { 0 },
+        // As the crawl keeps it: macOS gives it signed.
+        #[cfg(target_os = "macos")]
+        dev: u64::from(meta.dev() as u32),
+        #[cfg(not(target_os = "macos"))]
         dev: meta.dev(),
     })
+}
+
+/// Whether the folder at `path` has an access ACL, as Linux keeps one: one
+/// that cannot be asked may.
+#[cfg(target_os = "linux")]
+fn has_acl(path: &Path) -> bool {
+    let mut none: [u8; 0] = [];
+    match rustix::fs::lgetxattr(path, "system.posix_acl_access", &mut none[..]) {
+        Ok(len) => len > 0,
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => false,
+        Err(_) => true,
+    }
+}
+
+/// On macOS, a folder's ACL is an extended one, which is not read yet
+/// (phase 5, step 7): any folder may have one, and is not known, never
+/// judged by its mode alone.
+#[cfg(target_os = "macos")]
+fn has_acl(_: &Path) -> bool {
+    true
 }
 
 /// What `asker` may see of each folder's entries in `index`: whether they

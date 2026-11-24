@@ -321,6 +321,10 @@ fn sources(
             crate::live::listen(&w, &commands, &shared.readers);
         });
     }
+    // macOS hears nothing yet (phase 5, step 3, FSEvents): no watcher is
+    // made there, and its engine checks for each sync.
+    #[cfg(target_os = "macos")]
+    let _ = (commands, shared);
     (watcher, group)
 }
 

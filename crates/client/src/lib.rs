@@ -34,6 +34,8 @@ use skwird_protocol::Request;
 use skwird_protocol::{Answer, Ask, Changes, Coverage, Done, Entry, Query, Welcome, WirePath};
 
 pub mod fake;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 pub mod pipe;
 
@@ -123,12 +125,10 @@ impl Find {
         }
     }
 
-    /// The user's runtime folder: as given, or `XDG_RUNTIME_DIR`.
+    /// The user's runtime folder: as given, or [`runtime_folder`].
     #[cfg(unix)]
     fn runtime(&self) -> Option<PathBuf> {
-        self.runtime
-            .clone()
-            .or_else(|| absolute(std::env::var_os("XDG_RUNTIME_DIR")))
+        self.runtime.clone().or_else(runtime_folder)
     }
 
     /// Where to look for an engine, in turn, where no socket is given.
@@ -157,9 +157,10 @@ impl Find {
     fn started(&self) -> Result<PathBuf, Error> {
         match &self.socket {
             Some(s) => Ok(s.clone()),
-            None => self.runtime().map(|r| socket_in(&r)).ok_or_else(|| {
-                Error::NoEngine("XDG_RUNTIME_DIR is not set, or not absolute".into())
-            }),
+            None => self
+                .runtime()
+                .map(|r| socket_in(&r))
+                .ok_or_else(|| Error::NoEngine(NO_RUNTIME.into())),
         }
     }
 
@@ -184,22 +185,47 @@ fn absolute(value: Option<OsString>) -> Option<PathBuf> {
 }
 
 /// The system service's socket (phase 3); on Windows, its pipe (phase 4,
-/// step 7).
+/// step 7); on macOS, which has no `/run`, in `/var/run`, where its
+/// system's runtime files are.
 pub fn system_socket() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(r"\\.\pipe\skwird")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/var/run/skwird/socket")
     } else {
         PathBuf::from("/run/skwird/socket")
     }
 }
 
 /// The user's engine's socket, where the user has a runtime folder
-/// (`XDG_RUNTIME_DIR`, absolute); on Windows, the user's pipe.
+/// ([`runtime_folder`]); on Windows, the user's pipe.
 pub fn user_socket() -> Option<PathBuf> {
     #[cfg(windows)]
     return pipe::user_pipe();
     #[cfg(not(windows))]
-    absolute(std::env::var_os("XDG_RUNTIME_DIR")).map(|r| socket_in(&r))
+    runtime_folder().map(|r| socket_in(&r))
+}
+
+/// What a client says where it finds no runtime folder.
+#[cfg(unix)]
+const NO_RUNTIME: &str = if cfg!(target_os = "macos") {
+    "no runtime folder: XDG_RUNTIME_DIR is not absolute, and the system gives no temporary folder of yours"
+} else {
+    "XDG_RUNTIME_DIR is not set, or not absolute"
+};
+
+/// The user's runtime folder, where their engine's socket is: the one
+/// `XDG_RUNTIME_DIR` names (absolute), on every Unix. macOS sets none:
+/// there, the user's own temporary folder (`/var/folders/…/T/`, as the
+/// system gives it for their user, whatever `TMPDIR` says), theirs alone
+/// and on the machine's own disk. The engine reads it so (`skwird::dirs`):
+/// a client and its engine must agree, or a user would have two.
+#[cfg(unix)]
+pub fn runtime_folder() -> Option<PathBuf> {
+    let named = absolute(std::env::var_os("XDG_RUNTIME_DIR"));
+    #[cfg(target_os = "macos")]
+    let named = named.or_else(macos::user_temp);
+    named
 }
 
 #[cfg(not(windows))]

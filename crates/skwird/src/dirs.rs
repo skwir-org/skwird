@@ -62,8 +62,14 @@ impl Dirs {
     #[cfg(not(windows))]
     pub fn from_env() -> Result<Dirs, String> {
         let home = var("HOME").ok_or("HOME is not set")?;
-        let runtime = var("XDG_RUNTIME_DIR")
-            .ok_or("XDG_RUNTIME_DIR is not set: skwird keeps its socket there")?;
+        // As every client finds it (`skwird_client::runtime_folder`): on
+        // macOS, the user's own temporary folder where none is named.
+        let runtime = skwird_client::runtime_folder().ok_or(if cfg!(target_os = "macos") {
+            "no runtime folder: XDG_RUNTIME_DIR is not absolute, and the system gives no \
+             temporary folder of yours, where skwird keeps its socket"
+        } else {
+            "XDG_RUNTIME_DIR is not set: skwird keeps its socket there"
+        })?;
         Ok(Dirs {
             runtime: runtime.join("skwird"),
             cache: var("XDG_CACHE_HOME")
@@ -94,7 +100,16 @@ impl Dirs {
         };
         Dirs {
             home: PathBuf::from("/root"),
-            runtime: dir("RUNTIME_DIRECTORY", "/run/skwird"),
+            // Where every client looks (`skwird_client::system_socket`):
+            // macOS has no `/run`.
+            runtime: dir(
+                "RUNTIME_DIRECTORY",
+                if cfg!(target_os = "macos") {
+                    "/var/run/skwird"
+                } else {
+                    "/run/skwird"
+                },
+            ),
             cache: dir("CACHE_DIRECTORY", "/var/cache/skwird"),
             state: dir("STATE_DIRECTORY", "/var/lib/skwird"),
             config: dir("CONFIGURATION_DIRECTORY", "/etc/skwird"),

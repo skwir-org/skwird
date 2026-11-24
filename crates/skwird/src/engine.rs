@@ -1023,6 +1023,8 @@ struct Opening {
 /// An event held while roots are opening, with its source's generation.
 enum HeldEvent {
     Marks(u64, fanotify::Heard),
+    // No watcher on macOS until FSEvents (phase 5, step 3).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Watched(u64, Heard),
 }
 
@@ -1254,6 +1256,14 @@ impl Writing<'_> {
             }
         };
         covered(folder).then_some((folder, None))
+    }
+
+    /// What a watcher heard on macOS, which makes none yet (phase 5, step
+    /// 3, FSEvents): nothing is heard, and nothing proven by it.
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::unused_self, clippy::needless_pass_by_value)] // every system's writer answers it
+    fn heard(&mut self, _: u64, heard: Vec<Heard>) {
+        self.done.events += heard.len() as u64;
     }
 
     /// What the watcher heard: each folder named gathered, an overflow or

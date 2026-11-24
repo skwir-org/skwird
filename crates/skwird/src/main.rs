@@ -288,7 +288,7 @@ fn run(args: &Args) -> Result<(), String> {
     }
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn serve(args: &Args) -> Result<(), String> {
     // On Windows a client starts the engine with none of its handles, and
     // names its log (`SKWIRD_LOG`): what it logs goes there.
@@ -343,7 +343,7 @@ fn serve(args: &Args) -> Result<(), String> {
     skwird::serve::serve(&config)
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn serve(args: &Args) -> Result<(), String> {
     skwird::serve(&args.roots, args.idle)
 }

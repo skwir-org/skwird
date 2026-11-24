@@ -2299,6 +2299,27 @@ macOS 15, thrown away after its job. The gate lints for macOS
 2. **The engine on macOS**, a user's: compiled there, its socket, a
    client that starts it; unwatched at first, so that a sync runs the
    check, as phase 1's engine did on Linux.
+
+   Built on 2026-11-24 (linted here; its tests run on the runners):
+   - the engine's modules are compiled on macOS beside Linux's and
+     Windows'. What a watcher does waits for step 3: no watcher is made,
+     and a sync checks;
+   - who asks, from the socket (`LOCAL_PEERCRED`): the peer's user and
+     its groups, 16 at most, which grants a peer in more less, never
+     more. A folder's extended ACL is not read yet (step 7): any folder
+     may have one, and is not known, never judged by its mode alone;
+   - the socket's folder (DESIGN, Protocol, "Transport"): the one
+     `XDG_RUNTIME_DIR` names, or the user's own temporary folder, read
+     by the client and the engine alike (`skwird_client::runtime_folder`).
+     The system service's socket is `/var/run/skwird/socket`;
+   - the default private folders gain the keychains
+     (`~/Library/Keychains`), where Linux has its keyrings;
+   - its tests (`crates/skwird/tests/macos.rs`): the engine answers what
+     a walk finds, Unicode names as written; a sync answers a change
+     made behind its back, checked after it was asked; a client starts
+     the engine, which goes with its socket once idle; the private
+     defaults hold. The client's own tests the user's temporary folder:
+     absolute, theirs, open to no one else.
 3. **Live** (FSEvents): one stream for the user's roots, a folder's
    events heard as a folder to read again, `kFSEventStreamEventFlag
    MustScanSubDirs` and the drops as an overflow of the subtree, the

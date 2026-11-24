@@ -636,7 +636,9 @@ the index. skwird honours what marks them itself:
 - default exclusions: `~/.ssh`, `~/.gnupg`, the keyrings
   (`~/.local/share/keyrings`, `~/.local/share/kwalletd`), and the
   password store (`~/.password-store`), whose names are the accounts it
-  holds;
+  holds. On macOS, the keychains (`~/Library/Keychains`) in the
+  keyrings' place; on Windows, its credentials, vault and data
+  protection keys;
 - a user's own exclusions, in skwird's configuration;
 - folders a client registers (the user's choice, 2026-11-11);
 - the engine's own folders: its index and its log, its state, its
@@ -1681,7 +1683,26 @@ repositories, their versions their own.
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`
   for the system service, `$XDG_RUNTIME_DIR/skwird/socket` for a user's
   engine. A named pipe on Windows: `\\.\pipe\skwird`, and one per user
-  named by its SID. A socket path longer than the system allows (108
+  named by its SID.
+  - **On macOS** (2026-11-24, phase 5, step 2), which has no `/run` and
+    sets no `XDG_RUNTIME_DIR`:
+    - the system service's socket is `/var/run/skwird/socket`, where its
+      system keeps its runtime files;
+    - a user's runtime folder is the one `XDG_RUNTIME_DIR` names where
+      it is set, as on every Unix. Otherwise it is the user's own
+      temporary folder, as the system gives it for their user
+      (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, `/var/folders/…/T/`),
+      whatever `TMPDIR` says. It is the same for every process of
+      theirs, theirs alone, on the machine's own disk where a home may
+      be on a server, and short enough for a socket's path. `TMPDIR`
+      may be set otherwise by a shell, and two clients that read two
+      folders would start two engines for one user (rule 4).
+      `~/Library` was not taken: a home on a server holds no socket;
+    - one rule for both sides: the engine reads its runtime folder from
+      the client's (`skwird_client::runtime_folder`). The cache, state
+      and configuration are XDG's there too (`~/.cache`,
+      `~/.local/state`, `~/.config`), as every Unix has them, so that
+      every document says one place. A socket path longer than the system allows (108
   bytes on Linux, 104 on macOS) is an error that says so, not the crash
   it was in fsearch. The user's folder is the user's alone (mode 0700),
   checked so before the socket is bound, as skwir keeps its own runtime

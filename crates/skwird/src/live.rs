@@ -225,6 +225,8 @@ pub struct Readers {
 }
 
 impl Readers {
+    // No reader on macOS until FSEvents (phase 5, step 3).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn join(&self) {
         self.threads
             .lock()

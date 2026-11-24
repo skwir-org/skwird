@@ -15,6 +15,11 @@ skwird-protocol = { path = "../protocol", version = "0.1.0" }
 
 # Its pipes on Windows (phase 4): a version skwir's lockfile already
 # holds.
+# The user's own temporary folder on macOS (`confstr`), where its engine's
+# socket is: a version skwir's lockfile already holds.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",

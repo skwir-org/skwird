@@ -23,7 +23,7 @@ use crate::FileId;
 /// The folders kept out of the index unless the user's configuration
 /// says otherwise, below the user's home: keys and keyrings, and the
 /// password store, whose names are the accounts it holds.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const DEFAULTS: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -31,6 +31,11 @@ pub const DEFAULTS: &[&str] = &[
     ".local/share/kwalletd",
     ".password-store",
 ];
+
+/// The same on macOS: `OpenSSH`'s, `GnuPG`'s and `pass`'s as on Linux, and
+/// the user's keychains, where Linux has its keyrings.
+#[cfg(target_os = "macos")]
+pub const DEFAULTS: &[&str] = &[".ssh", ".gnupg", ".password-store", "Library/Keychains"];
 
 /// The same on Windows, where they are kept elsewhere: OpenSSH's and
 /// `pass`'s as on Unix, `GnuPG`'s in the roaming application data, and

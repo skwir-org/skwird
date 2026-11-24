@@ -25,8 +25,8 @@ serde_json = "1.0.154"
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["event", "net", "process", "time"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# SO_PEERGROUPS, which rustix has no binding for.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# SO_PEERGROUPS and LOCAL_PEERCRED, which rustix has no binding for.
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
