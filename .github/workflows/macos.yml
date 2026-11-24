@@ -28,3 +28,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo test --workspace --no-fail-fast
+        env:
+          # A runner GitHub hosts, thrown away after its job: the tests
+          # that change the system (a LaunchAgent taken by launchd) run
+          # here alone (skwird_testkit::throwaway), never on a
+          # developer's own Mac.
+          SKWIRD_TEST_MACHINE: "1"
