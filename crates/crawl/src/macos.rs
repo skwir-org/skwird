@@ -382,6 +382,65 @@ fn why_not_opened(e: Errno) -> Why {
     }
 }
 
+/// Whether the folder open as `fd` has an ACL, the extended one macOS
+/// keeps (`ATTR_CMN_EXTENDED_SECURITY`): its count of entries, which says
+/// none as `!0` (`KAUTH_FILESEC_NOACL`), or 0. A folder that cannot be asked
+/// may have one, so that it is never judged by its mode alone, as on
+/// Linux.
+fn has_acl(fd: BorrowedFd<'_>) -> bool {
+    // The count of entries, after the security's magic and its owner's
+    // and group's UUIDs: the same in either byte order where it says none.
+    const COUNT_AT: usize = 4 + 16 + 16;
+    let mut wanted = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_EXTENDED_SECURITY,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: the folder's descriptor, open; what is asked, ours; a
+    // buffer of its length, which the call fills.
+    let done = unsafe {
+        libc::fgetattrlist(
+            fd.as_raw_fd(),
+            (&raw mut wanted).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+        )
+    };
+    if done != 0 {
+        return true;
+    }
+    let mut f = Fields { b: &buf, at: 4 };
+    let Some(common) = f.u32() else { return true };
+    if common & libc::ATTR_CMN_EXTENDED_SECURITY == 0 {
+        return false;
+    }
+    f.at = 24;
+    let here = f.at;
+    let (Some(offset), Some(len)) = (f.i32(), f.u32()) else {
+        return true;
+    };
+    if (len as usize) < COUNT_AT + 4 {
+        return false;
+    }
+    let Some(start) = isize::try_from(offset)
+        .ok()
+        .and_then(|o| here.checked_add_signed(o))
+    else {
+        return true;
+    };
+    let mut count = Fields {
+        b: &buf,
+        at: start + COUNT_AT,
+    };
+    count.u32().is_none_or(|n| n != 0 && n != u32::MAX)
+}
+
 /// One entry, as its folder's listing gave it.
 struct Listed {
     name: Vec<u8>,
@@ -678,10 +737,15 @@ pub(crate) fn read(
             return not_covered(stat, why);
         }
     };
-    let stat = match rustix::fs::fstat(&fd) {
+    let mut stat = match rustix::fs::fstat(&fd) {
         Ok(st) => folder_stat(&st),
         Err(e) => return not_covered(None, Why::Failed(e.raw_os_error())),
     };
+    // Its ACL said, so that the system service never judges it by its
+    // mode alone (DESIGN 4).
+    if opts.acls && has_acl(fd.as_fd()) {
+        stat.mode |= crate::ACL;
+    }
     if root.exclusions.holds(Some(stat.id), &root.path.join(rel)) {
         return not_covered(Some(stat), Why::Excluded);
     }

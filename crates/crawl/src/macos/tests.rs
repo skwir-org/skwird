@@ -307,3 +307,40 @@ fn a_position_replays_what_changed_after_it() {
     );
     assert!(heard.contains(&Heard::Replayed { scope: 0 }), "{heard:?}");
 }
+
+/// A folder with an ACL (an extended one, macOS'), its mode says so where
+/// ACLs are asked, so that the system service never judges it by its mode
+/// alone; one with none says none.
+#[test]
+fn a_folder_with_an_acl_says_so() {
+    let s = Scratch::new("macos-acl");
+    s.file("shared/inside");
+    s.file("plain/inside");
+    let added = Command::new("chmod")
+        .args(["+a", "everyone allow list"])
+        .arg(s.join("shared"))
+        .status()
+        .unwrap();
+    assert!(added.success(), "chmod +a");
+    let root = open(&s);
+    let crawl = crawl_all(
+        &root,
+        &crate::Options {
+            acls: true,
+            ..opts(1)
+        },
+        &Cancel::default(),
+    )
+    .unwrap();
+    let mode = |rel: &str| {
+        crawl
+            .folders
+            .iter()
+            .find(|f| f.rel == Path::new(rel))
+            .and_then(|f| f.stat)
+            .map(|s| s.mode)
+            .unwrap()
+    };
+    assert_ne!(mode("shared") & crate::ACL, 0, "an ACL");
+    assert_eq!(mode("plain") & crate::ACL, 0, "none");
+}

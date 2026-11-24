@@ -2405,10 +2405,56 @@ macOS 15, thrown away after its job. The gate lints for macOS
      volume's events turned off), which needs root.
 5. **Consent** (DESIGN 4): folders macOS asks consent for, not covered
    for want of it, and tried again at each start.
+
+   Done on 2026-11-24, on the runners (`skwird_crawl::consent_withheld`):
+   - without Full Disk Access (the system's privacy database unreadable,
+     fsearch's test, which asks no one), the folders below the home that
+     macOS asks consent for (fsearch's list: Desktop, Documents,
+     Downloads, the cloud's and other programs' folders, the photo and
+     music libraries) are never opened, since opening one asks the user
+     and waits for the answer. Each is not covered, as denied, so that a
+     client walks it itself; decided once a process, so asked again at
+     each start. The engine says so as it starts;
+   - decided with it: the system never fetches a file's contents from
+     the cloud for the engine (`setiopolicy_np`, dataless files not
+     materialized), since nothing skwird does may reach a network
+     (rule 6). A folder whose listing the cloud alone holds fails to
+     list, and is not covered;
+   - tested on the runners, both ways: with Full Disk Access the folders
+     are read; without it, denied, unanswered, and said. A passing test
+     keeps its output, so the run does not say which way the runner
+     went.
 6. **A LaunchAgent,** the user's engine started at login.
+
+   Done on 2026-11-24: `skwird logon add|remove`, Windows' command, does
+   it on macOS. `add` writes the user's agent
+   (`dist/macos/org.skwir.skwird.plist`: `serve --forever`, run at load,
+   started again where it failed, a background process of low-priority
+   I/O and a nice of 10, as the systemd unit's) to
+   `~/Library/LaunchAgents`, and has launchd take it (`launchctl
+   bootstrap gui/<uid>`), which starts it now as at each login; `remove`
+   takes it back. Tested on the runners: the agent's definition, which
+   macOS' own tool reads as a property list (`plutil -lint`). Its
+   registration is tested on a runner the workflow marks as thrown away
+   alone (`skwird_testkit::throwaway`, Unix's now as Windows'), and
+   `macos.yml` does not mark it yet: a change to a workflow, which the
+   night's pushes could not make (their token has no `workflow` scope).
 7. **The system service,** a LaunchDaemon: `getpeereid` for who asks,
    what each folder is judged by (its mode, and its ACL, which macOS
    keeps extended), Full Disk Access.
+
+   Begun on 2026-11-24:
+   - who asks, from the socket (`LOCAL_PEERCRED`, step 2);
+   - a folder with an ACL says so where ACLs are asked
+     (`ATTR_CMN_EXTENDED_SECURITY`, its count of entries), so that the
+     system service never judges it by its mode alone: not known, until
+     macOS' ACLs are read. A folder above a root is not known either,
+     its ACL unasked. Tested on the runners with an ACL its owner gave
+     (`chmod +a`).
+
+   Left: the daemon itself (`skwird service add|remove`, its folders and
+   its socket in `/var/run/skwird`), macOS' ACLs read and judged, and
+   its tests, which need root on a runner marked thrown away.
 8. **Measured,** on a Mac when one is at hand.
 
 ## Later
