@@ -512,3 +512,22 @@ impl Drop for Place {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// Whether this runs on a machine thrown away after its tests, as
+/// Windows' runners do (`skwird_testkit::throwaway` there): a runner
+/// GitHub hosts whose workflow sets `SKWIRD_TEST_MACHINE`
+/// (`.github/workflows/macos.yml`). A test that changes the system (a
+/// `LaunchAgent` taken by launchd) runs there alone, and is skipped
+/// anywhere else: never on a developer's own system.
+/// `SKWIRD_TEST_MACHINE` set anywhere else stops the test.
+pub fn throwaway() -> bool {
+    let asked = std::env::var_os("SKWIRD_TEST_MACHINE").is_some();
+    // GitHub's own runners say so; a runner of someone's own says
+    // `self-hosted`, and may be their machine.
+    let hosted = std::env::var("RUNNER_ENVIRONMENT").is_ok_and(|v| v == "github-hosted");
+    assert!(
+        !asked || hosted,
+        "SKWIRD_TEST_MACHINE is set, but this is not a runner GitHub hosts"
+    );
+    asked
+}

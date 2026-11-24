@@ -31,9 +31,9 @@ sync      prove PATH current now, then say how far it can be trusted
 watch     keep FOLDER live: changes in it heard and applied as they come,
           within the engine's share of watches (--remove: take it back)
 status    what the engine says of itself
-logon     on Windows, start the engine at your logon (add), or no more
-          (remove): a task of yours, running skwirdw.exe, skwird with no
-          console window
+logon     on Windows and macOS, start the engine at your logon (add), or
+          no more (remove): on Windows a task of yours, running skwirdw.exe,
+          skwird with no console window; on macOS a LaunchAgent of yours
 service   on Windows, the system service (add, as an administrator): every
           user's files indexed, each user answered what they could list,
           started at boot as LocalSystem; remove stops it and takes it back
@@ -128,8 +128,8 @@ pub(crate) fn main() -> ExitCode {
     }
 }
 
-/// Start the engine at the user's logon, or no more (Windows).
-#[cfg(windows)]
+/// Start the engine at the user's logon, or no more (Windows, macOS).
+#[cfg(any(windows, target_os = "macos"))]
 fn logon(what: Option<&str>) -> Result<(), String> {
     let said = match what {
         Some("add") => skwird::logon::add()?,
@@ -171,10 +171,10 @@ fn service(_: &Args) -> Result<(), String> {
     )
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn logon(_: Option<&str>) -> Result<(), String> {
     Err(
-        "logon is Windows': elsewhere, a service manager starts the engine \
+        "logon is Windows' and macOS': elsewhere, a service manager starts the engine \
          (dist/systemd/skwird.service)"
             .into(),
     )

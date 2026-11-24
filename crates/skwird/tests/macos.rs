@@ -471,3 +471,54 @@ fn folders_asked_consent_for_are_read_with_full_disk_access_alone() {
         );
     }
 }
+
+/// `skwird logon add` writes the user's `LaunchAgent` and has launchd take
+/// it, which starts the engine as it would at login; `remove` takes it
+/// back. On a machine thrown away after its tests alone: launchd starts
+/// that engine with the user's own home, not the test's.
+#[test]
+fn the_login_agent_is_written_and_taken() {
+    if !skwird_testkit::throwaway() {
+        eprintln!(
+            "skipped: it would have launchd start an engine of the user running it (SKWIRD_TEST_MACHINE)"
+        );
+        return;
+    }
+    let env = Env::new("mac-agent");
+    let run = |what: &str| {
+        let out = env.command(&["logon", what]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run("add");
+    let file = env
+        .home()
+        .join("Library/LaunchAgents/org.skwir.skwird.plist");
+    let plist = std::fs::read_to_string(&file).unwrap();
+    assert!(plist.contains("<string>--forever</string>"), "{plist}");
+    let uid = rustix::process::getuid().as_raw();
+    let print = || {
+        Command::new("launchctl")
+            .args(["print", &format!("gui/{uid}/org.skwir.skwird")])
+            .output()
+            .unwrap()
+    };
+    let out = print();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("serve"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    run("remove");
+    assert!(!print().status.success(), "the agent is taken back");
+    assert!(!file.exists());
+}

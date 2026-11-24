@@ -1,9 +1,12 @@
-//! The user's engine for the session on Windows (`docs/DESIGN.md`,
-//! decision 1; `docs/PLAN.md`, phase 4, step 6): a task of the user's,
-//! started at their logon (`dist/windows/skwird-logon.xml`), registered
-//! with Task Scheduler (`schtasks`). It runs `skwirdw.exe`, skwird with no
-//! console window, which a task would otherwise open; with `--forever`,
-//! as the systemd user unit does on Linux.
+//! The user's engine for the session (`docs/DESIGN.md`, decision 1), with
+//! `--forever`, as the systemd user unit runs it on Linux:
+//! - on Windows (`docs/PLAN.md`, phase 4, step 6), a task of the user's,
+//!   started at their logon (`dist/windows/skwird-logon.xml`), registered
+//!   with Task Scheduler (`schtasks`). It runs `skwirdw.exe`, skwird with
+//!   no console window, which a task would otherwise open;
+//! - on macOS (phase 5, step 6), a `LaunchAgent` of the user's, started at
+//!   their login (`dist/macos/org.skwir.skwird.plist`), taken by launchd
+//!   (`launchctl bootstrap`).
 
 use std::path::Path;
 
@@ -19,6 +22,17 @@ pub fn task(program: &Path, user: &str) -> String {
 /// user's tasks among the same.
 pub fn name(user: &str) -> String {
     format!("skwird-{user}")
+}
+
+/// The `LaunchAgent`'s label, a name of launchd's for it (macOS).
+pub const AGENT: &str = "org.skwir.skwird";
+
+/// The `LaunchAgent`'s definition (macOS), for `program`, logging to `log`:
+/// the template's places filled, each value escaped as XML takes it.
+pub fn agent(program: &Path, log: &Path) -> String {
+    include_str!("../../../dist/macos/org.skwir.skwird.plist")
+        .replace("{program}", &escape(&program.to_string_lossy()))
+        .replace("{log}", &escape(&log.to_string_lossy()))
 }
 
 fn escape(text: &str) -> String {
@@ -91,6 +105,79 @@ fn schtasks(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Where the user's `LaunchAgent` is, below their home (macOS).
+#[cfg(target_os = "macos")]
+fn agent_file(dirs: &crate::dirs::Dirs) -> std::path::PathBuf {
+    dirs.home
+        .join("Library/LaunchAgents")
+        .join(format!("{AGENT}.plist"))
+}
+
+/// launchd's domain of the user running this, their login session's.
+#[cfg(target_os = "macos")]
+fn domain() -> String {
+    format!("gui/{}", rustix::process::getuid().as_raw())
+}
+
+/// Have the engine started at the user's login (macOS): its `LaunchAgent`
+/// written, its program this one, its log in the engine's state folder,
+/// and taken by launchd, which starts it now as at each login. One
+/// already taken is taken back first, so that the new one is what runs.
+#[cfg(target_os = "macos")]
+pub fn add() -> Result<String, String> {
+    let me = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|e| format!("cannot find this program: {e}"))?;
+    let dirs = crate::dirs::Dirs::from_env()?;
+    crate::dirs::make_private(&dirs.state)?;
+    let file = agent_file(&dirs);
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("cannot make the LaunchAgents folder: {e}"))?;
+    }
+    std::fs::write(&file, agent(&me, &dirs.state.join("engine.log")))
+        .map_err(|e| format!("cannot write the LaunchAgent: {e}"))?;
+    let _ = launchctl(&["bootout", &format!("{}/{AGENT}", domain())]);
+    launchctl(&["bootstrap", &domain(), &file.to_string_lossy()])?;
+    Ok(format!(
+        "the engine starts at your login: {}",
+        file.display()
+    ))
+}
+
+/// Take back the user's `LaunchAgent` (macOS): launchd stops the engine it
+/// started, and starts none at their next login.
+#[cfg(target_os = "macos")]
+pub fn remove() -> Result<String, String> {
+    let dirs = crate::dirs::Dirs::from_env()?;
+    let file = agent_file(&dirs);
+    let taken = launchctl(&["bootout", &format!("{}/{AGENT}", domain())]);
+    let removed = std::fs::remove_file(&file);
+    match (taken, removed) {
+        (Err(e), Err(_)) => Err(format!("no LaunchAgent of skwird's was taken: {e}")),
+        _ => Ok("the engine starts at your login no more".into()),
+    }
+}
+
+/// What `launchctl` said, run with `args`; its error where it failed.
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("launchctl")
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run launchctl: {e}"))?;
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if out.status.success() {
+        Ok(said)
+    } else {
+        Err(format!(
+            "launchctl {} failed: {said} {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +201,45 @@ mod tests {
         assert_eq!(name(user), "skwird-S-1-5-21-1-2-3-1001");
         let bytes = utf16(&xml);
         assert_eq!(&bytes[..4], &[0xFF, 0xFE, b'<', 0]);
+    }
+
+    /// The `LaunchAgent` runs the program given, for the session (`--forever`),
+    /// at the user's login, logging where it is given, a value that XML
+    /// would misread escaped; on macOS, its own tool reads it as a property
+    /// list (`plutil -lint`).
+    #[test]
+    fn the_agent_runs_the_engine_at_the_users_login() {
+        let plist = agent(
+            Path::new("/Applications/R&D <tools>/skwird"),
+            Path::new("/Users/someone/.local/state/skwird/engine.log"),
+        );
+        assert!(
+            plist.contains("<string>/Applications/R&amp;D &lt;tools&gt;/skwird</string>"),
+            "{plist}"
+        );
+        assert!(plist.contains("<string>serve</string>"));
+        assert!(plist.contains("<string>--forever</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"));
+        assert!(plist.contains(&format!("<string>{AGENT}</string>")));
+        assert!(plist.contains("<string>/Users/someone/.local/state/skwird/engine.log</string>"));
+        assert!(
+            !plist.contains("{program}") && !plist.contains("{log}"),
+            "{plist}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let s = skwird_testkit::Scratch::new("agent");
+            let file = s.write("agent.plist", plist.as_bytes());
+            let out = std::process::Command::new("plutil")
+                .arg("-lint")
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
     }
 }
