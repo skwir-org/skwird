@@ -72,7 +72,8 @@ if [ "$system" = macos ]; then
     codesign --verify --strict --verbose=2 "$bin" 2>&1 | sed 's/^/codesign: /'
     said gatekeeper "$(spctl --assess --type execute "$bin" 2>&1 || true)"
 else
-    tar -xf "$asset"
+    # Windows' own unzipping: Git's tar is GNU's, which reads no zip.
+    powershell -NoProfile -Command "Expand-Archive -LiteralPath '$(native "$scratch/draft/$asset")' -DestinationPath '$(native "$scratch/draft")'"
     bin="$unpacked/skwird.exe"
 fi
 [ -x "$bin" ] || fail "no program in $asset"
