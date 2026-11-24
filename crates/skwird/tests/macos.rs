@@ -381,3 +381,50 @@ fn a_root_moved_away_is_not_live() {
     env.s.rename("home", "elsewhere");
     wait_for(&env, 5, "not live once moved", || !is_live(&mut c, &home));
 }
+
+/// An engine that went, started again, resumes from the position its
+/// index kept: what changed while none ran is heard as its history is
+/// replayed, and the root is live once it is, with no check (DESIGN 2).
+#[test]
+fn a_restarted_engine_resumes_from_its_history() {
+    let mut env = Env::new("mac-resume");
+    tree(&env);
+    let home = env.home();
+    env.engine(2);
+    {
+        let mut c = env.client();
+        wait_for(&env, 10, "live", || is_live(&mut c, &home));
+        // A change heard after the build, so that a position is kept.
+        let heard = env.s.file(home.join("docs/d03/heard live.txt"));
+        wait_for(&env, 5, "the change answered", || {
+            answered(&mut c, &named(&home, "heard live")).contains(&heard)
+        });
+    }
+    wait_for(&env, 20, "the engine went", || !env.socket().exists());
+    let first = env.log();
+    assert!(
+        first.contains("root 0: its history's position kept"),
+        "{first}"
+    );
+    let made = env.s.file(home.join("docs/d04/made while none ran.txt"));
+    env.engine(30);
+    let mut c = env.client();
+    wait_for(&env, 10, "live", || is_live(&mut c, &home));
+    let synced = c.sync(&home).unwrap();
+    assert!(matches!(synced.names, Proof::Live(_)), "{synced:?}");
+    assert!(
+        answered(&mut c, &named(&home, "while none ran")).contains(&made),
+        "{}",
+        env.log()
+    );
+    let second = env.log()[first.len()..].to_owned();
+    assert!(
+        second.contains("root 0: resumed from its history's position kept"),
+        "{second}"
+    );
+    assert!(
+        second.contains("root 0: its history replayed, live"),
+        "{second}"
+    );
+    assert!(!second.contains("root 0 checked"), "{second}");
+}

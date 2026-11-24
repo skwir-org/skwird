@@ -47,6 +47,35 @@ pub enum Heard {
     /// The cookie of this number was made ([`Watcher::watch_cookies`]):
     /// every change below every root heard before it has been heard.
     Cookie(u64),
+    /// The roots' stream gave every event up to `at` for root `scope`:
+    /// once every change before it is applied, the next start may resume
+    /// from there (DESIGN 2). Said as a root is watched, and after each
+    /// batch.
+    Position { scope: usize, at: Position },
+    /// Root `scope`, replayed from a position kept
+    /// ([`Watcher::replay_root`]), has had its history given whole: what
+    /// changed while no engine ran has been heard, the end of a replay.
+    Replayed { scope: usize },
+}
+
+/// Where a root was heard up to: its volume's event database, by its
+/// identity (`FSEventsCopyUUIDForDevice`, its 128 bits folded to 64), and
+/// the last event the roots' stream gave. A start resumes from it only
+/// where the database is the same one and has not been numbered afresh
+/// below it (DESIGN 2: macOS 26.3 did, below fsearch's saved id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Position {
+    pub database: u64,
+    pub id: u64,
+}
+
+/// A root heard: its scope, its path, and its volume's event database, if
+/// it has one (a volume whose events are not kept has none).
+#[derive(Clone, Debug)]
+struct Followed {
+    scope: usize,
+    path: PathBuf,
+    database: Option<u64>,
 }
 
 /// `kFSEventStreamEventFlag…`: what an event says.
@@ -100,6 +129,9 @@ struct Api {
     invalidate: unsafe extern "C" fn(*mut c_void),
     release: unsafe extern "C" fn(*mut c_void),
     flush_sync: unsafe extern "C" fn(*mut c_void),
+    current_id: unsafe extern "C" fn() -> u64,
+    database: unsafe extern "C" fn(libc::dev_t) -> *const c_void,
+    uuid_bytes: unsafe extern "C" fn(*const c_void) -> UuidBytes,
     cf_release: unsafe extern "C" fn(*const c_void),
     string: unsafe extern "C" fn(*const c_void, *const libc::c_char, u32) -> *const c_void,
     array: unsafe extern "C" fn(
@@ -110,6 +142,11 @@ struct Api {
     ) -> *const c_void,
     array_callbacks: *const c_void,
 }
+
+/// A UUID's 16 bytes, as `CFUUIDGetUUIDBytes` gives them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UuidBytes([u8; 16]);
 
 // SAFETY: function pointers, and the address of a constant the system
 // never changes: all of it may be shared between threads.
@@ -156,6 +193,9 @@ fn load() -> Option<Api> {
             invalidate: sym(cs, c"FSEventStreamInvalidate")?,
             release: sym(cs, c"FSEventStreamRelease")?,
             flush_sync: sym(cs, c"FSEventStreamFlushSync")?,
+            current_id: sym(cs, c"FSEventsGetCurrentEventId")?,
+            database: sym(cs, c"FSEventsCopyUUIDForDevice")?,
+            uuid_bytes: sym(cf, c"CFUUIDGetUUIDBytes")?,
             cf_release: sym(cf, c"CFRelease")?,
             string: sym(cf, c"CFStringCreateWithCString")?,
             array: sym(cf, c"CFArrayCreate")?,
@@ -206,12 +246,13 @@ struct Shared {
 }
 
 /// What a stream's callback is given: its paths as they were when it was
-/// made.
+/// made, and whether it replays a root's history.
 struct Info {
     shared: Arc<Shared>,
     number: u64,
-    roots: Vec<(usize, PathBuf)>,
+    roots: Vec<Followed>,
     cookies: Option<PathBuf>,
+    replay: bool,
 }
 
 /// A stream running; dropped, it is stopped, invalidated and released, and
@@ -240,12 +281,15 @@ impl Drop for Stream {
     }
 }
 
-/// What the watcher watches, and its stream.
+/// What the watcher watches, and its streams.
 #[derive(Default)]
 struct Watched {
-    roots: Vec<(usize, PathBuf)>,
+    roots: Vec<Followed>,
     cookies: Option<PathBuf>,
     stream: Option<Stream>,
+    /// Each root replayed from its position kept, its stream of its own
+    /// until its history is given whole.
+    replays: std::collections::HashMap<usize, Stream>,
 }
 
 /// The watcher of a user's engine on macOS: every root heard whole, by
@@ -286,19 +330,62 @@ impl Watcher {
     }
 
     /// Hear every change below the root `scope` at `path` from now on.
-    /// Its stream made again, it is heard once this returns.
+    /// Its stream made again, it is heard once this returns, and its
+    /// position said from there.
     pub fn watch_root(&self, scope: usize, path: &Path) -> std::io::Result<()> {
+        let a = api()?;
+        let database = database_of(a, device_of(path)?);
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
-        w.roots.retain(|(s, _)| *s != scope);
-        w.roots.push((scope, path.to_path_buf()));
+        w.roots.retain(|r| r.scope != scope);
+        w.roots.push(Followed {
+            scope,
+            path: path.to_path_buf(),
+            database,
+        });
         self.restart(&mut w)
     }
 
-    /// Hear nothing of root `scope` any more.
+    /// Hear the history of root `scope` at `path` from `from`, a position
+    /// kept, on a stream of its own, until it is given whole
+    /// ([`Heard::Replayed`]): what changed while no engine ran, heard
+    /// beside what the roots' stream hears now. False where `from` no
+    /// longer holds (DESIGN 2): the root's event database is another one,
+    /// or has been numbered afresh below it.
+    pub fn replay_root(&self, scope: usize, path: &Path, from: Position) -> std::io::Result<bool> {
+        let a = api()?;
+        let database = database_of(a, device_of(path)?);
+        if database != Some(from.database) || from.id > current_id(a) {
+            return Ok(false);
+        }
+        let info = Box::new(Info {
+            shared: Arc::clone(&self.shared),
+            // No stream of the roots' is numbered 0: no cookie from it
+            // proves anything, and it holds none.
+            number: 0,
+            roots: vec![Followed {
+                scope,
+                path: path.to_path_buf(),
+                database,
+            }],
+            cookies: None,
+            replay: true,
+        });
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        let stream = make(a, info, &[path], from.id)?;
+        self.watched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replays
+            .insert(scope, stream);
+        Ok(true)
+    }
+
+    /// Hear nothing of root `scope` any more, its replay with it.
     pub fn unwatch_root(&self, scope: usize) {
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
+        w.replays.remove(&scope);
         let before = w.roots.len();
-        w.roots.retain(|(s, _)| *s != scope);
+        w.roots.retain(|r| r.scope != scope);
         if w.roots.len() != before {
             let _ = self.restart(&mut w);
         }
@@ -331,7 +418,9 @@ impl Watcher {
     /// stream that replays history gives what is new before what it
     /// replays, a cookie before a change made ahead of it, and folds a
     /// subtree's changes into one to read whole, as the first runs found.
-    /// None where nothing is watched.
+    /// Each root's position is said from the newest event numbered before
+    /// it was made: what came before was there to be read once it was
+    /// watched. None where nothing is watched.
     fn restart(&self, w: &mut Watched) -> std::io::Result<()> {
         let a = api()?;
         let old = w.stream.take();
@@ -351,9 +440,10 @@ impl Watcher {
             number,
             roots: w.roots.clone(),
             cookies: w.cookies.clone(),
+            replay: false,
         });
         let mut paths: Vec<CString> = Vec::new();
-        for p in w.roots.iter().map(|(_, p)| p).chain(w.cookies.as_ref()) {
+        for p in w.roots.iter().map(|r| &r.path).chain(w.cookies.as_ref()) {
             match CString::new(p.as_os_str().as_bytes()) {
                 Ok(p) => paths.push(p),
                 Err(e) => {
@@ -362,10 +452,12 @@ impl Watcher {
                 }
             }
         }
+        let before = current_id(a);
         match make(a, info, &paths, SINCE_NOW) {
             Ok(stream) => {
                 w.stream = Some(stream);
                 flushed(old);
+                self.shared.queue.push(positions(&w.roots, before));
                 Ok(())
             }
             // The one before kept: what it heard is heard still.
@@ -376,7 +468,8 @@ impl Watcher {
         }
     }
 
-    /// Wait until something was heard, then take it all.
+    /// Wait until something was heard, then take it all. A replay given
+    /// whole, its stream is let go of here, outside its callback.
     pub fn read(&self, out: &mut Vec<Heard>) -> std::io::Result<()> {
         let mut heard = self
             .shared
@@ -392,7 +485,21 @@ impl Watcher {
                 .wait(heard)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+        let done: Vec<usize> = heard
+            .iter()
+            .filter_map(|h| match h {
+                Heard::Replayed { scope } => Some(*scope),
+                _ => None,
+            })
+            .collect();
         out.append(&mut heard);
+        drop(heard);
+        if !done.is_empty() {
+            let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
+            for scope in done {
+                w.replays.remove(&scope);
+            }
+        }
         Ok(())
     }
 
@@ -503,42 +610,84 @@ extern "C" fn release_info(info: *const c_void) {
     }
 }
 
-/// What a stream gives: each event said as what was heard, and queued.
+/// What a stream gives: each event said as what was heard, and queued;
+/// after it, from the roots' current stream, each root's position.
 extern "C" fn on_events(
     _: *mut c_void,
     info: *mut c_void,
     count: usize,
     paths: *mut c_void,
     flags: *const u32,
-    _: *const u64,
+    ids: *const u64,
 ) {
     // SAFETY: the info `make` gave the stream, alive while it calls.
     let info = unsafe { &*info.cast::<Info>() };
     let paths = paths.cast::<*const libc::c_char>();
     let mut heard = Vec::new();
+    let mut last = 0;
     for i in 0..count {
-        // SAFETY: the stream gives `count` paths and flags, each path
+        // SAFETY: the stream gives `count` paths, flags and ids, each path
         // NUL-terminated (no CFTypes asked).
-        let (path, flag) = unsafe { (CStr::from_ptr(*paths.add(i)).to_bytes(), *flags.add(i)) };
+        let (path, flag, id) = unsafe {
+            (
+                CStr::from_ptr(*paths.add(i)).to_bytes(),
+                *flags.add(i),
+                *ids.add(i),
+            )
+        };
+        last = last.max(id);
         said(info, path, flag, &mut heard);
     }
     let current = info.shared.current.load(Ordering::Acquire) == info.number;
-    if !current {
+    if current {
+        heard.extend(positions(&info.roots, last));
+    } else {
         // An older stream's cookie proves nothing of the roots it did not
-        // hold (DESIGN 2); its changes are read all the same.
+        // hold (DESIGN 2); its changes are read all the same. A replay's
+        // stream holds none, and says no position: its root's is the
+        // roots' stream's.
         heard.retain(|h| !matches!(h, Heard::Cookie(_)));
     }
     info.shared.queue.push(heard);
 }
 
+/// Each root's position at event `id`, where its volume keeps events.
+fn positions(roots: &[Followed], id: u64) -> Vec<Heard> {
+    roots
+        .iter()
+        .filter_map(|r| {
+            Some(Heard::Position {
+                scope: r.scope,
+                at: Position {
+                    database: r.database?,
+                    id,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The device of the volume `path` is on, as the crawl keeps it.
+fn device_of(path: &Path) -> std::io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    #[allow(clippy::cast_possible_truncation)] // a device number's 32 bits, sign-extended by std
+    let dev = std::fs::metadata(path)?.dev() as u32;
+    Ok(u64::from(dev))
+}
+
 /// What one event says, put in `heard`.
 fn said(info: &Info, path: &[u8], flag: u32, heard: &mut Vec<Heard>) {
+    let every = |heard: &mut Vec<Heard>, h: fn(usize) -> Heard| {
+        heard.extend(info.roots.iter().map(|r| h(r.scope)));
+    };
+    // A replay's history given whole: its root has heard what changed
+    // while no engine ran.
     if flag & HISTORY_DONE != 0 {
+        if info.replay {
+            every(heard, |scope| Heard::Replayed { scope });
+        }
         return;
     }
-    let every = |heard: &mut Vec<Heard>, h: fn(usize) -> Heard| {
-        heard.extend(info.roots.iter().map(|&(scope, _)| h(scope)));
-    };
     // Dropped, by the kernel or the service: every root's.
     if flag & (USER_DROPPED | KERNEL_DROPPED | EVENT_IDS_WRAPPED) != 0 {
         every(heard, |scope| Heard::Overflow { scope });
@@ -561,15 +710,15 @@ fn said(info: &Info, path: &[u8], flag: u32, heard: &mut Vec<Heard>) {
         }
         return;
     }
-    for (scope, root) in &info.roots {
-        let scope = *scope;
+    for r in &info.roots {
+        let scope = r.scope;
         // A root's own folder moved or removed, or a volume gone at or
         // above it: no longer heard.
-        if (flag & ROOT_CHANGED != 0 || flag & UNMOUNT != 0) && root.starts_with(path) {
+        if (flag & ROOT_CHANGED != 0 || flag & UNMOUNT != 0) && r.path.starts_with(path) {
             heard.push(Heard::Lost { scope });
             continue;
         }
-        let Ok(rel) = path.strip_prefix(root) else {
+        let Ok(rel) = path.strip_prefix(&r.path) else {
             continue;
         };
         if flag & (MUST_SCAN_SUBDIRS | MOUNT | UNMOUNT) != 0 {
@@ -587,4 +736,29 @@ fn said(info: &Info, path: &[u8], flag: u32, heard: &mut Vec<Heard>) {
 /// event that names it.
 pub fn cookie_folder(dir: &Path, n: u64) -> PathBuf {
     dir.join(format!("{COOKIE}{n}"))
+}
+
+/// The identity of the event database of the volume `dev` is on, its
+/// UUID's two halves folded together: none where the volume keeps no
+/// events.
+fn database_of(a: &Api, dev: u64) -> Option<u64> {
+    #[allow(clippy::cast_possible_wrap)] // a device number's bits, as the system keeps them
+    let dev = u32::try_from(dev).ok()? as libc::dev_t;
+    // SAFETY: a device number; the UUID given is ours to release.
+    let uuid = unsafe { (a.database)(dev) };
+    if uuid.is_null() {
+        return None;
+    }
+    // SAFETY: a UUID the call gave, released once read.
+    let UuidBytes(bytes) = unsafe { (a.uuid_bytes)(uuid) };
+    // SAFETY: as above.
+    unsafe { (a.cf_release)(uuid) };
+    let (high, low) = bytes.split_at(8);
+    Some(u64::from_ne_bytes(high.try_into().ok()?) ^ u64::from_ne_bytes(low.try_into().ok()?))
+}
+
+/// The newest event the system has numbered.
+fn current_id(a: &Api) -> u64 {
+    // SAFETY: a call that takes nothing.
+    unsafe { (a.current_id)() }
 }

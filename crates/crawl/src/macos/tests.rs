@@ -254,3 +254,56 @@ fn a_root_moved_away_is_lost() {
     let heard = heard_until(&watcher, |h| *h == Heard::Lost { scope: 3 });
     assert!(heard.contains(&Heard::Lost { scope: 3 }), "{heard:?}");
 }
+
+/// A root's position, said as it is watched, replays on a stream of its
+/// own what changed after it, then its end; a position of another event
+/// database is refused, as one ahead of every event is.
+#[test]
+fn a_position_replays_what_changed_after_it() {
+    use crate::Heard;
+    let s = Scratch::new("macos-replay");
+    s.dir("root/a");
+    let root = crate::canonical(s.join("root")).unwrap();
+    let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
+    watcher.watch_root(0, &root).unwrap();
+    let mut heard = Vec::new();
+    watcher.read(&mut heard).unwrap();
+    let Some(Heard::Position { at, .. }) = heard
+        .iter()
+        .find(|h| matches!(h, Heard::Position { scope: 0, .. }))
+        .cloned()
+    else {
+        panic!("no position said: {heard:?}");
+    };
+    drop(watcher);
+    s.file("root/a/made while none heard.txt");
+    // Given time to be numbered and kept by the system.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let watcher = std::sync::Arc::new(crate::Watcher::new(2, 0).unwrap());
+    let other = crate::Position {
+        database: at.database ^ 1,
+        id: at.id,
+    };
+    assert!(
+        !watcher.replay_root(0, &root, other).unwrap(),
+        "another database"
+    );
+    let ahead = crate::Position {
+        database: at.database,
+        id: u64::MAX - 1,
+    };
+    assert!(
+        !watcher.replay_root(0, &root, ahead).unwrap(),
+        "ahead of every event"
+    );
+    assert!(watcher.replay_root(0, &root, at).unwrap());
+    let heard = heard_until(&watcher, |h| *h == Heard::Replayed { scope: 0 });
+    assert!(
+        heard.contains(&Heard::Folder {
+            scope: 0,
+            rel: "a".into()
+        }),
+        "{heard:?}"
+    );
+    assert!(heard.contains(&Heard::Replayed { scope: 0 }), "{heard:?}");
+}
