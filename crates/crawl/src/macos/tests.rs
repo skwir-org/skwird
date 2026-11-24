@@ -407,12 +407,11 @@ fn a_change_through_the_data_volume_is_heard_as_users_name_it() {
 
 /// A change on a volume mounted below a root, itself a root, is that
 /// root's alone: the outer root's crawl stops at the volume, and an
-/// overflow there is not its own (as `/` above `/Users`), once the inner
-/// root is watched. Before, the volume's mount, which the system tells a
-/// while after it is attached, may reach the outer root's stream alone,
-/// and lower it, as a volume mounted below a root does: the stream's
-/// 50 ms latency gives it there, where 0.5 s held it until the stream was
-/// made again for both roots.
+/// overflow there is not its own (as `/` above `/Users`). The inner root
+/// is watched first: the volume's mount, which the system tells a while
+/// after it is attached, would lower the outer root on a stream of the
+/// outer root alone, as a volume mounted below a root does, and the
+/// stream's 50 ms latency gives it there.
 #[test]
 fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
     use crate::Heard;
@@ -425,8 +424,8 @@ fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
     let outer = crate::canonical(s.join("tree")).unwrap();
     let inner = crate::canonical(&at).unwrap();
     let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
-    watcher.watch_root(0, &outer).unwrap();
     watcher.watch_root(1, &inner).unwrap();
+    watcher.watch_root(0, &outer).unwrap();
     watcher.watch_cookies(&cookies).unwrap();
     std::fs::create_dir(inner.join("made")).unwrap();
     std::fs::write(outer.join("also.txt"), b"x").unwrap();
@@ -454,14 +453,7 @@ fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
             .any(|h| matches!(h, Heard::Folder { scope: 0, rel } if rel.starts_with("mounted"))),
         "{heard:?}"
     );
-    let both = heard
-        .iter()
-        .position(|h| matches!(h, Heard::Position { scope: 1, .. }))
-        .unwrap();
-    assert!(
-        !heard[both..].contains(&Heard::Overflow { scope: 0 }),
-        "{heard:?}"
-    );
+    assert!(!heard.contains(&Heard::Overflow { scope: 0 }), "{heard:?}");
 }
 
 /// A folder's extended ACL is read whole, its entries in the order the
