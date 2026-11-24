@@ -8,9 +8,9 @@
 //! `CoreFoundation`'s initializer costs every process that links it about a
 //! millisecond, and every `skwird` a client runs would pay it; the
 //! callback on a queue of user-initiated priority, which cut fsearch's
-//! drops under load; a latency of 0.5 s, `NoDefer` pushing a change alone
-//! through at once; a stream torn down stopped, invalidated while still
-//! scheduled, then released.
+//! drops under load; `NoDefer` pushing a change alone through at once; a
+//! stream torn down stopped, invalidated while still scheduled, then
+//! released. Its latency is not fsearch's 0.5 s but [`LATENCY`].
 //!
 //! A stream's paths are fixed when it is made: a root watched, or let go
 //! of, makes the stream again, from now on, the one before made to give
@@ -97,8 +97,17 @@ const WATCH_ROOT: u32 = 0x4;
 const SINCE_NOW: u64 = u64::MAX;
 /// `kCFStringEncodingUTF8`.
 const UTF8: u32 = 0x0800_0100;
-/// How long the system may hold an event to batch it with more.
-const LATENCY: f64 = 0.5;
+/// How long the system may hold an event to batch it with more: what a
+/// sync waits at most for its cookie, a change just before it having
+/// opened the latency (`NoDefer` gives the first change after a quiet
+/// one at once, and holds what follows). fsearch's 0.5 s made every such
+/// sync wait 0.5 s on the runners (2026-11-24). Nothing gives what the
+/// latency holds sooner: `FlushAsync` gave nothing of it there, nor
+/// `FlushSync` asked as the cookie was made, before the system had its
+/// event; 20 ms after, `FlushSync` gave it in 36 to 87 ms. At 50 ms, a
+/// stream heard without pause is given at most 20 batches a second, where
+/// Linux's reader reads every 10 ms; idle, none.
+const LATENCY: f64 = 0.05;
 /// The name a cookie's folder has, its number after it.
 const COOKIE: &str = "cookie-";
 
@@ -126,7 +135,6 @@ struct Api {
     ) -> *mut c_void,
     set_queue: unsafe extern "C" fn(*mut c_void, *mut c_void),
     start: unsafe extern "C" fn(*mut c_void) -> u8,
-    flush_async: unsafe extern "C" fn(*mut c_void) -> u64,
     stop: unsafe extern "C" fn(*mut c_void),
     invalidate: unsafe extern "C" fn(*mut c_void),
     release: unsafe extern "C" fn(*mut c_void),
@@ -190,7 +198,6 @@ fn load() -> Option<Api> {
             create: sym(cs, c"FSEventStreamCreate")?,
             set_queue: sym(cs, c"FSEventStreamSetDispatchQueue")?,
             start: sym(cs, c"FSEventStreamStart")?,
-            flush_async: sym(cs, c"FSEventStreamFlushAsync")?,
             stop: sym(cs, c"FSEventStreamStop")?,
             invalidate: sym(cs, c"FSEventStreamInvalidate")?,
             release: sym(cs, c"FSEventStreamRelease")?,
@@ -417,16 +424,6 @@ impl Watcher {
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         w.cookies = Some(dir);
         self.restart(&mut w)
-    }
-
-    /// What the stream holds back of its latency, given now: a cookie just
-    /// made is heard at once.
-    pub fn flush(&self) {
-        let w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
-        if let (Some(s), Ok(a)) = (&w.stream, api()) {
-            // SAFETY: a stream made and started here, alive under the lock.
-            unsafe { (a.flush_async)(s.stream) };
-        }
     }
 
     /// The stream made again for what is watched now, from now on; then the

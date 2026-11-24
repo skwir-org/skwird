@@ -228,7 +228,6 @@ fn the_stream_names_each_folder_changed_and_a_cookie_in_its_turn() {
     let cookie = crate::cookie_folder(&cookies, 7);
     std::fs::create_dir(&cookie).unwrap();
     std::fs::write(cookie.join("made"), b"").unwrap();
-    watcher.flush();
     let heard = heard_until(&watcher, |h| *h == Heard::Cookie(7));
     let changed = heard.iter().position(|h| {
         *h == Heard::Folder {
@@ -396,7 +395,6 @@ fn a_change_through_the_data_volume_is_heard_as_users_name_it() {
     let cookie = crate::cookie_folder(&cookies, 3);
     std::fs::create_dir(&cookie).unwrap();
     std::fs::write(cookie.join("made"), b"").unwrap();
-    watcher.flush();
     let heard = heard_until(&watcher, |h| *h == Heard::Cookie(3));
     assert!(
         heard.contains(&Heard::Folder {
@@ -430,7 +428,6 @@ fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
     let cookie = crate::cookie_folder(&cookies, 5);
     std::fs::create_dir(&cookie).unwrap();
     std::fs::write(cookie.join("made"), b"").unwrap();
-    watcher.flush();
     let heard = heard_until(&watcher, |h| *h == Heard::Cookie(5));
     assert!(
         heard.contains(&Heard::Folder {

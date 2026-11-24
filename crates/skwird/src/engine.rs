@@ -741,8 +741,6 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
-        #[cfg(target_os = "macos")]
-        flushing: None,
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
         done: Done {
@@ -929,10 +927,6 @@ struct Writing<'a> {
     next_cookie: u64,
     /// Syncs waiting for their cookie.
     waiting: Vec<Waiting>,
-    /// macOS: when the stream is next asked for what it holds back, and
-    /// the step after, while a sync waits ([`Writing::flush_again`]).
-    #[cfg(target_os = "macos")]
-    flushing: Option<(Instant, std::time::Duration)>,
     /// Syncs whose cookie was heard, to be served once what was heard is
     /// found ([`Writing::serve_heard`]): a client's ask, not charged.
     served: Vec<Waiting>,
@@ -1508,8 +1502,6 @@ impl Writing<'_> {
             .into_iter()
             .partition(|w| now >= w.until);
         self.waiting = waiting;
-        #[cfg(target_os = "macos")]
-        self.flush_again(now);
         for w in late {
             // A client's ask too, served by the check: not charged.
             let start = thread_time();
@@ -2196,12 +2188,6 @@ const HEARD_WHOLE: bool = cfg!(any(windows, target_os = "macos"));
 /// How long a sync waits for its cookie before the check serves it.
 const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// macOS: how long after a cookie is made the stream is first asked again
-/// for what it holds back, the step doubled after each
-/// ([`Writing::flush_again`]).
-#[cfg(target_os = "macos")]
-const FLUSH_FIRST: std::time::Duration = std::time::Duration::from_millis(2);
-
 /// A sync of a live folder, waiting for its cookie to be heard.
 struct Waiting {
     cookie: u64,
@@ -2246,17 +2232,7 @@ impl Writing<'_> {
     /// sync whose cookie is late.
     fn deadline(&self) -> Option<Instant> {
         let late = self.waiting.iter().map(|w| w.until).min();
-        #[cfg(target_os = "macos")]
-        let flush = self
-            .flushing
-            .filter(|_| !self.waiting.is_empty())
-            .map(|(at, _)| at);
-        #[cfg(not(target_os = "macos"))]
-        let flush = None;
-        [self.gather.deadline(), late, flush]
-            .into_iter()
-            .flatten()
-            .min()
+        [self.gather.deadline(), late].into_iter().flatten().min()
     }
 
     /// Whether answers at `rel` below root `root` are live, and a sync of
@@ -2286,9 +2262,9 @@ impl Writing<'_> {
     /// A cookie made, its number given; none without a cookie folder. On
     /// macOS, whose events name a folder, not an entry, a cookie is a
     /// folder of its own with a file made in it, an event that names the
-    /// cookie; and the stream gives what it holds back at once, and again
-    /// while the sync waits (`Writing::flush_again`). One cookie serves
-    /// every root, all heard on one queue.
+    /// cookie, heard within the stream's latency (`skwird_crawl`'s
+    /// `LATENCY`, 50 ms). One cookie serves every root, all heard on one
+    /// queue.
     #[cfg(not(windows))]
     fn make_cookie(&mut self, _root: usize) -> Option<u64> {
         let dir = self.cookies.as_ref()?;
@@ -2304,43 +2280,12 @@ impl Writing<'_> {
         #[cfg(not(target_os = "macos"))]
         let made = std::fs::File::create(dir.join(format!("cookie-{n}"))).map(drop);
         match made {
-            Ok(()) => {
-                #[cfg(target_os = "macos")]
-                if let Some(w) = &self.watcher {
-                    w.flush();
-                    self.flushing = Some((Instant::now() + FLUSH_FIRST, FLUSH_FIRST));
-                }
-                Some(n)
-            }
+            Ok(()) => Some(n),
             Err(e) => {
                 log(&format!("a cookie cannot be made, so a sync checks: {e}"));
                 None
             }
         }
-    }
-
-    /// macOS: while a sync waits for its cookie, the stream asked again
-    /// for what it holds back, at [`FLUSH_FIRST`] after the cookie was made
-    /// and at twice the step before each time after. The flush asked as the
-    /// cookie is made may reach the system before the cookie's own event,
-    /// which then waits out the stream's latency (0.5 s): the runners'
-    /// syncs waited so, 0.51 s. Never while no sync waits: idle is idle.
-    #[cfg(target_os = "macos")]
-    fn flush_again(&mut self, now: Instant) {
-        if self.waiting.is_empty() {
-            self.flushing = None;
-            return;
-        }
-        let Some((at, step)) = self.flushing else {
-            return;
-        };
-        if now < at {
-            return;
-        }
-        if let Some(w) = &self.watcher {
-            w.flush();
-        }
-        self.flushing = Some((now + step * 2, step * 2));
     }
 
     fn forget_cookie(&self, n: u64) {

@@ -341,9 +341,9 @@ fn a_change_is_answered_live_without_a_sync() {
 /// A sync is a barrier: its cookie, made in the roots' stream, is heard
 /// after a change made just before it, and the sync answers live with the
 /// change, well before it would give up on the cookie (2 s) and check.
-/// Nor does it wait out the stream's latency (0.5 s), the change just
-/// before it having opened one: the stream is asked again for what it
-/// holds back while the sync waits. The runners' syncs waited 0.51 s.
+/// Nor does it wait more than the stream's latency (50 ms), the change
+/// just before it having opened one: at fsearch's 0.5 s, the runners'
+/// syncs waited 0.51 s.
 #[test]
 fn a_sync_is_a_barrier() {
     let mut env = Env::new("mac-barrier");

@@ -302,13 +302,16 @@ concerned, until that subtree is read again.
   - **One stream** (`FSEvents`) hears every root and the cookies' folder,
     so that a cookie is heard in its turn after every root's changes,
     and a sync of any root is a barrier. An event names a folder, not an
-    entry: a cookie is a folder of its own, a file made in it. The stream
-    is asked for what it holds back (`FSEventStreamFlushAsync`) as the
-    cookie is made, and again while the sync waits, 2 ms after, then at
-    twice the step before each time (4, 8, 16 ms…). The first flush may
-    reach the system before the cookie's event: a change just before the
-    sync had opened the stream's latency (0.5 s), and the runners' syncs
-    waited it out, 0.51 s (2026-11-24).
+    entry: a cookie is a folder of its own, a file made in it. A sync
+    waits for its cookie at most the stream's latency, a change just
+    before it having opened one (`NoDefer` gives the first change after a
+    quiet one at once, and holds what follows): 50 ms. fsearch's 0.5 s
+    made every such sync on the runners wait 0.51 s (2026-11-24), and
+    nothing gives what the latency holds sooner: a probe there found
+    `FlushAsync` gave none of it, nor `FlushSync` asked as the cookie was
+    made, before the system had its event; asked 20 ms after, it gave it
+    in 36 to 87 ms. At 50 ms, a stream heard without pause is given at
+    most 20 batches a second, where Linux's reader reads every 10 ms.
   - **A stream is never made from a past event for the roots:** a
     stream that replays history gives what is new before what it
     replays (a cookie before a change made ahead of it, as the first
@@ -328,8 +331,10 @@ concerned, until that subtree is read again.
     than need be, to narrow once a Mac measures how often they come.
 - **The barrier** makes "live" mean up to now. The client asks for a
   sync. skwird creates a cookie file in a folder of its own that shares
-  the notification queue, and answers once it hears it. Where the
-  system has a flush (`FSEventStreamFlushSync`), that is used instead.
+  the notification queue, and answers once it hears it. On Windows,
+  whose roots are each heard on a queue of their own, the cookie is no
+  file: it is asked of the root's own reader, which says it in its turn
+  (open question 2).
   Watchman and git's fsmonitor daemon work the same way. A rename the
   client just made is then in the answer. Where nothing watches the
   root (a user's engine before phase 2, or a folder beyond its
@@ -2104,9 +2109,11 @@ ADR-053, 074, 075):
    3, step 3): a group has one queue for all its marks, so a cookie made
    on any filesystem marked comes after every event queued before it, on
    any other; a cookie on ext4 came after a change made just before on
-   a btrfs. FSEvents flushes instead (`FSEventStreamFlushSync`), and a
-   cookie is still made in the stream. Answered for Windows on 2026-11-24:
-   a cookie of no file, asked of each root's own thread, below.
+   a btrfs. On macOS, a cookie is made in the roots' stream, its wait
+   bounded by the stream's latency (50 ms): no flush gives what the
+   latency holds sooner (decision 2, as built on macOS). Answered for
+   Windows on 2026-11-24: a cookie of no file, asked of each root's own
+   thread, below.
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
    - which folders a user's engine watches on Windows: every root,
