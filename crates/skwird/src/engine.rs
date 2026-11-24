@@ -268,15 +268,17 @@ pub enum Command {
         remove: Vec<PathBuf>,
         reply: Sender<skwird_protocol::Watching>,
     },
-    /// A client's removable volumes to keep, forget and release
-    /// (`crate::volumes`): answered what it keeps after, and what is
-    /// mounted, or why not.
+    /// A client's removable volumes to keep, forget and release, by
+    /// identity or by mount point (`crate::volumes`): answered what it
+    /// keeps after, and what is mounted, with the reads of those let go of
+    /// still to end; or why not.
     Volumes {
         client: String,
         keep: Vec<String>,
         forget: Vec<String>,
         release: Vec<String>,
-        reply: Sender<Result<skwird_protocol::Volumes, String>>,
+        release_at: Vec<PathBuf>,
+        reply: Sender<Result<Released, String>>,
     },
     /// The mount table changed ([`crate::live::listen`]); on Windows, a
     /// volume arrived or went (`crate::serve::volumes_changed`).
@@ -768,6 +770,7 @@ pub fn writer(
             registered(&config.dirs, crate::volumes::FILE)
         }),
         volume_roots: HashMap::new(),
+        let_go: Vec::new(),
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
         done: Done {
@@ -958,6 +961,9 @@ struct Writing<'a> {
     volumes: crate::volumes::State,
     /// The kept volumes that are roots, by identity.
     volume_roots: HashMap<String, VolumeRoot>,
+    /// The reads of the kept volumes let go of since a `volumes` was
+    /// asked, to end before it is answered.
+    let_go: Vec<Arc<crate::volumes::Reading>>,
     /// Syncs whose cookie was heard, to be served once what was heard is
     /// found ([`Writing::serve_heard`]): a client's ask, not charged.
     served: Vec<Waiting>,
@@ -1185,9 +1191,11 @@ impl Writing<'_> {
                 keep,
                 forget,
                 release,
+                release_at,
                 reply,
             } => {
-                let _ = reply.send(self.volumes_asked(&client, &keep, &forget, &release));
+                let answered = self.volumes_asked(&client, &keep, &forget, (&release, &release_at));
+                let _ = reply.send(answered);
             }
             Command::Watch {
                 client,
@@ -2076,6 +2084,7 @@ impl Writing<'_> {
                         root: i,
                         at: at.clone(),
                         cancel: Cancel::default(),
+                        reading: Arc::default(),
                     },
                 );
                 log(&format!(
@@ -2095,6 +2104,7 @@ impl Writing<'_> {
         };
         let i = v.root;
         v.cancel.cancel();
+        self.let_go.push(Arc::clone(&v.reading));
         // Heard whole where roots are; on Linux, the watches of the folders
         // clients keep live there go with the scopes, and a watch holds no
         // mount.
@@ -2122,16 +2132,17 @@ impl Writing<'_> {
     }
 
     /// A client's `volumes`: `forget` taken back, a volume no client keeps
-    /// let go of and its index removed; `keep` kept; `release` let be
-    /// until it is seen unmounted, or a while; then followed again, and the
-    /// client answered.
+    /// let go of and its index removed; `keep` kept; `release`, and every
+    /// kept volume mounted at or below `release_at`, let be until it is
+    /// seen unmounted, or a while; then followed again, and the client
+    /// answered, with the reads of what was let go of still to end.
     fn volumes_asked(
         &mut self,
         client: &str,
         keep: &[String],
         forget: &[String],
-        release: &[String],
-    ) -> Result<skwird_protocol::Volumes, String> {
+        (release, release_at): (&[String], &[PathBuf]),
+    ) -> Result<Released, String> {
         if self.config.system {
             return Err("the system service keeps no removable volume".into());
         }
@@ -2148,18 +2159,37 @@ impl Writing<'_> {
             }
         }
         let until = Instant::now() + crate::volumes::RELEASED_FOR;
-        for id in release {
-            self.volumes.released.insert(id.clone(), until);
+        let below = |at: &Path| release_at.iter().any(|p| at.starts_with(p));
+        let at_points: Vec<String> = self
+            .volumes
+            .seen
+            .iter()
+            .filter(|s| below(&s.point))
+            .filter_map(|s| s.id.clone())
+            .chain(
+                self.volume_roots
+                    .iter()
+                    .filter(|(_, v)| below(&v.at))
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect();
+        for id in release.iter().chain(&at_points) {
+            if crate::volumes::is_kept(&self.volumes.kept, id) {
+                self.volumes.released.insert(id.clone(), until);
+            }
         }
         self.volumes_followed();
-        Ok(crate::volumes::answer(
-            &self.volumes.kept,
-            client,
-            &self.volumes.seen,
-            &self.volumes.plan,
-            &self.volumes.released,
-            Instant::now(),
-        ))
+        Ok(Released {
+            volumes: crate::volumes::answer(
+                &self.volumes.kept,
+                client,
+                &self.volumes.seen,
+                &self.volumes.plan,
+                &self.volumes.released,
+                Instant::now(),
+            ),
+            reading: std::mem::take(&mut self.let_go),
+        })
     }
 
     /// Root `i`'s tree watched again where its watch ended (Windows): since
@@ -2379,12 +2409,21 @@ const HEARD_WHOLE: bool = cfg!(any(windows, target_os = "macos"));
 /// How long a sync waits for its cookie before the check serves it.
 const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// A kept volume that is a root: its number, its mount point, and what
-/// cancels its reading, its own.
+/// A kept volume that is a root: its number, its mount point, what
+/// cancels its reading, its own, and its reads in progress.
 struct VolumeRoot {
     root: usize,
     at: PathBuf,
     cancel: Cancel,
+    reading: Arc<crate::volumes::Reading>,
+}
+
+/// A client's `volumes` answered: what it keeps after and what is
+/// mounted, and the reads of the volumes let go of, which a release waits
+/// to end before it is answered.
+pub struct Released {
+    pub volumes: skwird_protocol::Volumes,
+    pub reading: Vec<Arc<crate::volumes::Reading>>,
 }
 
 /// A sync of a live folder, waiting for its cookie to be heard.
@@ -2711,12 +2750,13 @@ impl Writing<'_> {
                 (
                     crate::volumes::index_dir(&self.config.dirs, id),
                     v.cancel.clone(),
+                    v.reading.begin(),
                 )
             });
         let paced = volume.is_some();
-        let (dir, own_cancel) = match volume {
-            Some((dir, cancel)) => (dir, Some(cancel)),
-            None => (index_dir(&self.config.dirs, &path), None),
+        let (dir, own_cancel, read) = match volume {
+            Some((dir, cancel, read)) => (dir, Some(cancel), Some(read)),
+            None => (index_dir(&self.config.dirs, &path), None, None),
         };
         self.opening.insert(
             i,
@@ -2743,8 +2783,21 @@ impl Writing<'_> {
         #[cfg(not(any(windows, target_os = "macos")))]
         let resumed = false;
         crate::serve::named("skwird-open", move || {
+            // A read of a kept volume, begun before this thread was made,
+            // ended as it returns.
+            let _read = read;
             if paced {
                 pause(crate::volumes::PAUSE, &cancel);
+                // Released meanwhile: nothing of it is opened.
+                if cancel.is_cancelled() {
+                    let _ = sender.send(Command::Opened {
+                        root: i,
+                        keeper: None,
+                        built: false,
+                        current: false,
+                    });
+                    return;
+                }
             }
             let (mut keeper, built) =
                 open_one(&config, &shared, i, &path, &dir, &ex, &opts, &cancel);

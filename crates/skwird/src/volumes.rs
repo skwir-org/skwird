@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,46 @@ pub const RELEASED_FOR: Duration = Duration::from_secs(60);
 /// How long after a kept volume is seen mounted it is first read: the copy
 /// the user plugged it in for comes first.
 pub const PAUSE: Duration = Duration::from_secs(3);
+
+/// How long a release waits for the reads of a volume to end before it is
+/// answered all the same.
+pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The reads in progress on a kept volume, which a release waits to end
+/// before it is answered: the client unmounts it as it is.
+#[derive(Debug, Default)]
+pub struct Reading {
+    count: Mutex<usize>,
+    ended: Condvar,
+}
+
+/// A read in progress, ended when dropped.
+pub struct Read(Arc<Reading>);
+
+impl Reading {
+    /// A read begun: begun by the writer before the thread that reads is
+    /// made, so that a release met before the thread runs waits for it.
+    pub fn begin(self: &Arc<Self>) -> Read {
+        *self.count.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        Read(Arc::clone(self))
+    }
+
+    /// Whether every read ended within `bound`.
+    pub fn ended_within(&self, bound: Duration) -> bool {
+        let count = self.count.lock().unwrap_or_else(PoisonError::into_inner);
+        self.ended
+            .wait_timeout_while(count, bound, |n| *n > 0)
+            .is_ok_and(|(n, _)| *n == 0)
+    }
+}
+
+impl Drop for Read {
+    fn drop(&mut self) {
+        let mut count = self.0.count.lock().unwrap_or_else(PoisonError::into_inner);
+        *count = count.saturating_sub(1);
+        self.0.ended.notify_all();
+    }
+}
 
 /// A removable volume a client keeps, kept across restarts in the state
 /// folder, as exclusions are.

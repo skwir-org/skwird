@@ -338,7 +338,10 @@ pub enum Ask {
     /// ([`SeenVolume::id`]), never derived by the client: kept for this
     /// client across restarts, as its exclusions are; answered
     /// [`Answer::Volumes`]. An engine that says no [`VOLUMES`] refuses it.
-    /// `forget` applies first, then `keep`, then `release`.
+    /// `forget` applies first, then `keep`, then `release` and
+    /// `release_at`. A release is answered once nothing of the volume is
+    /// held: every read of it ended, the reads of its first build among
+    /// them, or after a few seconds, should one not end.
     Volumes {
         /// To index from now on, once its user said yes for it: a root
         /// whenever it is mounted.
@@ -353,6 +356,14 @@ pub enum Ask {
         /// the unmount have been refused.
         #[serde(default)]
         release: Vec<String>,
+        /// About to be ejected, named by where it is mounted, as a client
+        /// that ejects any volume knows it: every kept volume mounted at or
+        /// below each is released, as `release` releases it. The engine
+        /// reads nothing past a mount below its roots (a hole, `mount`): a
+        /// volume mounted there, kept or not, holds nothing of the
+        /// engine's.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        release_at: Vec<WirePath>,
     },
 }
 

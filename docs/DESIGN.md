@@ -2077,7 +2077,18 @@ ADR-053, 074, 075):
       `background`), which a check of it keeps.
     - **Released** until it is seen unmounted, or 60 s have passed: what
       reads it is cancelled (its own cancel, apart from the engine's), its
-      keeper let go of.
+      keeper let go of. A release is answered once nothing of it is held
+      (asked by skwir's session, for its eject, ADR-149): each read of a
+      kept volume is counted from the writer's turn that starts it, before
+      its thread is made, and a release waits for the count to fall to
+      none, 5 s at most; one met in the pause before its first build opens
+      nothing of it.
+    - **Released by its mount point too** (`release_at`, asked by skwir's
+      session the same day): a client that ejects any volume knows where
+      it is mounted, never its identity. Every kept volume mounted at or
+      below each point is released. Nothing else needs it: the engine
+      reads nothing past a mount below its roots (a hole, `mount`), so a
+      volume mounted there, kept or not, holds nothing of the engine's.
     - **Proven in the root tests' machine** on a USB stick QEMU emulates,
       plugged in through its monitor: seen by its FAT serial and label,
       kept and answered, released and unmounted with nothing held on it,

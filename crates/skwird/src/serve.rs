@@ -731,6 +731,7 @@ fn volumes(
         keep,
         forget,
         release,
+        release_at,
     } = ask
     else {
         return failure("internal", "not a volumes");
@@ -744,10 +745,22 @@ fn volumes(
         keep,
         forget,
         release,
+        release_at: release_at.iter().map(WirePath::to_path).collect(),
         reply,
     });
     match asked.ok().and_then(|()| answer.recv().ok()) {
-        Some(Ok(mut volumes)) => {
+        Some(Ok(crate::engine::Released {
+            mut volumes,
+            reading,
+        })) => {
+            // Nothing of a volume let go of held when the client is
+            // answered: it unmounts the volume as it is.
+            let until = Instant::now() + crate::volumes::RELEASE_WAIT;
+            for r in &reading {
+                if !r.ended_within(until.saturating_duration_since(Instant::now())) {
+                    log("a volume released is still read: answered all the same");
+                }
+            }
             for v in &mut volumes.kept {
                 if v.standing == wire::Standing::Indexed
                     && let Some(at) = &v.at

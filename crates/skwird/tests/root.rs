@@ -943,10 +943,12 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) {
 
 /// A removable volume a client keeps (DESIGN, Protocol, "Removable
 /// volumes"): the machine's USB stick, seen by its FAT serial with its
-/// label, not indexed until kept; kept, a root at its mount point, its
-/// names answered; released, a root no more, and unmounted with nothing
-/// held on it; mounted again, a root again, its index read back; forgotten,
-/// its index removed.
+/// label, not indexed until kept. Kept, then released by its mount point
+/// before its first build, as skwir's eject does: answered once nothing of
+/// it is held, and unmounted at once. Mounted again, a root at its mount
+/// point, its names answered; released by its identity, unmounted; mounted
+/// again, a root again, its index read back; forgotten, its index
+/// removed.
 #[test]
 fn a_kept_stick_is_a_root_while_it_is_mounted() {
     let Some(m) = machine() else { return };
@@ -980,11 +982,21 @@ fn a_kept_stick_is_a_root_while_it_is_mounted() {
     let id = seen.id.clone().expect("a FAT serial");
     assert!(id.len() == 9 && id.as_bytes()[4] == b'-', "{id}");
     assert!(answered(&mut c, &named(&at.0, "on the stick")).is_empty());
-    // Kept: a root at its mount point, read a few seconds after.
+    // Kept: a root at its mount point, read a few seconds after; released
+    // by where it is mounted before then, and unmounted as soon as that is
+    // answered.
     let v = c.volumes(&[&id], &[], &[]).unwrap();
     assert_eq!(v.kept.len(), 1, "{v:?}");
     assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Indexed);
     assert_eq!(v.kept[0].at, Some(WirePath::of(&at.0)));
+    let v = c.release_at(&[&at.0]).unwrap();
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Released);
+    run("umount", &[at.0.as_os_str()]);
+    wait_for(10, "the stick away", || {
+        c.volumes(&[], &[], &[])
+            .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
+    });
+    run("mount", &[device, at.0.as_os_str()]);
     let photo = at.join("photos/on the stick.jpg");
     wait_for(30, "the kept stick indexed", || {
         answered(&mut c, &named(&at.0, "on the stick")) == [photo.clone()].into()

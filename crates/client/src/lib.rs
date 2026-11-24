@@ -769,6 +769,25 @@ impl Client {
             keep: owned(keep),
             forget: owned(forget),
             release: owned(release),
+            release_at: Vec::new(),
+        })?;
+        match self.answer(id)? {
+            Answer::Volumes(volumes) => Ok(volumes),
+            _ => Err(Error::Unexpected),
+        }
+    }
+
+    /// Release every kept volume mounted at or below each of `points`,
+    /// before the client asks for their unmount, as an eject of any volume
+    /// knows it, by where it is mounted: answered once nothing of them is
+    /// held, or after a few seconds. The volumes this client keeps after,
+    /// and those mounted.
+    pub fn release_at(&mut self, points: &[&Path]) -> Result<protocol::Volumes, Error> {
+        let id = self.ask(Ask::Volumes {
+            keep: Vec::new(),
+            forget: Vec::new(),
+            release: Vec::new(),
+            release_at: points.iter().map(|p| WirePath::of(p)).collect(),
         })?;
         match self.answer(id)? {
             Answer::Volumes(volumes) => Ok(volumes),
