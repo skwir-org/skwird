@@ -565,6 +565,9 @@ fn hello(reader: &mut BufReader<Stream>, writer: &Writer, shared: &Shared) -> Op
                 },
                 engine: concat!("skwird ", env!("CARGO_PKG_VERSION")).to_owned(),
                 roots: shared.roots().iter().map(|r| WirePath::of(r)).collect(),
+                // None yet: names in both Unicode forms come with 0.2
+                // (`names-both-forms`, DESIGN, open question 5).
+                features: Vec::new(),
             };
             send(writer, id, Answer::Hello(welcome)).then_some(hello.client)
         }

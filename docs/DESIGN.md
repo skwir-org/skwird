@@ -1874,7 +1874,15 @@ ADR-053, 074, 075):
   an id.
 - **Messages:**
   - `hello`: the protocol versions spoken, the scope, a summary of
-    coverage;
+    coverage, and `features` (agreed with skwir's session on
+    2026-11-24): what the engine does beyond the version it speaks, a
+    word each, absent or empty meaning none. A client takes a word it
+    does not know as absent; an engine says none it does not do. 0.1.0
+    says none. 0.2's would say `names-both-forms` (open question 5) and
+    `volumes` (open question 8). A client that matches a term in both
+    Unicode forms asks no engine without `names-both-forms` for a term
+    whose two forms differ, and walks instead: an index matching one
+    form alone would hold less than the client matches;
   - `coverage {root}`;
   - `sync {root}`: the barrier, or the check where nothing watches the
     root (2);
