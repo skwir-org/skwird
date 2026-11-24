@@ -741,6 +741,8 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
+        #[cfg(target_os = "macos")]
+        flushing: None,
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
         done: Done {
@@ -927,6 +929,10 @@ struct Writing<'a> {
     next_cookie: u64,
     /// Syncs waiting for their cookie.
     waiting: Vec<Waiting>,
+    /// macOS: when the stream is next asked for what it holds back, and
+    /// the step after, while a sync waits ([`Writing::flush_again`]).
+    #[cfg(target_os = "macos")]
+    flushing: Option<(Instant, std::time::Duration)>,
     /// Syncs whose cookie was heard, to be served once what was heard is
     /// found ([`Writing::serve_heard`]): a client's ask, not charged.
     served: Vec<Waiting>,
@@ -1106,7 +1112,7 @@ impl Writing<'_> {
                 // Live, a barrier serves: a cookie heard in its turn says
                 // every change before it was heard (DESIGN 2). Otherwise,
                 // the check.
-                if live && let Some(cookie) = self.make_cookie() {
+                if live && let Some(cookie) = self.make_cookie(root) {
                     self.shared.readers.wake();
                     self.waiting.push(Waiting {
                         cookie,
@@ -1502,6 +1508,8 @@ impl Writing<'_> {
             .into_iter()
             .partition(|w| now >= w.until);
         self.waiting = waiting;
+        #[cfg(target_os = "macos")]
+        self.flush_again(now);
         for w in late {
             // A client's ask too, served by the check: not charged.
             let start = thread_time();
@@ -2188,6 +2196,12 @@ const HEARD_WHOLE: bool = cfg!(any(windows, target_os = "macos"));
 /// How long a sync waits for its cookie before the check serves it.
 const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// macOS: how long after a cookie is made the stream is first asked again
+/// for what it holds back, the step doubled after each
+/// ([`Writing::flush_again`]).
+#[cfg(target_os = "macos")]
+const FLUSH_FIRST: std::time::Duration = std::time::Duration::from_millis(2);
+
 /// A sync of a live folder, waiting for its cookie to be heard.
 struct Waiting {
     cookie: u64,
@@ -2199,6 +2213,14 @@ struct Waiting {
 /// The folder the engine makes its cookies in, in its runtime folder,
 /// watched by `watcher` (open question 1): the same queue as every
 /// folder it watches. Cookies left by an engine before are let go of.
+/// None on Windows, whose cookies are no files (`Writing::make_cookie`).
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)] // The same call as elsewhere.
+fn cookie_folder(_: &Dirs, _: &Watcher) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
 fn cookie_folder(dirs: &Dirs, watcher: &Watcher) -> Option<PathBuf> {
     let dir = dirs.runtime.join("cookies");
     let made = crate::dirs::make_private(&dir).and_then(|()| {
@@ -2224,31 +2246,51 @@ impl Writing<'_> {
     /// sync whose cookie is late.
     fn deadline(&self) -> Option<Instant> {
         let late = self.waiting.iter().map(|w| w.until).min();
-        [self.gather.deadline(), late].into_iter().flatten().min()
+        #[cfg(target_os = "macos")]
+        let flush = self
+            .flushing
+            .filter(|_| !self.waiting.is_empty())
+            .map(|(at, _)| at);
+        #[cfg(not(target_os = "macos"))]
+        let flush = None;
+        [self.gather.deadline(), late, flush]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether answers at `rel` below root `root` are live, and a sync of
     /// it a barrier: a cookie is heard in its turn after its changes.
-    /// On Windows each root is heard on a stream of its own, and a cookie
-    /// in the stream of the root holding the cookies' folder alone: a sync
-    /// of another root checks, live or not.
     fn is_live(&self, root: usize, rel: &Path) -> bool {
-        let Some(keeper) = self.keepers[root].as_ref() else {
-            return false;
-        };
-        let barrier = !cfg!(windows)
-            || self
-                .cookies
-                .as_ref()
-                .is_some_and(|c| c.starts_with(keeper.root().path()));
-        barrier && keeper.index().live_since(rel).is_some()
+        self.keepers[root]
+            .as_ref()
+            .is_some_and(|k| k.index().live_since(rel).is_some())
+    }
+
+    /// A cookie for a sync of root `root` (Windows): asked of the root's
+    /// own thread, which says it once every change below the root before it
+    /// is read (`Watcher::cookie`), with no file made. Each root is heard
+    /// on a stream of its own there: a file made in the cookies' folder was
+    /// heard by the root holding it alone, and a sync of any other root
+    /// checked it whole. None where the root's thread cannot say one.
+    #[cfg(windows)]
+    fn make_cookie(&mut self, root: usize) -> Option<u64> {
+        let n = self.next_cookie;
+        let asked = self.watcher.as_ref().is_some_and(|w| w.cookie(root, n));
+        if asked {
+            self.next_cookie += 1;
+        }
+        asked.then_some(n)
     }
 
     /// A cookie made, its number given; none without a cookie folder. On
     /// macOS, whose events name a folder, not an entry, a cookie is a
     /// folder of its own with a file made in it, an event that names the
-    /// cookie; and the stream gives what it holds back at once.
-    fn make_cookie(&mut self) -> Option<u64> {
+    /// cookie; and the stream gives what it holds back at once, and again
+    /// while the sync waits (`Writing::flush_again`). One cookie serves
+    /// every root, all heard on one queue.
+    #[cfg(not(windows))]
+    fn make_cookie(&mut self, _root: usize) -> Option<u64> {
         let dir = self.cookies.as_ref()?;
         let n = self.next_cookie;
         self.next_cookie += 1;
@@ -2266,6 +2308,7 @@ impl Writing<'_> {
                 #[cfg(target_os = "macos")]
                 if let Some(w) = &self.watcher {
                     w.flush();
+                    self.flushing = Some((Instant::now() + FLUSH_FIRST, FLUSH_FIRST));
                 }
                 Some(n)
             }
@@ -2274,6 +2317,30 @@ impl Writing<'_> {
                 None
             }
         }
+    }
+
+    /// macOS: while a sync waits for its cookie, the stream asked again
+    /// for what it holds back, at [`FLUSH_FIRST`] after the cookie was made
+    /// and at twice the step before each time after. The flush asked as the
+    /// cookie is made may reach the system before the cookie's own event,
+    /// which then waits out the stream's latency (0.5 s): the runners'
+    /// syncs waited so, 0.51 s. Never while no sync waits: idle is idle.
+    #[cfg(target_os = "macos")]
+    fn flush_again(&mut self, now: Instant) {
+        if self.waiting.is_empty() {
+            self.flushing = None;
+            return;
+        }
+        let Some((at, step)) = self.flushing else {
+            return;
+        };
+        if now < at {
+            return;
+        }
+        if let Some(w) = &self.watcher {
+            w.flush();
+        }
+        self.flushing = Some((now + step * 2, step * 2));
     }
 
     fn forget_cookie(&self, n: u64) {

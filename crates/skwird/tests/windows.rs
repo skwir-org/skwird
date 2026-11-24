@@ -430,41 +430,61 @@ fn a_change_is_answered_live_without_a_sync() {
     assert!(is_live(&mut c, &home));
 }
 
-/// A sync of a root holding the cookies' folder is a barrier: it answers
-/// live, with a change made just before it, every event before its
-/// cookie read. A sync of a root that does not hold it checks, as no
-/// cookie can be heard in its turn there, and never waits for one.
+/// A sync of any root is a barrier: its cookie, asked of the root's own
+/// thread, is said after a change made just before it, and the sync
+/// answers live with the change, at once, whether the root holds the
+/// engine's folders or not. A cookie made as a file was heard by the root
+/// holding the cookies' folder alone, and a sync of any other root checked
+/// it whole. Under Wine, which tells changes late, a sync checks, and
+/// answers the change all the same.
 #[test]
-fn a_sync_is_a_barrier_where_the_cookies_are_heard() {
-    let mut env = Env::new("win-barrier").local_in_home();
-    tree(&env);
-    env.engine(30);
-    let mut c = env.client();
-    let home = env.home();
-    wait_for(10, "live", || is_live(&mut c, &home));
-    let made = env.s.file(home.join(r"docs\d07\just before.txt"));
-    let synced = c.sync(&home).unwrap();
-    assert!(matches!(synced.names, Proof::Live(_)), "{synced:?}");
-    assert!(answered(&mut c, &named(&home, "just before")).contains(&made));
-    drop(c);
-    drop(env);
-
-    let mut env = Env::new("win-checked");
-    tree(&env);
-    env.engine(30);
-    let mut c = env.client();
-    let home = env.home();
-    wait_for(10, "live", || is_live(&mut c, &home));
-    let made = env.s.file(home.join(r"docs\d07\just before.txt"));
-    let begun = Instant::now();
-    let synced = c.sync(&home).unwrap();
-    assert!(begun.elapsed() < Duration::from_secs(5), "it waited");
-    // Checked, then live as it was.
-    assert!(
-        matches!(synced.names, Proof::Live(_) | Proof::Checked(_)),
-        "{synced:?}"
-    );
-    assert!(answered(&mut c, &named(&home, "just before")).contains(&made));
+fn a_sync_of_any_root_is_a_barrier() {
+    let wine = skwird_testkit::under_wine();
+    for (name, holds_its_folders) in [("win-barrier", true), ("win-barrier-apart", false)] {
+        let mut env = Env::new(name);
+        if holds_its_folders {
+            env = env.local_in_home();
+        }
+        tree(&env);
+        env.engine(30);
+        let mut c = env.client();
+        let home = env.home();
+        wait_for(10, "live", || is_live(&mut c, &home));
+        let mut took = Vec::new();
+        for i in 0..10 {
+            let made = env
+                .s
+                .file(home.join(format!(r"docs\d07\just before {i}.txt")));
+            let begun = Instant::now();
+            let synced = c.sync(&home).unwrap();
+            took.push(begun.elapsed());
+            if wine {
+                // Checked, then live as it was.
+                assert!(
+                    matches!(synced.names, Proof::Live(_) | Proof::Checked(_)),
+                    "{name}: {synced:?}"
+                );
+            } else {
+                assert!(matches!(synced.names, Proof::Live(_)), "{name}: {synced:?}");
+            }
+            assert!(
+                answered(&mut c, &named(&home, &format!("just before {i}"))).contains(&made),
+                "{name}, sync {i}"
+            );
+        }
+        took.sort();
+        // Well before it would give up on its cookie (2 s) and check.
+        assert!(
+            took[took.len() - 1] < Duration::from_millis(1500),
+            "{name}: {took:?}"
+        );
+        if !wine {
+            assert!(
+                took[took.len() / 2] < Duration::from_millis(200),
+                "{name}: {took:?}"
+            );
+        }
+    }
 }
 
 /// skwirdw, skwird with no console window, serves as skwird does, and

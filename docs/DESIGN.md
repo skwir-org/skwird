@@ -302,7 +302,13 @@ concerned, until that subtree is read again.
   - **One stream** (`FSEvents`) hears every root and the cookies' folder,
     so that a cookie is heard in its turn after every root's changes,
     and a sync of any root is a barrier. An event names a folder, not an
-    entry: a cookie is a folder of its own, a file made in it.
+    entry: a cookie is a folder of its own, a file made in it. The stream
+    is asked for what it holds back (`FSEventStreamFlushAsync`) as the
+    cookie is made, and again while the sync waits, 2 ms after, then at
+    twice the step before each time (4, 8, 16 ms…). The first flush may
+    reach the system before the cookie's event: a change just before the
+    sync had opened the stream's latency (0.5 s), and the runners' syncs
+    waited it out, 0.51 s (2026-11-24).
   - **A stream is never made from a past event for the roots:** a
     stream that replays history gives what is new before what it
     replays (a cookie before a change made ahead of it, as the first
@@ -2098,17 +2104,30 @@ ADR-053, 074, 075):
    3, step 3): a group has one queue for all its marks, so a cookie made
    on any filesystem marked comes after every event queued before it, on
    any other; a cookie on ext4 came after a change made just before on
-   a btrfs. Open for the change journal. FSEvents flushes
-   instead (`FSEventStreamFlushSync`).
+   a btrfs. FSEvents flushes instead (`FSEventStreamFlushSync`), and a
+   cookie is still made in the stream. Answered for Windows on 2026-11-24:
+   a cookie of no file, asked of each root's own thread, below.
 2. **Engines and watches:**
    - how a user's engine and the system service share work;
    - which folders a user's engine watches on Windows: every root,
      whole (phase 4, step 5). `ReadDirectoryChangesW` watches a tree
      with one handle, and takes no watch for each folder, so there is
-     no share to fill, and a registration changes nothing. A sync is a
-     barrier for the root holding the engine's cookies' folder (the
-     home, by default) alone: each root is heard on a stream of its own,
-     which Windows orders with no other's. A sync of another root checks.
+     no share to fill, and a registration changes nothing. Each root is
+     heard on a stream of its own, which Windows orders with no other's:
+     a cookie made as a file was heard by the root holding the engine's
+     cookies' folder alone, and a sync of any other root checked it whole
+     (0.9 s for the runners' tree of 69,333 folders, 2026-11-24). Since
+     then a sync of any root is a barrier, its cookie no file: asked of
+     the root's own thread, which says it after every change before it.
+     - **A directory watch:** NTFS tells a change to the read pending as
+       the change is made, before the call that made it returns, and the
+       thread waits for its read ahead of its cookies: what was told before
+       a cookie was asked is read first. Wine tells a change later, its
+       server reading the host's inotify: no cookie is asked there, and a
+       sync checks.
+     - **A journal followed** (the system service): the cookie is said
+       once the journal is read past the record that was its next as the
+       cookie was asked. Every change made before was written before it.
    - which folders a user's engine watches on Linux: answered on
      2026-11-21, for phase 2. Those its clients register (`watch`), kept
      per client across restarts as exclusions are, within a quarter of

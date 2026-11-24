@@ -12,9 +12,17 @@
 //!   proves anything until a check.
 //! - A watch that ends (its folder removed, its volume taken away) says so
 //!   ([`Heard::Lost`]): the root is no longer heard.
-//! - A cookie made in the folder given ([`Watcher::watch_cookies`]) is said
-//!   as one ([`Heard::Cookie`]), in its turn after every change below that
-//!   root before it: the sync barrier of a root holding that folder.
+//! - A cookie asked of a root ([`Watcher::cookie`]) is said by the root's
+//!   own thread ([`Heard::Cookie`]), in its turn after every change below
+//!   it before it: the sync barrier of every root, with no file made. NTFS
+//!   tells a change to the read pending as the change is made, before the
+//!   call that made it returns, and the read is done before the thread
+//!   sees a cookie asked (it waits for its read ahead of its cookies). A
+//!   cookie made as a file proved a single root, the one holding the
+//!   cookies' folder: a sync of any other root checked it whole, 0.9 s for
+//!   the runners' tree of 69,333 folders. Wine tells a change later, its
+//!   server reading the host's inotify: no cookie is asked there
+//!   ([`told_in_turn`]), and a sync checks.
 //!
 //! The root's folder is held open while it is watched, which AGENTS.md's
 //! "Hold nothing of a filesystem between reads" forbids elsewhere: opened
@@ -31,15 +39,14 @@ use windows_sys::Win32::Foundation::{
     ERROR_NOTIFY_ENUM_DIR, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ACTION_ADDED, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
-    FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION,
-    FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-    FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    ReadDirectoryChangesW,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+    FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME,
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
+    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects,
 };
 
 use super::{Handle, verbatim};
@@ -57,8 +64,8 @@ pub enum Heard {
     Overflow { scope: usize },
     /// Root `scope`'s watch ended: it is no longer heard.
     Lost { scope: usize },
-    /// The cookie of this number was made ([`Watcher::watch_cookies`]):
-    /// every change below its root heard before it has been read.
+    /// The cookie of this number, asked of its root ([`Watcher::cookie`]):
+    /// every change below that root before it has been read.
     Cookie(u64),
     /// Root `scope`'s journal was read up to `at`: every change before it
     /// has been heard, and once applied, the next start may resume from
@@ -73,10 +80,61 @@ pub enum Heard {
     Replayed { scope: usize },
 }
 
-/// A root watched: its thread, and the event that stops it.
+/// A root watched: its thread, the event that stops it, and the cookies
+/// asked of it.
 struct Watched {
     stop: Arc<Handle>,
+    asked: Arc<Asked>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The cookies asked of a root's thread and not said yet, and the event
+/// that tells it so.
+struct Asked {
+    event: Handle,
+    numbers: Mutex<Vec<u64>>,
+}
+
+impl Asked {
+    fn new() -> std::io::Result<Asked> {
+        Ok(Asked {
+            event: event()?,
+            numbers: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn ask(&self, n: u64) {
+        let mut numbers = self.numbers.lock().unwrap_or_else(PoisonError::into_inner);
+        numbers.push(n);
+        // SAFETY: an event of ours, alive while `self` is.
+        unsafe { SetEvent(self.event.0) };
+    }
+
+    /// The cookies asked since the last time, the event reset with them.
+    fn take(&self) -> Vec<u64> {
+        let mut numbers = self.numbers.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: an event of ours, alive while `self` is.
+        unsafe { ResetEvent(self.event.0) };
+        std::mem::take(&mut *numbers)
+    }
+}
+
+/// Whether the system tells a change to a read pending as it is made,
+/// before the call that made it returns: Windows does, Wine does not (its
+/// server reads the host's inotify, a while after), and a cookie asked of
+/// a root's thread proves nothing there.
+pub fn told_in_turn() -> bool {
+    static TOLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TOLD.get_or_init(|| {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        let ntdll: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+        // SAFETY: a NUL-terminated name; ntdll is loaded in every process.
+        let module = unsafe { GetModuleHandleW(ntdll.as_ptr()) };
+        // SAFETY: a NUL-terminated name, of a module loaded; nothing is
+        // called.
+        module.is_null()
+            || unsafe { GetProcAddress(module, c"wine_get_version".as_ptr().cast()) }.is_none()
+    })
 }
 
 impl Drop for Watched {
@@ -112,8 +170,6 @@ pub struct Watcher {
     generation: u64,
     queue: Arc<Queue>,
     roots: Mutex<HashMap<usize, Watched>>,
-    /// The folder cookies are made in, as the system names it.
-    cookies: Arc<Mutex<Option<PathBuf>>>,
     /// The journal reads done, every followed root's ([`Watcher::follow_root`]).
     journal_reads: Arc<AtomicU64>,
 }
@@ -136,7 +192,6 @@ impl Watcher {
             generation,
             queue: Arc::default(),
             roots: Mutex::new(HashMap::new()),
-            cookies: Arc::new(Mutex::new(None)),
             journal_reads: Arc::default(),
         })
     }
@@ -184,19 +239,17 @@ impl Watcher {
             return Err(std::io::Error::last_os_error());
         }
         let stop = Arc::new(event()?);
-        let (queue, cookies, root) = (
-            Arc::clone(&self.queue),
-            Arc::clone(&self.cookies),
-            path.to_path_buf(),
-        );
+        let asked = Arc::new(Asked::new()?);
+        let queue = Arc::clone(&self.queue);
         let thread = {
-            let stop = Arc::clone(&stop);
+            let (stop, asked) = (Arc::clone(&stop), Arc::clone(&asked));
             std::thread::Builder::new()
                 .name("skwird-heard".into())
-                .spawn(move || listen(reading, &stop, scope, &root, &queue, &cookies))?
+                .spawn(move || listen(reading, &stop, &asked, scope, &queue))?
         };
         let watched = Watched {
             stop,
+            asked,
             thread: Some(thread),
         };
         self.roots
@@ -240,18 +293,18 @@ impl Watcher {
         }
         self.queue.push(said);
         let stop = Arc::new(event()?);
-        let (queue, cookies, reads, root) = (
+        let asked = Arc::new(Asked::new()?);
+        let (queue, reads, root) = (
             Arc::clone(&self.queue),
-            Arc::clone(&self.cookies),
             Arc::clone(&self.journal_reads),
             path.to_path_buf(),
         );
         let thread = {
-            let stop = Arc::clone(&stop);
+            let (stop, asked) = (Arc::clone(&stop), Arc::clone(&asked));
             std::thread::Builder::new()
                 .name("skwird-journal".into())
                 .spawn(move || {
-                    follow::run(follower, &stop, scope, &root, &queue, &cookies, &reads);
+                    follow::run(follower, &stop, &asked, scope, &root, &queue, &reads);
                 })?
         };
         self.roots
@@ -261,6 +314,7 @@ impl Watcher {
                 scope,
                 Watched {
                     stop,
+                    asked,
                     thread: Some(thread),
                 },
             );
@@ -283,13 +337,20 @@ impl Watcher {
         drop(gone);
     }
 
-    /// Say a file named `cookie-N` made in `dir` as [`Heard::Cookie`]: in
-    /// its turn, for the root holding `dir`.
-    // The same call as on Linux, which may fail.
-    #[allow(clippy::unnecessary_wraps)]
-    pub fn watch_cookies(&self, dir: &Path) -> std::io::Result<()> {
-        *self.cookies.lock().unwrap_or_else(PoisonError::into_inner) = Some(dir.to_path_buf());
-        Ok(())
+    /// Ask root `scope`'s thread for the cookie `n`, said
+    /// ([`Heard::Cookie`]) once every change below the root before it is
+    /// read: whether it was asked. Not where the root is not heard, nor
+    /// where the system tells changes late ([`told_in_turn`]).
+    pub fn cookie(&self, scope: usize, n: u64) -> bool {
+        if !told_in_turn() {
+            return false;
+        }
+        let roots = self.roots.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(watched) = roots.get(&scope) else {
+            return false;
+        };
+        watched.asked.ask(n);
+        true
     }
 
     /// Wait until something was heard, then take it all.
@@ -388,20 +449,22 @@ impl Reading {
 }
 
 /// Read what changes below the root `reading` reads, its first read
-/// asked, until `stop` is set, each batch put in `queue`.
-fn listen(
-    mut reading: Reading,
-    stop: &Handle,
-    scope: usize,
-    root: &Path,
-    queue: &Queue,
-    cookies: &Mutex<Option<PathBuf>>,
-) {
+/// asked, until `stop` is set, each batch put in `queue`; each cookie
+/// `asked` said once what came before it is.
+fn listen(mut reading: Reading, stop: &Handle, asked: &Asked, scope: usize, queue: &Queue) {
     let dir = reading.dir.0;
     loop {
-        let waits: [HANDLE; 2] = [stop.0, reading.done.0];
-        // SAFETY: two events of ours, alive for the wait.
-        let woken = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, INFINITE) };
+        // The read before the cookies: a wait gives the first of those
+        // set, so a change told before a cookie was asked is read first.
+        let waits: [HANDLE; 3] = [stop.0, reading.done.0, asked.event.0];
+        // SAFETY: three events of ours, alive for the wait.
+        let woken = unsafe { WaitForMultipleObjects(3, waits.as_ptr(), 0, INFINITE) };
+        if woken == WAIT_OBJECT_0 + 2 {
+            // Every change told before this was read: the read pending was
+            // given none.
+            queue.push(asked.take().into_iter().map(Heard::Cookie));
+            continue;
+        }
         let mut moved = 0u32;
         if woken == WAIT_OBJECT_0 {
             // SAFETY: the pending call's own structure, alive until its
@@ -425,12 +488,8 @@ fn listen(
             // More than the buffer held: dropped.
             queue.push([Heard::Overflow { scope }]);
         } else {
-            let cookies = cookies
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
             let bytes = &super::bytemuck(&reading.buffer)[..moved as usize];
-            queue.push(records(bytes, scope, root, cookies.as_deref()));
+            queue.push(records(bytes, scope));
         }
         if !reading.ask() {
             queue.push([Heard::Lost { scope }]);
@@ -440,8 +499,8 @@ fn listen(
 }
 
 /// The changes a buffer of `FILE_NOTIFY_INFORMATION` records says, each
-/// below root `scope` at `root`; a cookie made in `cookies` said as one.
-fn records(bytes: &[u8], scope: usize, root: &Path, cookies: Option<&Path>) -> Vec<Heard> {
+/// below root `scope`.
+fn records(bytes: &[u8], scope: usize) -> Vec<Heard> {
     let mut out = Vec::new();
     let mut at = 0;
     loop {
@@ -450,7 +509,7 @@ fn records(bytes: &[u8], scope: usize, root: &Path, cookies: Option<&Path>) -> V
                 .get(at + o..at + o + 4)
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         };
-        let (Some(next), Some(action), Some(len)) = (u32_at(0), u32_at(4), u32_at(8)) else {
+        let (Some(next), Some(len)) = (u32_at(0), u32_at(8)) else {
             break;
         };
         let Some(name) = bytes.get(at + 12..at + 12 + len as usize) else {
@@ -461,20 +520,7 @@ fn records(bytes: &[u8], scope: usize, root: &Path, cookies: Option<&Path>) -> V
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
         let rel = PathBuf::from(OsString::from_wide(&wide));
-        let cookie = (action == FILE_ACTION_ADDED)
-            .then(|| cookies.filter(|c| root.join(&rel).parent() == Some(c)))
-            .flatten()
-            .and_then(|_| {
-                rel.file_name()?
-                    .to_str()?
-                    .strip_prefix("cookie-")?
-                    .parse::<u64>()
-                    .ok()
-            });
-        out.push(match cookie {
-            Some(n) => Heard::Cookie(n),
-            None => Heard::Entry { scope, rel },
-        });
+        out.push(Heard::Entry { scope, rel });
         if next == 0 {
             break;
         }
@@ -507,47 +553,29 @@ mod tests {
         out
     }
 
-    /// Each record names an entry below its root; a cookie made in the
-    /// cookies' folder is said as one; a cookie's name anywhere else, or
-    /// removed, is an entry.
+    /// Each record names an entry below its root, whatever it did to it,
+    /// a name like a cookie's file among them: a cookie is no file.
     #[test]
-    fn records_say_entries_and_cookies() {
-        let root = Path::new(r"C:\Users\someone");
-        let cookies = root.join(r"AppData\Local\skwird\run\cookies");
+    fn records_say_entries() {
         let mut bytes = record(1, r"docs\notes.txt", false);
-        bytes.extend(record(
-            1,
-            r"AppData\Local\skwird\run\cookies\cookie-7",
-            false,
-        ));
-        bytes.extend(record(
-            2,
-            r"AppData\Local\skwird\run\cookies\cookie-6",
-            false,
-        ));
+        bytes.extend(record(2, r"docs\old.txt", false));
         bytes.extend(record(1, r"docs\cookie-8", true));
-        let heard = records(&bytes, 3, root, Some(&cookies));
+        let heard = records(&bytes, 3);
+        let entry = |rel: &str| Heard::Entry {
+            scope: 3,
+            rel: PathBuf::from(rel),
+        };
         assert_eq!(
             heard,
             vec![
-                Heard::Entry {
-                    scope: 3,
-                    rel: PathBuf::from(r"docs\notes.txt")
-                },
-                Heard::Cookie(7),
-                Heard::Entry {
-                    scope: 3,
-                    rel: PathBuf::from(r"AppData\Local\skwird\run\cookies\cookie-6")
-                },
-                Heard::Entry {
-                    scope: 3,
-                    rel: PathBuf::from(r"docs\cookie-8")
-                },
+                entry(r"docs\notes.txt"),
+                entry(r"docs\old.txt"),
+                entry(r"docs\cookie-8")
             ]
         );
         // Cut short: what is whole is said, nothing past the buffer read.
         let cut = &bytes[..bytes.len() - 6];
-        assert_eq!(records(cut, 3, root, Some(&cookies)).len(), 3);
+        assert_eq!(records(cut, 3).len(), 2);
     }
 }
 
@@ -632,5 +660,77 @@ mod watched {
             return;
         }
         heard_until(&w, |all| all.contains(&Heard::Lost { scope: 2 }));
+    }
+}
+
+#[cfg(test)]
+mod cookies {
+    use std::time::{Duration, Instant};
+
+    use skwird_testkit::Scratch;
+
+    use super::*;
+
+    /// A cookie asked of a root is said after every change made below it
+    /// before it was asked, with no file made for it: round after round,
+    /// each right after its changes, a change told and read in the same
+    /// instant as its cookie is asked. None is asked of a root not heard,
+    /// nor under Wine, which tells changes late.
+    #[test]
+    fn a_cookie_is_said_after_every_change_before_it() {
+        let s = Scratch::new("watch-cookie");
+        s.dir(r"root\a");
+        let w = Arc::new(Watcher::new(1, 0).unwrap());
+        w.watch_root(5, &s.join("root")).unwrap();
+        assert!(!w.cookie(6, 0), "asked of a root not heard");
+        if skwird_testkit::under_wine() {
+            assert!(!w.cookie(5, 0), "asked under Wine");
+            return;
+        }
+        let (send, got) = std::sync::mpsc::channel();
+        {
+            let w = Arc::clone(&w);
+            std::thread::spawn(move || {
+                loop {
+                    let mut heard = Vec::new();
+                    if w.read(&mut heard).is_err() || send.send(heard).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        let mut all = Vec::new();
+        for round in 0..100u64 {
+            let made: Vec<PathBuf> = (0..10)
+                .map(|i| {
+                    let rel = format!(r"a\round {round} file {i}.txt");
+                    s.file(format!(r"root\{rel}"));
+                    PathBuf::from(rel)
+                })
+                .collect();
+            assert!(w.cookie(5, round));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !all.contains(&Heard::Cookie(round)) {
+                let left = deadline.saturating_duration_since(Instant::now());
+                assert!(!left.is_zero(), "round {round}: no cookie");
+                if let Ok(heard) = got.recv_timeout(left) {
+                    all.extend(heard);
+                }
+            }
+            let at = all.iter().position(|h| *h == Heard::Cookie(round)).unwrap();
+            for rel in &made {
+                assert!(
+                    all[..at]
+                        .iter()
+                        .any(|h| matches!(h, Heard::Entry { scope: 5, rel: r } if r == rel)),
+                    "round {round}: {rel:?} not heard before its cookie"
+                );
+            }
+            assert!(
+                !all.iter()
+                    .any(|h| matches!(h, Heard::Overflow { .. } | Heard::Lost { .. })),
+                "round {round}: {all:?}"
+            );
+        }
     }
 }

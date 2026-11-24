@@ -48,8 +48,8 @@ fn entries(heard: &[Heard], scope: usize) -> Vec<PathBuf> {
 
 /// A root followed through its volume's journal hears what is made,
 /// written, renamed and removed below it, by its path below the root, and
-/// nothing from outside it; a cookie made in the cookies' folder after
-/// those changes is said after them. On a test machine's NTFS volume alone
+/// nothing from outside it; a cookie asked after those changes is said
+/// after them, with no file made for it. On a test machine's NTFS volume alone
 /// (`skwird_testkit::ntfs`), as only an administrator may read a journal.
 #[test]
 fn a_journal_says_what_changed_below_its_root() {
@@ -62,11 +62,9 @@ fn a_journal_says_what_changed_below_its_root() {
     assert!(crate::read_anything(), "an elevated administrator holds it");
     let s = Scratch::under(&volume, "follow");
     let root = s.dir("tree");
-    let cookies = s.dir(r"tree\cookies");
     s.file(r"tree\gone.txt");
     let w = Arc::new(Watcher::new(1, 0).unwrap());
     w.follow_root(4, &root).unwrap();
-    w.watch_cookies(&cookies).unwrap();
     let heard = hearing(&w);
     s.write(r"tree\a b\été 2026.txt", b"x");
     s.write("outside.txt", b"x");
@@ -76,7 +74,7 @@ fn a_journal_says_what_changed_below_its_root() {
     )
     .unwrap();
     std::fs::remove_file(s.join(r"tree\gone.txt")).unwrap();
-    s.file(r"tree\cookies\cookie-9");
+    assert!(w.cookie(4, 9));
     let all = until(&heard, |h| h.contains(&Heard::Cookie(9)));
     let said = entries(&all, 4);
     for rel in [r"a b", r"a b\été 2026.txt", r"a b\renamed.txt", "gone.txt"] {

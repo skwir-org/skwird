@@ -341,6 +341,9 @@ fn a_change_is_answered_live_without_a_sync() {
 /// A sync is a barrier: its cookie, made in the roots' stream, is heard
 /// after a change made just before it, and the sync answers live with the
 /// change, well before it would give up on the cookie (2 s) and check.
+/// Nor does it wait out the stream's latency (0.5 s), the change just
+/// before it having opened one: the stream is asked again for what it
+/// holds back while the sync waits. The runners' syncs waited 0.51 s.
 #[test]
 fn a_sync_is_a_barrier() {
     let mut env = Env::new("mac-barrier");
@@ -349,23 +352,29 @@ fn a_sync_is_a_barrier() {
     let mut c = env.client();
     let home = env.home();
     wait_for(&env, 10, "live", || is_live(&mut c, &home));
-    for i in 0..5 {
+    let mut took = Vec::new();
+    for i in 0..10 {
         let made = env
             .s
             .file(home.join(format!("docs/d07/just before {i}.txt")));
         let begun = Instant::now();
         let synced = c.sync(&home).unwrap();
-        let took = begun.elapsed();
+        took.push(begun.elapsed());
         assert!(matches!(synced.names, Proof::Live(_)), "{synced:?}");
-        assert!(
-            took < Duration::from_millis(1500),
-            "its cookie came late: {took:?}"
-        );
         assert!(
             answered(&mut c, &named(&home, &format!("just before {i}"))).contains(&made),
             "sync {i}"
         );
     }
+    took.sort();
+    assert!(
+        took[took.len() - 1] < Duration::from_millis(1500),
+        "a cookie came late: {took:?}"
+    );
+    assert!(
+        took[took.len() / 2] < Duration::from_millis(250),
+        "the syncs waited out the latency: {took:?}"
+    );
 }
 
 /// A root moved away is no longer heard (its stream says so): its answers

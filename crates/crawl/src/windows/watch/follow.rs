@@ -15,7 +15,9 @@
 //!   not the root's. A folder gone since is not asked; its removal is a
 //!   record in its own folder. A folder that cannot be opened for another
 //!   reason is a doubt, and the root is checked (rule 1).
-//! - **A cookie** made in the cookies' folder is said as one, in its turn.
+//! - **A cookie** asked of the root ([`super::Watcher::cookie`]) is said
+//!   once the journal is read past the record that was its next as the
+//!   cookie was asked: every change made before was written before it.
 //! - **What ends it:** a journal that dropped records past the position
 //!   (`ERROR_JOURNAL_ENTRY_DELETED`) is an overflow, and reading goes on
 //!   from its next record; a journal deleted, or made again, ends the
@@ -29,7 +31,6 @@ use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use windows_sys::Win32::Foundation::{
     ERROR_DELETE_PENDING, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING,
@@ -47,7 +48,7 @@ use windows_sys::Win32::System::IO::{
 use windows_sys::Win32::System::Ioctl::{FSCTL_READ_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0};
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
 
-use super::{Heard, Queue, event};
+use super::{Asked, Heard, Queue, event};
 use crate::windows::journal::{self, Position, Volume};
 use crate::windows::security::open_by_id;
 use crate::windows::{Handle, plain, verbatim};
@@ -56,9 +57,6 @@ use crate::windows::{Handle, plain, verbatim};
 /// by 8 MiB, as `fsutil` suggests for a volume of a few hundred thousand
 /// files; NTFS drops its oldest records past it.
 pub const JOURNAL_SIZE: (u64, u64) = (32 << 20, 8 << 20);
-
-/// `USN_REASON_FILE_CREATE`: the record of an entry made.
-const FILE_CREATE: u32 = 0x0000_0100;
 
 /// A root's volume, its journal read from a position.
 pub(super) struct Follower {
@@ -222,20 +220,13 @@ impl Follower {
     }
 
     /// What a batch of records says of root `scope` at `root`: each entry
-    /// once, in the order heard; a cookie made in `cookies` in its turn; an
-    /// overflow at the end if a folder could not be told.
-    fn heard(
-        &self,
-        records: &[journal::Record],
-        scope: usize,
-        root: &Path,
-        cookies: Option<&Path>,
-    ) -> Vec<Heard> {
+    /// once, in the order heard; an overflow at the end if a folder could
+    /// not be told.
+    fn heard(&self, records: &[journal::Record], scope: usize, root: &Path) -> Vec<Heard> {
         let mut folders: HashMap<u128, Option<PathBuf>> = HashMap::new();
         let mut said = HashSet::new();
         let mut out = Vec::new();
         let mut doubt = false;
-        let mut cookies_said = HashSet::new();
         for r in records {
             // The volume's metadata (`$Extend` and the like), below no root:
             // never opened, as a folder of it is no one's to open.
@@ -256,19 +247,7 @@ impl Follower {
             let Ok(below) = folder.strip_prefix(root) else {
                 continue;
             };
-            let name = crate::wtf8::path(&r.name);
-            let cookie = (r.reason & FILE_CREATE != 0 && cookies == Some(folder.as_path()))
-                .then(|| name.to_str()?.strip_prefix("cookie-")?.parse::<u64>().ok())
-                .flatten();
-            // Said once a batch: NTFS writes a record for each change to a
-            // file made, each saying it was made, until it is closed.
-            if let Some(n) = cookie {
-                if cookies_said.insert(n) {
-                    out.push(Heard::Cookie(n));
-                }
-                continue;
-            }
-            let rel = below.join(&name);
+            let rel = below.join(crate::wtf8::path(&r.name));
             if said.insert(rel.clone()) {
                 out.push(Heard::Entry { scope, rel });
             }
@@ -288,21 +267,44 @@ fn is_metadata(id: u128) -> bool {
     number < 16 && number != 5
 }
 
+/// The cookies held until the journal is read up to the record each
+/// waits for, said once it is: in their turn, after what was read before.
+fn due(held: &mut Vec<(i64, u64)>, next: i64) -> Vec<Heard> {
+    let (due, waiting): (Vec<_>, Vec<_>) = held.drain(..).partition(|&(at, _)| next >= at);
+    *held = waiting;
+    due.into_iter().map(|(_, n)| Heard::Cookie(n)).collect()
+}
+
 /// Read root `scope`'s journal, its first read asked, until `stop` is
-/// set, each batch put in `queue`; each read counted in `reads`.
+/// set, each batch put in `queue`; each read counted in `reads`; each
+/// cookie `asked` said once the journal is read up to the record that was
+/// its next as it was asked.
 pub(super) fn run(
     mut f: Follower,
     stop: &Handle,
+    asked: &Asked,
     scope: usize,
     root: &Path,
     queue: &Queue,
-    cookies: &Mutex<Option<PathBuf>>,
     reads: &AtomicU64,
 ) {
+    let mut held: Vec<(i64, u64)> = Vec::new();
     loop {
-        let waits: [HANDLE; 2] = [stop.0, f.done.0];
-        // SAFETY: two events of ours, alive for the wait.
-        let woken = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, INFINITE) };
+        let waits: [HANDLE; 3] = [stop.0, f.done.0, asked.event.0];
+        // SAFETY: three events of ours, alive for the wait.
+        let woken = unsafe { WaitForMultipleObjects(3, waits.as_ptr(), 0, INFINITE) };
+        if woken == WAIT_OBJECT_0 + 2 {
+            let numbers = asked.take();
+            // A journal that cannot be asked, or made again: the cookies
+            // are never said, and their syncs check once they are late.
+            if let Ok(j) = f.volume.journal()
+                && j.id == f.position.journal
+            {
+                held.extend(numbers.into_iter().map(|n| (j.next, n)));
+            }
+            queue.push(due(&mut held, f.position.next));
+            continue;
+        }
         let mut moved = 0u32;
         if woken == WAIT_OBJECT_0 {
             // SAFETY: the pending call's own structure, alive until its
@@ -334,16 +336,14 @@ pub(super) fn run(
                     return;
                 }
             }
+            queue.push(due(&mut held, f.position.next));
         } else {
             let bytes = &crate::windows::bytemuck(&f.buffer)[..moved as usize];
-            let cookies = cookies
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            let mut said = f.heard(&journal::records(bytes), scope, root, cookies.as_deref());
+            let mut said = f.heard(&journal::records(bytes), scope, root);
             if let Some(next) = journal::next_of(bytes) {
                 f.position.next = next;
             }
+            said.extend(due(&mut held, f.position.next));
             // After what it read, in the same turn: once that is applied, the
             // position holds it.
             said.push(Heard::Position {
