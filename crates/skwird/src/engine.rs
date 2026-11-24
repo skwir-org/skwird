@@ -2468,6 +2468,9 @@ impl Writing<'_> {
                 }
             }
             if opening.overflowed {
+                log(&format!(
+                    "root {root}: events dropped while it opened: not live until checked"
+                ));
                 keeper.overflowed();
                 self.gather.overflowed(Instant::now());
             }

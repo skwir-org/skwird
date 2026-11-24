@@ -13,8 +13,9 @@
 //! scheduled, then released.
 //!
 //! A stream's paths are fixed when it is made: a root watched, or let go
-//! of, makes the stream again, from the last event the one before gave
-//! (`sinceWhen`), so that nothing between the two is missed. Each stream
+//! of, makes the stream again, from now on, the one before made to give
+//! what it holds back (`FlushSync`) and stopped after, so that nothing
+//! between the two is missed. Each stream
 //! has its number: a cookie proves the queue read only from the current
 //! one, the only one that holds every root (DESIGN 2).
 
@@ -98,7 +99,7 @@ struct Api {
     stop: unsafe extern "C" fn(*mut c_void),
     invalidate: unsafe extern "C" fn(*mut c_void),
     release: unsafe extern "C" fn(*mut c_void),
-    current_id: unsafe extern "C" fn() -> u64,
+    flush_sync: unsafe extern "C" fn(*mut c_void),
     cf_release: unsafe extern "C" fn(*const c_void),
     string: unsafe extern "C" fn(*const c_void, *const libc::c_char, u32) -> *const c_void,
     array: unsafe extern "C" fn(
@@ -154,7 +155,7 @@ fn load() -> Option<Api> {
             stop: sym(cs, c"FSEventStreamStop")?,
             invalidate: sym(cs, c"FSEventStreamInvalidate")?,
             release: sym(cs, c"FSEventStreamRelease")?,
-            current_id: sym(cs, c"FSEventsGetCurrentEventId")?,
+            flush_sync: sym(cs, c"FSEventStreamFlushSync")?,
             cf_release: sym(cf, c"CFRelease")?,
             string: sym(cf, c"CFStringCreateWithCString")?,
             array: sym(cf, c"CFArrayCreate")?,
@@ -202,8 +203,6 @@ struct Shared {
     queue: Queue,
     /// The current stream's number.
     current: AtomicU64,
-    /// The last event the current stream gave: where the next starts.
-    last: AtomicU64,
 }
 
 /// What a stream's callback is given: its paths as they were when it was
@@ -325,24 +324,27 @@ impl Watcher {
         }
     }
 
-    /// The stream made again for what is watched now: from the last event
-    /// the one before gave, so that nothing between the two is missed
-    /// (what both give is read twice, which is never wrong); then the one
-    /// before stopped. None where nothing is watched.
+    /// The stream made again for what is watched now, from now on; then the
+    /// one before made to give what it holds back (`FlushSync`) and
+    /// stopped, so that nothing between the two is missed (what both give
+    /// is read twice, which is never wrong). Never from a past event: a
+    /// stream that replays history gives what is new before what it
+    /// replays, a cookie before a change made ahead of it, and folds a
+    /// subtree's changes into one to read whole, as the first runs found.
+    /// None where nothing is watched.
     fn restart(&self, w: &mut Watched) -> std::io::Result<()> {
         let a = api()?;
         let old = w.stream.take();
+        let flushed = |old: Option<Stream>| {
+            if let Some(old) = old {
+                // SAFETY: a stream made and started here, still scheduled.
+                unsafe { (a.flush_sync)(old.stream) };
+            }
+        };
         if w.roots.is_empty() {
+            flushed(old);
             return Ok(());
         }
-        let since = if old.is_some() {
-            self.shared.last.load(Ordering::Acquire)
-        } else {
-            // SAFETY: a call that takes nothing.
-            let now = unsafe { (a.current_id)() };
-            self.shared.last.store(now, Ordering::Release);
-            SINCE_NOW
-        };
         let number = self.shared.current.fetch_add(1, Ordering::AcqRel) + 1;
         let info = Box::new(Info {
             shared: Arc::clone(&self.shared),
@@ -352,12 +354,26 @@ impl Watcher {
         });
         let mut paths: Vec<CString> = Vec::new();
         for p in w.roots.iter().map(|(_, p)| p).chain(w.cookies.as_ref()) {
-            paths.push(CString::new(p.as_os_str().as_bytes())?);
+            match CString::new(p.as_os_str().as_bytes()) {
+                Ok(p) => paths.push(p),
+                Err(e) => {
+                    w.stream = old;
+                    return Err(e.into());
+                }
+            }
         }
-        let stream = make(a, info, &paths, since)?;
-        w.stream = Some(stream);
-        drop(old);
-        Ok(())
+        match make(a, info, &paths, SINCE_NOW) {
+            Ok(stream) => {
+                w.stream = Some(stream);
+                flushed(old);
+                Ok(())
+            }
+            // The one before kept: what it heard is heard still.
+            Err(e) => {
+                w.stream = old;
+                Err(e)
+            }
+        }
     }
 
     /// Wait until something was heard, then take it all.
@@ -494,30 +510,20 @@ extern "C" fn on_events(
     count: usize,
     paths: *mut c_void,
     flags: *const u32,
-    ids: *const u64,
+    _: *const u64,
 ) {
     // SAFETY: the info `make` gave the stream, alive while it calls.
     let info = unsafe { &*info.cast::<Info>() };
     let paths = paths.cast::<*const libc::c_char>();
     let mut heard = Vec::new();
-    let mut last = 0;
     for i in 0..count {
-        // SAFETY: the stream gives `count` paths, flags and ids, each path
+        // SAFETY: the stream gives `count` paths and flags, each path
         // NUL-terminated (no CFTypes asked).
-        let (path, flag, id) = unsafe {
-            (
-                CStr::from_ptr(*paths.add(i)).to_bytes(),
-                *flags.add(i),
-                *ids.add(i),
-            )
-        };
-        last = last.max(id);
+        let (path, flag) = unsafe { (CStr::from_ptr(*paths.add(i)).to_bytes(), *flags.add(i)) };
         said(info, path, flag, &mut heard);
     }
     let current = info.shared.current.load(Ordering::Acquire) == info.number;
-    if current {
-        info.shared.last.fetch_max(last, Ordering::AcqRel);
-    } else {
+    if !current {
         // An older stream's cookie proves nothing of the roots it did not
         // hold (DESIGN 2); its changes are read all the same.
         heard.retain(|h| !matches!(h, Heard::Cookie(_)));
