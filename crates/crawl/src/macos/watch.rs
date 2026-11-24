@@ -69,12 +69,14 @@ pub struct Position {
     pub id: u64,
 }
 
-/// A root heard: its scope, its path, and its volume's event database, if
-/// it has one (a volume whose events are not kept has none).
+/// A root heard: its scope, its path, its volume's device, and its
+/// volume's event database, if it has one (a volume whose events are not
+/// kept has none).
 #[derive(Clone, Debug)]
 struct Followed {
     scope: usize,
     path: PathBuf,
+    dev: u64,
     database: Option<u64>,
 }
 
@@ -246,11 +248,14 @@ struct Shared {
 }
 
 /// What a stream's callback is given: its paths as they were when it was
-/// made, and whether it replays a root's history.
+/// made, and whether it replays a root's history. A replay's stream is
+/// given the roots heard beside it too (`beside`), to tell which paths
+/// below its root are theirs.
 struct Info {
     shared: Arc<Shared>,
     number: u64,
     roots: Vec<Followed>,
+    beside: Vec<Followed>,
     cookies: Option<PathBuf>,
     replay: bool,
 }
@@ -334,12 +339,14 @@ impl Watcher {
     /// position said from there.
     pub fn watch_root(&self, scope: usize, path: &Path) -> std::io::Result<()> {
         let a = api()?;
-        let database = database_of(a, device_of(path)?);
+        let dev = device_of(path)?;
+        let database = database_of(a, dev);
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         w.roots.retain(|r| r.scope != scope);
         w.roots.push(Followed {
             scope,
             path: path.to_path_buf(),
+            dev,
             database,
         });
         self.restart(&mut w)
@@ -353,7 +360,8 @@ impl Watcher {
     /// or has been numbered afresh below it.
     pub fn replay_root(&self, scope: usize, path: &Path, from: Position) -> std::io::Result<bool> {
         let a = api()?;
-        let database = database_of(a, device_of(path)?);
+        let dev = device_of(path)?;
+        let database = database_of(a, dev);
         if database != Some(from.database) || from.id > current_id(a) {
             return Ok(false);
         }
@@ -365,8 +373,18 @@ impl Watcher {
             roots: vec![Followed {
                 scope,
                 path: path.to_path_buf(),
+                dev,
                 database,
             }],
+            beside: self
+                .watched
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .roots
+                .iter()
+                .filter(|r| r.scope != scope)
+                .cloned()
+                .collect(),
             cookies: None,
             replay: true,
         });
@@ -439,6 +457,7 @@ impl Watcher {
             shared: Arc::clone(&self.shared),
             number,
             roots: w.roots.clone(),
+            beside: Vec::new(),
             cookies: w.cookies.clone(),
             replay: false,
         });
@@ -712,6 +731,17 @@ fn said(info: &Info, path: &[u8], flag: u32, heard: &mut Vec<Heard>) {
     }
     for r in &info.roots {
         let scope = r.scope;
+        // Heard by the root of another volume below it alone: a crawl of
+        // this one stops at that volume, and an overflow there is not
+        // this root's (`/` above `/Users`, a firmlink of the Data volume).
+        let theirs = || {
+            info.roots.iter().chain(&info.beside).any(|o| {
+                o.dev != r.dev
+                    && o.path != r.path
+                    && o.path.starts_with(&r.path)
+                    && path.starts_with(&o.path)
+            })
+        };
         // A root's own folder moved or removed, or a volume gone at or
         // above it: no longer heard.
         if (flag & ROOT_CHANGED != 0 || flag & UNMOUNT != 0) && r.path.starts_with(path) {
@@ -721,6 +751,9 @@ fn said(info: &Info, path: &[u8], flag: u32, heard: &mut Vec<Heard>) {
         let Ok(rel) = path.strip_prefix(&r.path) else {
             continue;
         };
+        if theirs() {
+            continue;
+        }
         if flag & (MUST_SCAN_SUBDIRS | MOUNT | UNMOUNT) != 0 {
             heard.push(Heard::Overflow { scope });
         } else {

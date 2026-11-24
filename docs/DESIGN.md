@@ -116,6 +116,40 @@ several roots (`/` above `/home`) is answered from each, every root
 below at its place: its mount hole gone, the proof the weaker of all;
 one the asker may not reach, or not read yet, a hole there.
 
+**The system service on macOS** (the user's choices, 2026-11-24, phase
+5, step 7):
+- **Its roots:** `/`, the system's volume, read-only since macOS 10.15;
+  and each folder of the Data volume, where the users' files are, at the
+  place in `/` the system links it to (a firmlink: `/Users`,
+  `/Applications`, `/Library`, `/private`, `/usr/local` and the others
+  `/usr/share/firmlinks` lists, read again with the mount table). The
+  mount table shows each firmlink as a mount of its folder of the Data
+  volume, as Linux's shows a bind mount of a folder: a crawl of `/` stops
+  there, as at `/home`, and a query at `/` is answered from each root
+  below it. Every path is as users and clients name it. The other way,
+  the Data volume as the root, would have turned every path a client
+  names (`/Users/...`) to the volume's own (`/System/Volumes/Data/...`)
+  and back. The Data volume's own mount and the system's other volumes
+  below `/System/Volumes` are left out: the first would index every file
+  twice. A volume below `/Volumes`, where macOS mounts every disk but the
+  system's, is a root only when named (`--root`): without asking
+  DiskArbitration, a disk inside the machine and one plugged in look
+  alike (open question 8).
+- **Who it runs as:** root, a LaunchDaemon (`skwird service add`). macOS
+  has no capabilities: only root reads every user's folders. The folders
+  macOS asks consent for need Full Disk Access too, which a daemon cannot
+  ask for: the user gives it in System Settings. Without it they are not
+  covered, as denied, as a user's engine leaves them (4). macOS ties the
+  grant to the program's signature: a build no developer signed loses it
+  at each upgrade, and a lasting one needs a Developer ID.
+- **Its folders,** macOS' own: its index in `/Library/Caches/skwird`, a
+  cache's place, which backups may leave out; its state and
+  configuration in `/Library/Application Support/skwird` (`state`,
+  `config`), as Windows keeps them in its program data; its log in
+  `/Library/Logs/skwird`, where Console shows it; its socket in
+  `/var/run/skwird` (Protocol). Linux's `/var/cache` and `/var/lib` are
+  not macOS'.
+
 **Each root is opened on its own** (2026-11-22, from the user's
 machine with a spinning disk mounted in the home). The writer opened
 every root in turn, and listened, answered syncs and took registrations
@@ -656,9 +690,31 @@ same rules, judged as Windows judges them:
 - **Who asks:** the socket's peer (`LOCAL_PEERCRED`), its user and its
   groups, 16 at most, which grants a peer in more less, never more.
 - **A folder with an ACL** (macOS keeps extended ones) says so as it is
-  read where ACLs are asked (`ATTR_CMN_EXTENDED_SECURITY`), and is not
-  known to an asker, never judged by its mode alone, until macOS' ACLs
-  are read and judged. Folders above a root are not known either.
+  read where ACLs are asked (`ATTR_CMN_EXTENDED_SECURITY`), and is never
+  judged by its mode alone.
+- **It is judged by its ACL** (the user's choice, 2026-11-24, phase 5,
+  step 7). Left not known, it would leave every home to root alone:
+  macOS gives each home folder, and the Desktop, Documents, Downloads,
+  Library and the others in it, an entry ("everyone deny delete").
+  Judged as the kernel judges (kauth):
+  - its entries in order, each deciding only the rights it names: a
+    deny of a right asked refuses it, an allow grants what it names;
+  - what no entry decided is left to the mode;
+  - an entry that applies to what is made inside alone
+    (`only_inherit`) is passed over.
+
+  Listing a folder asks `list` and `search` of it, and reaching it
+  `search` of each folder above. An entry that names neither is passed
+  over with no lookup: the default ones name `delete` alone. One that
+  names them is matched against the asker by the system's membership
+  calls (`mbr_uid_to_uuid`, `mbr_check_membership`, `everyone` and
+  nested groups among them), as the kernel matches it; skwird keeps no
+  copy of who is in which group. On a Mac joined to a network
+  directory, the system may ask the directory, as it does at each of
+  that user's opens: skwird connects to nothing itself (10). An ACL that
+  cannot be read leaves its folder not known. A folder above a root
+  (`/` above `/Users`) is judged by its mode, stat-ed as the service
+  starts; one with an ACL, which is not read there, is not known.
 - **Consent.** Without Full Disk Access, the folders macOS asks consent
   for below the home (the user's documents, other programs', the
   cloud's) are never opened: opening one asks the user and waits for

@@ -313,7 +313,7 @@ fn serve(args: &Args) -> Result<(), String> {
         (true, true) => {
             let table = skwird_crawl::mounts::Table::read()
                 .map_err(|e| format!("cannot read the mount table: {e}"))?;
-            skwird::system::roots(&table, skwird::system::removable)
+            skwird::system::found(&table)
         }
     };
     // Named as clients name them (on Windows, plainly).

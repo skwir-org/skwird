@@ -2,7 +2,9 @@
 //! user's choice of 2026-11-22): every local filesystem that stores files,
 //! except the Nix store. Never the kernel's own filesystems or memory
 //! ones, network mounts, nor removable volumes (open question 8); and in
-//! every home, the default exclusions (decision 5).
+//! every home, the default exclusions (decision 5). On macOS, `/` and the
+//! Data volume's folders where the system links them (firmlinks): every
+//! path as users name it (phase 5, step 7).
 
 use std::path::{Path, PathBuf};
 
@@ -51,6 +53,47 @@ pub fn roots(table: &Table, removable: impl Fn(&Mount) -> bool) -> Vec<PathBuf> 
         kept.push(m);
     }
     let mut roots: Vec<PathBuf> = kept.iter().map(|m| m.point.clone()).collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// The system service's roots as `table` finds them (DESIGN 1): on
+/// Linux, the mounts that store files ([`roots`]); on macOS, `/` and the
+/// Data volume's folders where the system links them ([`firmlinked`]).
+pub fn found(table: &Table) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return firmlinked(table);
+    #[cfg(not(target_os = "macos"))]
+    roots(table, removable)
+}
+
+/// The roots of the system service on macOS (DESIGN 1, phase 5, step
+/// 7): `/`, the system's volume, and each folder of the Data volume at
+/// the place in `/` the system links it to (a firmlink, which the table
+/// shows as a mount of its folder: `/Users`, `/Applications`), so that
+/// every path is as users name it. The Data volume's own mount, and the
+/// system's other volumes below `/System/Volumes`, are left out: the
+/// first would index every file twice. So is every other volume, below
+/// `/Volumes`: a disk inside the machine and one plugged in look alike
+/// there, and either is a root when named.
+pub fn firmlinked(table: &Table) -> Vec<PathBuf> {
+    let system = table
+        .mounts()
+        .iter()
+        .rev()
+        .find(|m| m.point == Path::new("/"))
+        .filter(|m| !m.network());
+    let mut roots: Vec<PathBuf> = system
+        .map(|m| m.point.clone())
+        .into_iter()
+        .chain(
+            table
+                .firmlinks()
+                .filter(|m| !m.network())
+                .map(|m| m.point.clone()),
+        )
+        .collect();
     roots.sort();
     roots.dedup();
     roots
@@ -342,6 +385,44 @@ mod tests {
 
     fn paths(p: &[&str]) -> Vec<PathBuf> {
         p.iter().map(PathBuf::from).collect()
+    }
+
+    /// macOS' system service takes `/` and each firmlink, by the place
+    /// users name it at, and leaves out the Data volume's own mount, the
+    /// system's other volumes, a volume below `/Volumes` and a network's.
+    #[cfg(unix)]
+    #[test]
+    fn on_macos_the_roots_are_the_system_volume_and_the_firmlinks() {
+        let mount = |point: &str, dev: (u32, u32), fstype: &str| Mount {
+            id: u64::from(dev.1),
+            parent: 0,
+            dev,
+            root: PathBuf::from("/"),
+            point: PathBuf::from(point),
+            fstype: fstype.into(),
+            source: "/dev/disk3s1".into(),
+            local: fstype != "smbfs",
+        };
+        let table = Table::of(vec![
+            mount("/", (1, 4), "apfs"),
+            mount("/System/Volumes/VM", (1, 6), "apfs"),
+            mount("/System/Volumes/Data", (1, 5), "apfs"),
+            mount("/Volumes/Stick", (2, 1), "exfat"),
+            mount("/Volumes/share", (0, 9), "smbfs"),
+        ])
+        .with_firmlinks(
+            &skwird_crawl::mounts::firmlinks(
+                b"/Users\tUsers\n/Applications\tApplications\n/usr/local\tusr/local\n",
+            ),
+            |_| true,
+        );
+        assert_eq!(
+            firmlinked(&table),
+            paths(&["/", "/Applications", "/Users", "/usr/local"])
+        );
+        // Before macOS 10.15, no Data volume: `/` alone.
+        let older = Table::of(vec![mount("/", (1, 4), "apfs")]);
+        assert_eq!(firmlinked(&older), paths(&["/"]));
     }
 
     /// The filesystems that store files are covered; the kernel's, memory

@@ -1,8 +1,10 @@
 //! What macOS' crawl alone does (the shared tests are in `walk/tests.rs`):
 //! a listing's attributes, which no stat gave, are a stat's; a folder of
 //! more entries than one batch holds is listed whole; the mount table is
-//! the system's; a volume mounted below a root is not crossed, whether
-//! the table holds it or not.
+//! the system's, the Data volume's firmlinks its mounts; a volume mounted
+//! below a root is not crossed, whether the table holds it or not, and
+//! what changes on it is its own root's alone; a change made through the
+//! Data volume's mount is heard as users name it.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -343,4 +345,108 @@ fn a_folder_with_an_acl_says_so() {
     };
     assert_ne!(mode("shared") & crate::ACL, 0, "an ACL");
     assert_eq!(mode("plain") & crate::ACL, 0, "none");
+}
+
+/// The Data volume's folders, where the system links them into `/`
+/// (firmlinks), are mounts of the table, of the Data volume's device, as a
+/// stat of them says; a crawl of `/` stops at each, as at a mount.
+#[test]
+fn a_firmlink_is_a_mount_of_the_data_volume() {
+    let table = Table::read().unwrap();
+    let data = table.data_volume().expect("the Data volume is mounted");
+    let users = table
+        .firmlinks()
+        .find(|m| m.point == Path::new("/Users"))
+        .expect("/Users is a firmlink");
+    assert_eq!(users.root, Path::new("/Users"));
+    assert_eq!(users.dev, data.dev);
+    let dev = std::fs::metadata("/Users").unwrap().dev();
+    // Its 32 bits, which std sign-extends.
+    assert_eq!(dev & 0xFFFF_FFFF, data.id);
+    assert_eq!(
+        table.holding(Path::new("/Users/someone")).unwrap().point,
+        Path::new("/Users")
+    );
+    let top = Root::open(Path::new("/"), Exclusions::none()).unwrap();
+    assert_eq!(top.mount_at(Path::new("Users")), Some(false));
+    assert_eq!(top.mount_at(Path::new("System/Volumes/Data")), Some(false));
+}
+
+/// A change made through the Data volume's own mount
+/// (`/System/Volumes/Data/Users/...`) is heard by the path users name it
+/// by, its firmlink's.
+#[test]
+fn a_change_through_the_data_volume_is_heard_as_users_name_it() {
+    use crate::Heard;
+    let s = Scratch::new("macos-data-path");
+    s.dir("root/a");
+    let cookies = s.dir("cookies");
+    let root = crate::canonical(s.join("root")).unwrap();
+    assert!(root.starts_with("/Users"), "a scratch folder below a home");
+    let via_data = Path::new(crate::mounts::DATA_VOLUME).join(root.strip_prefix("/").unwrap());
+    assert!(via_data.join("a").is_dir(), "{}", via_data.display());
+    let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
+    watcher.watch_root(0, &root).unwrap();
+    watcher.watch_cookies(&cookies).unwrap();
+    std::fs::write(via_data.join("a/new.txt"), b"x").unwrap();
+    let cookie = crate::cookie_folder(&cookies, 3);
+    std::fs::create_dir(&cookie).unwrap();
+    std::fs::write(cookie.join("made"), b"").unwrap();
+    watcher.flush();
+    let heard = heard_until(&watcher, |h| *h == Heard::Cookie(3));
+    assert!(
+        heard.contains(&Heard::Folder {
+            scope: 0,
+            rel: "a".into(),
+        }),
+        "{heard:?}"
+    );
+}
+
+/// A change on a volume mounted below a root, itself a root, is that
+/// root's alone: the outer root's crawl stops at the volume, and an
+/// overflow there is not its own (as `/` above `/Users`).
+#[test]
+fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
+    use crate::Heard;
+    let s = Scratch::new("macos-inner");
+    s.file("tree/mine.txt");
+    let at = s.dir("tree/mounted");
+    let image = s.join("volume.dmg");
+    let _attached = attach(&s, &image, &at);
+    let cookies = s.dir("cookies");
+    let outer = crate::canonical(s.join("tree")).unwrap();
+    let inner = crate::canonical(&at).unwrap();
+    let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
+    watcher.watch_root(0, &outer).unwrap();
+    watcher.watch_root(1, &inner).unwrap();
+    watcher.watch_cookies(&cookies).unwrap();
+    std::fs::create_dir(inner.join("made")).unwrap();
+    std::fs::write(outer.join("also.txt"), b"x").unwrap();
+    let cookie = crate::cookie_folder(&cookies, 5);
+    std::fs::create_dir(&cookie).unwrap();
+    std::fs::write(cookie.join("made"), b"").unwrap();
+    watcher.flush();
+    let heard = heard_until(&watcher, |h| *h == Heard::Cookie(5));
+    assert!(
+        heard.contains(&Heard::Folder {
+            scope: 1,
+            rel: "".into(),
+        }),
+        "{heard:?}"
+    );
+    assert!(
+        heard.contains(&Heard::Folder {
+            scope: 0,
+            rel: "".into(),
+        }),
+        "{heard:?}"
+    );
+    assert!(
+        !heard
+            .iter()
+            .any(|h| matches!(h, Heard::Folder { scope: 0, rel } if rel.starts_with("mounted"))),
+        "{heard:?}"
+    );
+    assert!(!heard.contains(&Heard::Overflow { scope: 0 }), "{heard:?}");
 }

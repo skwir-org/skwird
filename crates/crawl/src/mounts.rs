@@ -9,6 +9,39 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
+/// Where macOS mounts its Data volume (from 10.15), the users' files on
+/// it: the system's volume, mounted at `/`, is read-only, and the system
+/// links each of the Data volume's folders into it at its place (a
+/// firmlink: `/Users` is the Data volume's `Users`).
+pub const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// Where macOS lists its firmlinks.
+pub const FIRMLINKS: &str = "/usr/share/firmlinks";
+
+/// The firmlinks macOS' list names ([`FIRMLINKS`]): each line a place in
+/// `/`, absolute, then a tab and the folder of the Data volume linked
+/// there, relative to it. A line that is not one is left out.
+pub fn firmlinks(text: &[u8]) -> Vec<(PathBuf, PathBuf)> {
+    text.split(|&b| b == b'\n')
+        .filter_map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let tab = line.iter().position(|&b| b == b'\t')?;
+            let (point, folder) = (&line[..tab], &line[tab + 1..]);
+            // Names alone between the slashes: no `.`, `..` or empty one.
+            let plain = |p: &[u8]| {
+                p.split(|&b| b == b'/')
+                    .all(|c| !c.is_empty() && c != b"." && c != b"..")
+            };
+            (point.first() == Some(&b'/') && plain(&point[1..]) && plain(folder)).then(|| {
+                (
+                    PathBuf::from(os(point.to_vec())),
+                    PathBuf::from(os(folder.to_vec())),
+                )
+            })
+        })
+        .collect()
+}
+
 /// A mount, as the table lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mount {
@@ -57,10 +90,19 @@ impl Table {
         std::fs::read("/proc/self/mountinfo").map(|text| Table::parse(&text))
     }
 
-    /// The system's mount table, as macOS holds it (`getfsstat`).
+    /// The system's mount table, as macOS holds it (`getfsstat`), with each
+    /// firmlink its list names ([`FIRMLINKS`]) as a mount of its folder of
+    /// the Data volume ([`Table::with_firmlinks`]). The list is on the
+    /// system's own volume, read-only: reading it never waits on a disk
+    /// that sleeps or a server.
     #[cfg(target_os = "macos")]
     pub fn read() -> std::io::Result<Table> {
-        crate::sys::mounts().map(|mounts| Table { mounts })
+        let links = std::fs::read(FIRMLINKS).unwrap_or_default();
+        crate::sys::mounts().map(|mounts| {
+            Table { mounts }.with_firmlinks(&firmlinks(&links), |folder| {
+                std::fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir())
+            })
+        })
     }
 
     /// This process's mount table: Linux's and macOS' alone so far.
@@ -72,8 +114,66 @@ impl Table {
         ))
     }
 
+    /// A table of `mounts`, in this order: a later one at the same point is
+    /// above the earlier.
+    pub fn of(mounts: Vec<Mount>) -> Table {
+        Table { mounts }
+    }
+
     pub fn mounts(&self) -> &[Mount] {
         &self.mounts
+    }
+
+    /// The table with each of macOS' firmlinks in `links` (its place in
+    /// `/`, its folder of the Data volume) as a mount at its place of that
+    /// folder of the Data volume, as Linux's table shows a bind mount of a
+    /// folder: a crawl of `/` stops there, as at any mount, so that no
+    /// folder of the Data volume is read under `/` and again as a root. One
+    /// whose folder is not there (`there` says) is left out; so are all
+    /// where no Data volume is mounted ([`DATA_VOLUME`], before macOS
+    /// 10.15).
+    #[must_use]
+    pub fn with_firmlinks(
+        mut self,
+        links: &[(PathBuf, PathBuf)],
+        there: impl Fn(&Path) -> bool,
+    ) -> Table {
+        let Some(data) = self
+            .mounts
+            .iter()
+            .rev()
+            .find(|m| m.point == Path::new(DATA_VOLUME))
+            .cloned()
+        else {
+            return self;
+        };
+        for (point, folder) in links {
+            if there(&data.point.join(folder)) {
+                self.mounts.push(Mount {
+                    root: Path::new("/").join(folder),
+                    point: point.clone(),
+                    ..data.clone()
+                });
+            }
+        }
+        self
+    }
+
+    /// The Data volume's mount, where macOS mounts it ([`DATA_VOLUME`]).
+    pub fn data_volume(&self) -> Option<&Mount> {
+        self.mounts
+            .iter()
+            .rev()
+            .find(|m| m.point == Path::new(DATA_VOLUME) && m.root == Path::new("/"))
+    }
+
+    /// The firmlinks, each a mount of a folder of the Data volume
+    /// ([`Table::with_firmlinks`]) at its place in `/`.
+    pub fn firmlinks(&self) -> impl Iterator<Item = &Mount> {
+        let data = self.data_volume();
+        self.mounts.iter().filter(move |m| {
+            data.is_some_and(|d| m.dev == d.dev && m.point != d.point && m.root != d.root)
+        })
     }
 
     pub fn by_id(&self, id: u64) -> Option<&Mount> {
@@ -388,5 +488,72 @@ this line is not a mount
         // Below the current drive's root: which drive, only the process
         // knows.
         assert_eq!(p(r"\a"), None);
+    }
+
+    #[cfg(unix)]
+    fn mount(point: &str, dev: (u32, u32)) -> Mount {
+        Mount {
+            id: u64::from(dev.1),
+            parent: 0,
+            dev,
+            root: PathBuf::from("/"),
+            point: PathBuf::from(point),
+            fstype: "apfs".into(),
+            source: OsString::from("/dev/disk3s1"),
+            local: true,
+        }
+    }
+
+    /// macOS' list of firmlinks is read line by line: a place in `/`, a
+    /// tab, a folder of the Data volume; a line that is not one, or that
+    /// would name a place by `..`, is left out.
+    #[cfg(unix)]
+    #[test]
+    fn the_firmlinks_are_read_as_macos_lists_them() {
+        let links = firmlinks(
+            b"/Users\tUsers\n/usr/local\tusr/local\r\nno tab here\n/up\t../escape\nrelative\tthere\n/\tall\n\n",
+        );
+        assert_eq!(
+            links,
+            vec![
+                (PathBuf::from("/Users"), PathBuf::from("Users")),
+                (PathBuf::from("/usr/local"), PathBuf::from("usr/local")),
+            ]
+        );
+    }
+
+    /// Each firmlink is a mount of its folder of the Data volume at its
+    /// place: a crawl of `/` stops there, a path below it is held by it,
+    /// and one whose folder is not there is left out. With no Data volume
+    /// mounted, there are none.
+    #[cfg(unix)]
+    #[test]
+    fn a_firmlink_is_a_mount_of_its_folder_of_the_data_volume() {
+        let mounts = vec![
+            mount("/", (1, 4)),
+            mount(DATA_VOLUME, (1, 5)),
+            mount("/System/Volumes/VM", (1, 6)),
+        ];
+        let links = firmlinks(
+            b"/Users\tUsers\n/Applications\tApplications\n/AppleInternal\tAppleInternal\n",
+        );
+        let table = Table::of(mounts.clone())
+            .with_firmlinks(&links, |folder| !folder.ends_with("AppleInternal"));
+        let users = table.holding(Path::new("/Users/someone/a")).unwrap();
+        assert_eq!(users.point, Path::new("/Users"));
+        assert_eq!(users.root, Path::new("/Users"));
+        assert_eq!(users.dev, (1, 5));
+        let below = table.below(Path::new("/"));
+        for point in ["Users", "Applications", "System/Volumes/Data"] {
+            assert!(below.contains_key(Path::new(point)), "{point}: {below:?}");
+        }
+        assert!(!below.contains_key(Path::new("AppleInternal")));
+        let linked: Vec<&Path> = table.firmlinks().map(|m| m.point.as_path()).collect();
+        assert_eq!(linked, [Path::new("/Users"), Path::new("/Applications")]);
+        assert_eq!(table.data_volume().unwrap().dev, (1, 5));
+
+        let older = Table::of(vec![mount("/", (1, 4))]).with_firmlinks(&links, |_| true);
+        assert_eq!(older.mounts().len(), 1);
+        assert_eq!(older.firmlinks().count(), 0);
     }
 }

@@ -2642,7 +2642,7 @@ impl Writing<'_> {
             {
                 self.table = table;
             }
-            crate::system::roots(&self.table, crate::system::removable)
+            crate::system::found(&self.table)
         }
     }
 
