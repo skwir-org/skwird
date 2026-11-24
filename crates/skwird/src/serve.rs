@@ -53,6 +53,7 @@ pub fn volumes_changed() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let Some(sender) = sender else { return };
+    log("a volume arrived or went: the roots followed again");
     let _ = sender.send(Command::Mounts);
     let _ = std::thread::Builder::new()
         .name("skwird-volumes".into())

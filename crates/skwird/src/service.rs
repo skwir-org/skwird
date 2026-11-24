@@ -796,9 +796,10 @@ pub fn hold_volume(root: usize, path: &Path) -> Option<Held> {
 /// A device's event (`SERVICE_CONTROL_DEVICEEVENT`):
 /// - a volume arrived, or went: the engine follows its roots again
 ///   (`crate::serve::volumes_changed`);
-/// - the removal of a root's volume is asked: the root lets go of it
-///   before this answers, so that the removal goes on; refused by another,
-///   it is followed again.
+/// - the removal of a root's volume asked, pending or done: the root lets
+///   go of it before this answers, so that the removal goes on (a virtual
+///   disk detached does not ask, and is told as it goes); refused by
+///   another, it is followed again.
 ///
 /// # Safety
 ///
@@ -807,30 +808,37 @@ pub fn hold_volume(root: usize, path: &Path) -> Option<Held> {
 unsafe fn device_event(event: u32, data: *mut c_void) -> u32 {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DBT_DEVICEARRIVAL, DBT_DEVICEQUERYREMOVE, DBT_DEVICEQUERYREMOVEFAILED,
-        DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVICEREMOVEPENDING, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE,
+        DEV_BROADCAST_HDR,
     };
-    match event {
-        DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE | DBT_DEVICEQUERYREMOVEFAILED => {
-            crate::serve::volumes_changed();
-        }
-        DBT_DEVICEQUERYREMOVE if !data.is_null() => {
-            // SAFETY: every broadcast begins with its header.
-            let header = unsafe { &*data.cast::<DEV_BROADCAST_HDR>() };
-            if header.dbch_devicetype == DBT_DEVTYP_HANDLE {
-                // SAFETY: a handle's broadcast, as its header says.
-                let handle = unsafe { &*data.cast::<DEV_BROADCAST_HANDLE>() };
-                let root = HELD
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .iter()
-                    .find(|&&(n, _)| n == handle.dbch_hdevnotify as usize)
-                    .map(|&(_, root)| root);
-                if let Some(root) = root {
-                    crate::serve::volume_leaving(root);
-                }
+    // A root's volume asked to go, going, or gone: let go of it first, as
+    // a removal may not ask (a virtual disk detached does not).
+    if matches!(
+        event,
+        DBT_DEVICEQUERYREMOVE | DBT_DEVICEREMOVEPENDING | DBT_DEVICEREMOVECOMPLETE
+    ) && !data.is_null()
+    {
+        // SAFETY: every broadcast begins with its header.
+        let header = unsafe { &*data.cast::<DEV_BROADCAST_HDR>() };
+        if header.dbch_devicetype == DBT_DEVTYP_HANDLE {
+            // SAFETY: a handle's broadcast, as its header says.
+            let handle = unsafe { &*data.cast::<DEV_BROADCAST_HANDLE>() };
+            let root = HELD
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|&&(n, _)| n == handle.dbch_hdevnotify as usize)
+                .map(|&(_, root)| root);
+            if let Some(root) = root {
+                crate::serve::volume_leaving(root);
             }
         }
-        _ => {}
+    }
+    if matches!(
+        event,
+        DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE | DBT_DEVICEQUERYREMOVEFAILED
+    ) {
+        crate::serve::volumes_changed();
     }
     NO_ERROR
 }

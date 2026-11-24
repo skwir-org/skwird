@@ -227,8 +227,8 @@ fn a_journal_made_again_is_checked_by_the_table(s: &Scratch, volume: &Path, root
 }
 
 /// A volume a root is on, taken away while the service runs and given
-/// back: its removal asked of the service, the root lets go of every
-/// handle of it, so that the removal goes on, and is not live; given back,
+/// back: its removal told the service, the root lets go of every handle
+/// of it, and is not live; given back,
 /// the root is checked and followed again, live. The spare volume's
 /// virtual disk detached and attached again (`diskpart`).
 fn a_volume_taken_away_is_let_go_of(s: &Scratch, root: &Path) {
@@ -245,7 +245,13 @@ fn a_volume_taken_away_is_let_go_of(s: &Scratch, root: &Path) {
         skwird_testkit::diskpart(&[select.clone(), "detach vdisk".into()], s.path());
     assert!(detached, "the volume in use?\n{said}\n{}", log());
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !log().contains("its volume is being removed, let go of") {
+    // Let go of as its removal was asked or told, or found gone.
+    let let_go = || {
+        log()
+            .lines()
+            .any(|l| l.contains("its volume is") && l.ends_with("let go of"))
+    };
+    while !let_go() {
         assert!(Instant::now() < deadline, "never let go of:\n{}", log());
         std::thread::sleep(Duration::from_millis(100));
     }

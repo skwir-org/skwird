@@ -1778,6 +1778,14 @@ impl Writing<'_> {
     /// again ([`Writing::mounts_changed`]).
     #[cfg(windows)]
     fn let_go_of_volume(&mut self, i: usize, reply: &Sender<()>) {
+        self.let_go_of(i, "is being removed");
+        let _ = reply.send(());
+    }
+
+    /// Root `i`'s volume let go of, as it `goes` (Windows): its watch, its
+    /// registration's handle, its folder and volume handles; not live.
+    #[cfg(windows)]
+    fn let_go_of(&mut self, i: usize, goes: &str) {
         if let Some(w) = &self.watcher {
             w.unwatch_root(i);
         }
@@ -1795,8 +1803,7 @@ impl Writing<'_> {
             keeper.root().let_go();
         }
         self.publish(i);
-        log(&format!("root {i}: its volume is being removed, let go of"));
-        let _ = reply.send(());
+        log(&format!("root {i}: its volume {goes}, let go of"));
     }
 
     /// Root `i`'s tree watched again where its watch ended (Windows): since
@@ -2070,11 +2077,15 @@ impl Writing<'_> {
         #[cfg(windows)]
         for i in 0..self.keepers.len() {
             let unheard = self.marked.get(i).copied().flatten().is_none();
-            let back = self.keepers[i]
+            let there = self.keepers[i]
                 .as_ref()
                 .is_some_and(|k| k.root().path().exists());
-            if self.config.system && unheard && back {
+            if self.config.system && unheard && there {
                 self.check_root(i);
+            } else if self.config.system && !unheard && !there && self.keepers[i].is_some() {
+                // Gone with no word of it on its handle: let go of all the
+                // same.
+                self.let_go_of(i, "is gone");
             }
         }
         for root in 0..self.keepers.len() {
