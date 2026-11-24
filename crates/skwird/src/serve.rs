@@ -312,19 +312,15 @@ fn sources(
             });
         }
     }
-    // Windows' watcher hears each root on a thread of its own, and is
-    // read here for the writer.
-    #[cfg(windows)]
+    // Windows' watcher hears each root on a thread of its own, macOS' in
+    // one stream, and each is read here for the writer.
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(w) = &watcher {
         let (w, commands, shared) = (Arc::clone(w), commands.clone(), Arc::clone(shared));
         named("skwird-heard", move || {
             crate::live::listen(&w, &commands, &shared.readers);
         });
     }
-    // macOS hears nothing yet (phase 5, step 3, FSEvents): no watcher is
-    // made there, and its engine checks for each sync.
-    #[cfg(target_os = "macos")]
-    let _ = (commands, shared);
     (watcher, group)
 }
 

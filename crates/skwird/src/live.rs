@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use skwird_crawl::fanotify;
 use skwird_crawl::fanotify::Group;
 use skwird_index::block::FolderId;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use crate::engine::Command;
 use crate::engine::log;
 
@@ -132,8 +132,10 @@ impl Source for Group {
 
 /// Listen to Windows' watcher for the writer (phase 4, step 5): wait until
 /// a root's thread heard something, and send it all. Each root is heard on
-/// a thread of its own; this one gathers them for the writer.
-#[cfg(windows)]
+/// a thread of its own; this one gathers them for the writer. On macOS, the
+/// roots' stream is heard so (phase 5, step 3): what it gives is already
+/// a batch, held back by its latency.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn listen(watcher: &Watcher, commands: &Sender<Command>, readers: &Readers) {
     readers.join();
     loop {
@@ -225,8 +227,6 @@ pub struct Readers {
 }
 
 impl Readers {
-    // No reader on macOS until FSEvents (phase 5, step 3).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn join(&self) {
         self.threads
             .lock()

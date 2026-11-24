@@ -1,6 +1,6 @@
 //! A user's engine on macOS, run as its program and asked through the
-//! client (`docs/PLAN.md`, phase 5, step 2), on GitHub's macOS runners.
-//! Unwatched until `FSEvents` (step 3): what it answers is checked.
+//! client (`docs/PLAN.md`, phase 5, steps 2 and 3), on GitHub's macOS
+//! runners: every root heard whole by one `FSEvents` stream.
 //!
 //! Every process a test runs is given `HOME` and the XDG folders of a
 //! scratch folder of its own (AGENTS.md, "Shell hygiene"), its runtime
@@ -164,8 +164,7 @@ fn tree(env: &Env) {
 }
 
 /// The engine answers what a walk finds, Unicode names among them, as it
-/// read them; its names checked, none watched yet; a path outside its
-/// root is said so.
+/// read them; a path outside its root is said so.
 #[test]
 fn an_engine_answers_what_a_walk_finds() {
     let mut env = Env::new("mac-answers");
@@ -188,16 +187,21 @@ fn an_engine_answers_what_a_walk_finds() {
         answered(&mut c, &named(&home.join("docs"), "report")).len(),
         20
     );
+    // Heard whole once read (step 3), or checked until then.
     let coverage = c.coverage(&home).unwrap();
-    assert!(matches!(coverage.names, Proof::Checked(_)), "{coverage:?}");
+    assert!(
+        matches!(coverage.names, Proof::Live(_) | Proof::Checked(_)),
+        "{coverage:?}"
+    );
     assert_eq!(
         c.coverage(Path::new("/elsewhere")).unwrap().names,
         Proof::NotCovered(Why::Outside)
     );
 }
 
-/// A change made behind the engine's back is in the answer after a sync,
-/// checked at a time after the sync was asked.
+/// A change made behind the engine's back is in the answer after a sync:
+/// live, its cookie heard after the change, or checked at a time after the
+/// sync was asked.
 #[test]
 fn a_sync_answers_with_a_change_made_behind_the_engines_back() {
     let mut env = Env::new("mac-sync");
@@ -208,13 +212,14 @@ fn a_sync_answers_with_a_change_made_behind_the_engines_back() {
     let made = env.s.file(home.join("docs/d07/made behind its back.txt"));
     let asked = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let coverage = c.sync(&home).unwrap();
-    let Proof::Checked(at) = coverage.names else {
-        panic!("{coverage:?}");
-    };
-    assert!(
-        at.sec >= i64::try_from(asked.as_secs()).unwrap() - 1,
-        "{at:?}"
-    );
+    match coverage.names {
+        Proof::Checked(at) => assert!(
+            at.sec >= i64::try_from(asked.as_secs()).unwrap() - 1,
+            "{at:?}"
+        ),
+        Proof::Live(_) => {}
+        _ => panic!("{coverage:?}"),
+    }
     assert!(answered(&mut c, &named(&home, "behind its back")).contains(&made));
     assert_eq!(answered(&mut c, &everything(&home)), walked(&home));
 }
@@ -277,4 +282,86 @@ fn the_private_defaults_hold() {
             "{private}: {holes:?}"
         );
     }
+}
+
+/// Wait until `done` holds, up to `seconds`.
+fn wait_for(seconds: u64, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn is_live(c: &mut Client, path: &Path) -> bool {
+    matches!(c.coverage(path).unwrap().names, Proof::Live(_))
+}
+
+/// The root is heard whole (step 3): live with no folder registered, and
+/// a change made in it, deep or new, is answered without a sync, within
+/// the stream's latency and the gathering's second; a removal as soon.
+#[test]
+fn a_change_is_answered_live_without_a_sync() {
+    let mut env = Env::new("mac-live");
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    assert!(is_live(&mut c, &home.join("docs/d05")));
+    let made = env.s.file(home.join("docs/d05/made live.txt"));
+    let deep = env.s.file(home.join("new/folder/deep inside.txt"));
+    wait_for(5, "the changes answered without a sync", || {
+        let found = answered(&mut c, &named(&home, "live.txt"));
+        found.contains(&made) && answered(&mut c, &named(&home, "deep inside")).contains(&deep)
+    });
+    env.s.remove("home/docs/d05/made live.txt");
+    wait_for(5, "a removal answered without a sync", || {
+        answered(&mut c, &named(&home, "made live")).is_empty()
+    });
+    assert!(is_live(&mut c, &home));
+}
+
+/// A sync is a barrier: its cookie, made in the roots' stream, is heard
+/// after a change made just before it, and the sync answers live with the
+/// change, well before it would give up on the cookie (2 s) and check.
+#[test]
+fn a_sync_is_a_barrier() {
+    let mut env = Env::new("mac-barrier");
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    for i in 0..5 {
+        let made = env
+            .s
+            .file(home.join(format!("docs/d07/just before {i}.txt")));
+        let begun = Instant::now();
+        let synced = c.sync(&home).unwrap();
+        let took = begun.elapsed();
+        assert!(matches!(synced.names, Proof::Live(_)), "{synced:?}");
+        assert!(
+            took < Duration::from_millis(1500),
+            "its cookie came late: {took:?}"
+        );
+        assert!(
+            answered(&mut c, &named(&home, &format!("just before {i}"))).contains(&made),
+            "sync {i}"
+        );
+    }
+}
+
+/// A root moved away is no longer heard (its stream says so): its answers
+/// are not live from then on.
+#[test]
+fn a_root_moved_away_is_not_live() {
+    let mut env = Env::new("mac-moved");
+    tree(&env);
+    env.engine(30);
+    let mut c = env.client();
+    let home = env.home();
+    wait_for(10, "live", || is_live(&mut c, &home));
+    env.s.rename("home", "elsewhere");
+    wait_for(5, "not live once moved", || !is_live(&mut c, &home));
 }

@@ -1,16 +1,9 @@
-//! The watcher's answer on systems that have none yet (rule 7): the same
+//! The watcher's answer on systems that have none (rule 7): the same
 //! calls, and a watcher that cannot be made, with the system named.
-//! Windows' comes with phase 4 (`ReadDirectoryChangesW`), macOS's with
-//! phase 5 (`FSEvents`).
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "macos")]
-const SYSTEM: &str = "macOS";
-#[cfg(windows)]
-const SYSTEM: &str = "Windows";
-#[cfg(not(any(target_os = "macos", windows)))]
 const SYSTEM: &str = "this system";
 
 /// What a watcher heard (Linux's inotify; none here yet).

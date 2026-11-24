@@ -89,6 +89,8 @@ mod macos;
 use macos as sys;
 #[cfg(target_os = "macos")]
 pub use macos::Root;
+#[cfg(target_os = "macos")]
+pub use macos::watch::{Heard, Watcher, cookie_folder};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod other;
@@ -97,11 +99,10 @@ use other as sys;
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub use other::Root;
 
-// No watcher but Linux's and Windows' yet (rule 7): macOS' comes with
-// phase 5, its step 3.
-#[cfg(not(any(target_os = "linux", windows)))]
+// No watcher but Linux's, macOS' and Windows' (rule 7).
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod unwatched;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub use unwatched::{Heard, Watcher};
 
 pub use exclude::Exclusions;

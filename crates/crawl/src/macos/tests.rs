@@ -178,3 +178,79 @@ fn a_volume_mounted_below_a_root_is_not_crossed() {
         );
     }
 }
+
+/// What `watcher` hears until `until` is heard, or 10 s pass.
+fn heard_until(
+    watcher: &std::sync::Arc<crate::Watcher>,
+    until: impl Fn(&crate::Heard) -> bool + Send + 'static,
+) -> Vec<crate::Heard> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let w = std::sync::Arc::clone(watcher);
+    std::thread::spawn(move || {
+        loop {
+            let mut heard = Vec::new();
+            if w.read(&mut heard).is_err() {
+                return;
+            }
+            let done = heard.iter().any(&until);
+            if tx.send(heard).is_err() || done {
+                return;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut all = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(more) => all.extend(more),
+            Err(_) => break,
+        }
+    }
+    all
+}
+
+/// The roots' stream names each folder whose entries changed, below its
+/// root, and a cookie made after a change is heard after it, in the same
+/// stream.
+#[test]
+fn the_stream_names_each_folder_changed_and_a_cookie_in_its_turn() {
+    use crate::Heard;
+    let s = Scratch::new("macos-stream");
+    s.dir("root/a/b");
+    let cookies = s.dir("cookies");
+    let root = crate::canonical(s.join("root")).unwrap();
+    let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
+    watcher.watch_root(0, &root).unwrap();
+    watcher.watch_cookies(&cookies).unwrap();
+    s.file("root/a/b/new.txt");
+    let cookie = crate::cookie_folder(&cookies, 7);
+    std::fs::create_dir(&cookie).unwrap();
+    std::fs::write(cookie.join("made"), b"").unwrap();
+    watcher.flush();
+    let heard = heard_until(&watcher, |h| *h == Heard::Cookie(7));
+    let changed = heard.iter().position(|h| {
+        *h == Heard::Folder {
+            scope: 0,
+            rel: "a/b".into(),
+        }
+    });
+    let cookie = heard.iter().position(|h| *h == Heard::Cookie(7));
+    assert!(
+        matches!((changed, cookie), (Some(c), Some(k)) if c < k),
+        "{heard:?}"
+    );
+}
+
+/// A root's own folder moved away is said: it is no longer heard.
+#[test]
+fn a_root_moved_away_is_lost() {
+    use crate::Heard;
+    let s = Scratch::new("macos-lost");
+    s.dir("root");
+    let root = crate::canonical(s.join("root")).unwrap();
+    let watcher = std::sync::Arc::new(crate::Watcher::new(1, 0).unwrap());
+    watcher.watch_root(3, &root).unwrap();
+    s.rename("root", "moved");
+    let heard = heard_until(&watcher, |h| *h == Heard::Lost { scope: 3 });
+    assert!(heard.contains(&Heard::Lost { scope: 3 }), "{heard:?}");
+}

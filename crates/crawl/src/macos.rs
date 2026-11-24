@@ -804,5 +804,7 @@ pub(crate) fn path_of(bytes: &[u8]) -> std::borrow::Cow<'_, Path> {
     std::borrow::Cow::Borrowed(Path::new(OsStr::from_bytes(bytes)))
 }
 
+pub mod watch;
+
 #[cfg(test)]
 mod tests;
