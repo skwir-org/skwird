@@ -22,6 +22,7 @@ pub type Ctime = (i64, i64);
 
 /// A stat's change time.
 // Seconds and nanoseconds come as whatever types the system's `stat` has;
+#[cfg(unix)]
 // the nanoseconds are below 10^9 in any of them.
 #[allow(clippy::cast_possible_wrap, clippy::unnecessary_cast)]
 pub fn ctime(st: &rustix::fs::Stat) -> Ctime {
@@ -29,6 +30,8 @@ pub fn ctime(st: &rustix::fs::Stat) -> Ctime {
 }
 
 /// A folder read, with the change time the check compares.
+// What the check reads, which is Unix's alone so far.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct Folder {
     pub path: PathBuf,
     pub ctime: Ctime,

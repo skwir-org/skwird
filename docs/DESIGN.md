@@ -1989,7 +1989,35 @@ ADR-053, 074, 075):
       since no volume of FAT's keeps a journal to replay: then checked
       as of the check, and live from there where its system hears it.
     - **Answered** with each volume kept: its identity, where it is
-      mounted if it is, and its coverage.
+      mounted if it is, and its coverage; and each removable volume the
+      engine sees mounted, kept or not, with its identity, which the
+      client offers its user. The client never derives an identity
+      itself: the engine's spelling is the one, a UUID in lowercase with
+      its dashes, FAT's and exFAT's serial as blkid prints it
+      (`XXXX-XXXX`).
+    - **Let go of before it is ejected** (skwir's ADR-149): `volumes
+      {release}` names one, before the client asks for its unmount. The
+      engine stops what it reads there, closes all it holds on it, and
+      reads nothing there until it sees it mounted again, or until a
+      while has passed, should the unmount have been refused. Linux says
+      nothing before an unmount, and a folder held open in a walk would
+      make it fail as busy. Between reads, nothing is held on it anyway
+      (AGENTS.md, "Hold nothing of a filesystem between reads"); a watch
+      holds no mount.
+    - **Two volumes of one identity** (a stick copied whole, two FAT
+      serials alike): the second mounted while the first is kept and
+      mounted is refused and said so, its paths not covered.
+    - **At its pace:** a volume plugged in is read a few seconds after it
+      is mounted, at the lowest priority the system's I/O has (Linux's
+      idle class, macOS' throttled policy, Windows' background mode): the
+      copy the user plugged it in for comes first. A disk that stalls
+      under writes (a shingled one, a minute and more) holds no answer
+      (AGENTS.md, "Blocking").
+    - **A volume is a block device's filesystem:** a FUSE program's (a
+      phone over MTP, GVfs, rclone) and a network's are refused, as skwir
+      never harvests a remote.
+    - **Nothing is written on it:** its index is in the engine's own
+      cache, by its identity.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do

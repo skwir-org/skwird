@@ -2614,11 +2614,24 @@ sync's wait, memory, and the processor over ten idle minutes.
 machines and a synthetic tree: orders of magnitude, and what must not
 move (idle at zero), not the user's machines.
 
+Written on 2026-11-24: `skwird-bench tree DIR [--entries N]` makes the
+tree, the same on every system (1,040,000 entries, 69,333 folders, 12
+deep at most, made in 12 s on the workstation); `walk` and `index` run
+on every system; `tools/measure-runner.sh` measures what is said
+above, counts and times alone, tried on the workstation on a tree of
+20,000; `measure.yml` runs it on each runner, by hand or on a push to
+`ci/measure/...`. A user's engine on Linux keeps live what a client
+asks it to: the script asks (`skwird watch`), and the runner is given
+enough inotify watches for the tree's folders.
+
 **For 0.2, with skwir's session:**
 - **Names in both Unicode forms** (open question 5): skwird's matcher
   and skwir's together, in a release of each.
 - **Removable volumes on request** (open question 8): the request
-  (Protocol, "Removable volumes") checked by skwir's session first;
+  (Protocol, "Removable volumes") checked by skwir's session on
+  2026-11-24: the six points it found are in it since (letting go
+  before an eject, the engine's spelling of an identity, two volumes of
+  one, the pace, block devices alone, nothing written on the volume).
   DiskArbitration on macOS.
 
 ## Later

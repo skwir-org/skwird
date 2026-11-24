@@ -1,0 +1,61 @@
+name: measure
+# skwird measured on GitHub's runners (docs/PLAN.md, "Measured on the
+# runners"): a stand-in for the measurement on a machine of the user's
+# (phases 4 and 5, step 8), never that measurement. Shared virtual
+# machines and a synthetic tree: orders of magnitude, and what must not
+# move (idle at zero). On demand alone: a push to a branch ci/measure/...,
+# or run by hand (gh workflow run measure.yml -f entries=1040000).
+on:
+  push:
+    branches: ["ci/measure/**"]
+  workflow_dispatch:
+    inputs:
+      entries:
+        description: "The synthetic tree's entries"
+        required: false
+        default: "1040000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: measure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      ENTRIES: ${{ inputs.entries || '1040000' }}
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml's channel, for the runner's host.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --locked --release -p skwird -p skwird-bench
+      # On Linux, a user's engine keeps live as many folders as a quarter
+      # of the user's inotify watches: the tree's 69,334 folders need more
+      # than the runner's default gives.
+      - name: inotify's watches
+        if: runner.os == 'Linux'
+        run: sudo sysctl fs.inotify.max_user_watches=1048576
+      - name: measured
+        run: tools/measure-runner.sh target/release "$RUNNER_TEMP/report.md" "$ENTRIES"
+      - name: said
+        if: always()
+        run: cat "$RUNNER_TEMP/report.md" >>"$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: measured-${{ matrix.os }}
+          path: ${{ runner.temp }}/report.md
+          if-no-files-found: warn

@@ -12,11 +12,9 @@ mod check;
 mod churn;
 #[cfg(target_os = "linux")]
 mod fanotify;
-#[cfg(unix)]
 mod index;
-#[cfg(unix)]
 mod said;
-#[cfg(unix)]
+mod tree;
 mod walk;
 
 const USAGE: &str = "\
@@ -25,6 +23,7 @@ usage: skwird-bench walk ROOT [--threads N] [--stat]
        skwird-bench index ROOT [--threads N] [--keep DIR]
        skwird-bench fanotify FOLDER [--seconds N] [--probe DIR]...
        skwird-bench churn FOLDER -- COMMAND [ARG]...
+       skwird-bench tree DIR [--entries N]
 
 walk      read every folder under ROOT with skwird's crawl, and size the
           index it would keep (--stat: stat every entry, as an index of
@@ -50,6 +49,10 @@ churn     watch FOLDER as the engine is to watch it, run COMMAND (a
           folder read again at once, or its changes logged in batches;
           each change sized as the engine's log holds it
 
+tree      make a synthetic tree of N entries (1,040,000 by default) in DIR,
+          which must be empty, shaped as a home is, the same on every
+          system: what the runners are measured on
+
 It prints counts, sizes and times, never a name or a path.";
 
 struct Args {
@@ -68,6 +71,8 @@ struct Args {
     rest: Vec<String>,
     /// Folders where `fanotify` makes, renames and removes a file of its own.
     probes: Vec<PathBuf>,
+    /// How many entries `tree` makes.
+    entries: u64,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -85,6 +90,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         keep: None,
         probes: Vec::new(),
         rest: Vec::new(),
+        entries: 1_040_000,
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -95,6 +101,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--threads" => parsed.threads = number(it.next(), "--threads")?.max(1) as usize,
             "--runs" => parsed.runs = number(it.next(), "--runs")?.max(1) as usize,
             "--seconds" => parsed.seconds = number(it.next(), "--seconds")?,
+            "--entries" => parsed.entries = number(it.next(), "--entries")?,
             "--stat" => parsed.stat = true,
             "--cold" => parsed.cold = true,
             "--drop-with" => {
@@ -124,6 +131,11 @@ fn parse(args: &[String]) -> Result<Args, String> {
     if parsed.path.as_os_str().is_empty() {
         return Err(USAGE.into());
     }
+    // A tree's folder, made if it is not there.
+    if parsed.command == "tree" {
+        std::fs::create_dir_all(&parsed.path)
+            .map_err(|e| format!("cannot make the tree's folder: {e}"))?;
+    }
     // The walk opens folders without following links: a root given through
     // one is walked where it leads.
     parsed.path =
@@ -142,26 +154,33 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(not(unix))]
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
-        "walk" | "check" | "index" | "fanotify" | "churn" => {
-            Err("skwird-bench measures Unix filesystems so far; Windows comes with phase 4".into())
+        "tree" => {
+            let made = tree::make(&args.path, args.entries)?;
+            println!(
+                "tree: {} entries ({} folders, {} files), {} deep at most, made in {}",
+                said::count(made.folders + made.files),
+                said::count(made.folders),
+                said::count(made.files),
+                made.deepest,
+                said::time(made.took)
+            );
+            Ok(())
         }
-        _ => Err(USAGE.into()),
-    }
-}
-
-#[cfg(unix)]
-fn run(args: &Args) -> Result<(), String> {
-    match args.command.as_str() {
         "walk" => {
             let root = walk::open(&args.path)?;
             let walked = walk::walk(&root, &walk_options(args, args.stat))?;
             print_walk(&walked, args);
             Ok(())
         }
+        #[cfg(unix)]
         "check" => check(args),
+        #[cfg(not(unix))]
+        "check" => Err(
+            "check stats folders as Unix does: Windows' check reads its file table (phase 4)"
+                .into(),
+        ),
         "index" => index::run(&args.path, args.threads, args.keep.clone()),
         #[cfg(target_os = "linux")]
         "fanotify" => fanotify::probe(&args.path, args.seconds, &args.probes),
@@ -175,7 +194,6 @@ fn run(args: &Args) -> Result<(), String> {
     }
 }
 
-#[cfg(unix)]
 fn walk_options(args: &Args, stat_files: bool) -> walk::Options {
     walk::Options {
         threads: args.threads,
@@ -183,7 +201,6 @@ fn walk_options(args: &Args, stat_files: bool) -> walk::Options {
     }
 }
 
-#[cfg(unix)]
 fn print_walk(walked: &walk::Walked, args: &Args) {
     use said::{bytes, count};
     println!("filesystem: {}", walked.fs);
@@ -247,7 +264,6 @@ fn print_walk(walked: &walk::Walked, args: &Args) {
 /// range, parent, change time, owner, group and mode (40). fsearch 0.2
 /// packs each array at the bits its largest value needs. An estimate,
 /// until the index is built.
-#[cfg(unix)]
 fn estimate(walked: &walk::Walked) -> (u64, u64, u64) {
     (
         walked.entries() * (29 + 4),
