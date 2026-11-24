@@ -2697,12 +2697,19 @@ Measured again at `775664c`, memory as resident and its own:
 | memory, 10 idle minutes after | 48.3, 8.4 MB | 16.6, 48.9 MB | 66.5, 4.5 MB |
 | the processor over 10 idle minutes | 0.00 s | 0.00 s | 0.01 s |
 
-One thing found, to look at: **Windows' engine holds its index as its
-own,** 39.6 to 48.9 MB for 1.04 million entries, over the budget of
-10 MB per million for memory at rest (DESIGN 10, "Memory, in two"): the
-index's files are mapped on Unix alone (`skwird_index::map`), and read
-into memory elsewhere. A mapping on Windows (`CreateFileMappingW`,
-`MapViewOfFile`) would make them pages the system drops, as on Unix.
+One thing found, and done for 0.2 the next day: **Windows' engine held
+its index as its own,** 39.6 to 48.9 MB for 1.04 million entries, over
+the budget of 10 MB per million for memory at rest (DESIGN 10, "Memory,
+in two"): the index's files were mapped on Unix alone
+(`skwird_index::map`), and read into memory elsewhere. On Windows they
+are now views of read-only file mappings (`CreateFileMappingW`,
+`MapViewOfFile`), the files opened to share reading and removal. A
+probe on the runner found that Windows removes a mapped file's name at
+once, the view reading as it was, as Unix does: a purged name is in no
+file once the save that purged it is done. Measured again on the runner
+(`ci/measure/index-mapped`): 5.6 MB its own live, 9.5 MB after ten idle
+minutes, 21.2 and 16.9 MB resident; the sync, idle and the rest as
+before.
 
 Found on the way: `2164a77` built no skwird for Windows, a feature its
 crate forgot hidden by the tests' kit's (`--all-targets` and
