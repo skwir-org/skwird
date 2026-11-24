@@ -1900,7 +1900,11 @@ repositories, their versions their own.
     for a while (`Find::silence`, its hello included), or from another
     thread (`Client::stopper`). Either closes the connection. So an
     engine that accepts and then hangs, or one slow to check, holds no
-    client's search.
+    client's search. So can the connect itself, asked by skwir's session
+    on 2026-11-24: a stopper made before it (`Stopper::new`,
+    `Client::connect_stopped`) stops its hello, a started engine's wait,
+    and on Windows a busy pipe's within 100 ms, then the connection's
+    calls. A search given up on starts no engine.
   - **An engine started is not the client's to look after.** It runs
     from `/`, so it holds none of the client's folders busy (a mount, a
     removable volume). A thread of the client's reaps it once it ends,

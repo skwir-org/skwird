@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use skwird_client::fake::{Fake, Script};
 use skwird_client::protocol::{Query, WirePath};
-use skwird_client::{Client, Error, Find};
+use skwird_client::{Client, Error, Find, Stopper};
 
 /// A folder of the test's own under the user's cache, never `/tmp`
 /// (AGENTS.md, "Testing"), removed when dropped; on Windows, a pipe's
@@ -144,4 +144,105 @@ fn a_call_stopped_from_another_thread_returns_at_once() {
     stopping.join().unwrap();
     let e = c.coverage(Path::new("/home/user")).unwrap_err();
     assert!(matches!(e, Error::Stopped), "{e}");
+}
+
+/// `stopper` stopped from another thread after a little while.
+fn stop_soon(stopper: &Stopper) -> std::thread::JoinHandle<()> {
+    let stopper = stopper.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        stopper.stop();
+    })
+}
+
+/// A connect whose engine never says hello, waited on as long as it
+/// takes, is stopped from another thread at once; so is every connect
+/// given the same stopper after.
+#[test]
+fn a_connect_stopped_at_its_hello_returns_at_once() {
+    let dir = Dir::new("stop-hello");
+    let socket = dir.socket();
+    #[cfg(unix)]
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    #[cfg(windows)]
+    let _listener = skwird_client::pipe::Server::bind(socket.as_os_str()).unwrap();
+    let stopper = Stopper::new();
+    let stopping = stop_soon(&stopper);
+    let begun = Instant::now();
+    let e = Client::connect_stopped(&find(&socket, None), &stopper)
+        .err()
+        .unwrap();
+    assert!(matches!(e, Error::Stopped), "{e}");
+    assert!(begun.elapsed() < Duration::from_secs(5));
+    stopping.join().unwrap();
+    let begun = Instant::now();
+    let e = Client::connect_stopped(&find(&socket, None), &stopper)
+        .err()
+        .unwrap();
+    assert!(matches!(e, Error::Stopped), "{e}");
+    assert!(begun.elapsed() < Duration::from_millis(100));
+}
+
+/// A connect stopped before it starts an engine starts none: a program
+/// that is not there is never tried.
+#[test]
+fn a_connect_stopped_before_it_starts_no_engine() {
+    let dir = Dir::new("stop-start");
+    let stopper = Stopper::new();
+    stopper.stop();
+    let find = Find {
+        start: Some(PathBuf::from("no such program of skwird's")),
+        ..find(&dir.socket(), None)
+    };
+    let e = Client::connect_stopped(&find, &stopper).err().unwrap();
+    assert!(matches!(e, Error::Stopped), "{e}");
+}
+
+/// A started engine waited for (one that never serves) is given up on at
+/// once when stopped, not when its wait ends.
+#[cfg(unix)]
+#[test]
+fn a_started_engine_waited_for_is_stopped_at_once() {
+    let dir = Dir::new("stop-wait");
+    let find = Find {
+        // Ends at once, serving nothing.
+        start: Some(PathBuf::from("true")),
+        wait: Duration::from_secs(30),
+        runtime: Some(dir.0.clone()),
+        state: Some(dir.0.clone()),
+        ..find(&dir.socket(), None)
+    };
+    let stopper = Stopper::new();
+    let stopping = stop_soon(&stopper);
+    let begun = Instant::now();
+    let e = Client::connect_stopped(&find, &stopper).err().unwrap();
+    assert!(matches!(e, Error::Stopped), "{e}");
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        begun.elapsed()
+    );
+    stopping.join().unwrap();
+}
+
+/// The stopper a connection was made with stops its calls, as the one
+/// taken from it does: they are the same.
+#[test]
+fn a_connection_is_stopped_by_the_stopper_it_was_made_with() {
+    let dir = Dir::new("stop-made");
+    let fake = silent(&dir);
+    let stopper = Stopper::new();
+    let mut c = Client::connect_stopped(&find(&fake.socket, None), &stopper).unwrap();
+    let stopping = stop_soon(&stopper);
+    let begun = Instant::now();
+    let e = c.query(&everything(), |_| true).unwrap_err();
+    assert!(matches!(e, Error::Stopped), "{e}");
+    assert!(begun.elapsed() < Duration::from_secs(5));
+    stopping.join().unwrap();
+    let mut again = Client::connect(&find(&fake.socket, None)).unwrap();
+    let taken = again.stopper().unwrap();
+    let stopping = stop_soon(&taken);
+    let e = again.coverage(Path::new("/home/user")).unwrap_err();
+    assert!(matches!(e, Error::Stopped), "{e}");
+    stopping.join().unwrap();
 }
