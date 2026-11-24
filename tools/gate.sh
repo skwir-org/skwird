@@ -46,6 +46,16 @@ for target in x86_64-pc-windows-gnu aarch64-apple-darwin; do
   step "clippy, $target"
   CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --target "$target" -- -D warnings
 done
+# Each program alone, as a release builds it: a build of every target, or
+# of the whole workspace, takes the features of the tests' kit too, and a
+# feature a crate forgot passes there (`2164a77`, which built no skwird for
+# Windows).
+for target in "" x86_64-pc-windows-gnu aarch64-apple-darwin; do
+  for program in skwird skwird-bench; do
+    step "$program alone${target:+, $target}"
+    CARGO_INCREMENTAL=0 cargo check --quiet -p "$program" ${target:+--target "$target"}
+  done
+done
 if [ "$run_tests" = 1 ] && [ "$run_wine" = 1 ]; then
   step "tests for Windows, under Wine"
   tools/wine-tests > target/wine-tests.log 2>&1 || { tail -40 target/wine-tests.log; exit 1; }

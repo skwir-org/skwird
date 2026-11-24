@@ -35,6 +35,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - name: clippy, macOS
         run: cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+      # Each program alone, as a release builds it: the workspace's builds
+      # take the features of the tests' kit too (tools/gate.sh).
+      - name: each program alone
+        run: |
+          for target in "" x86_64-pc-windows-gnu aarch64-apple-darwin; do
+            for program in skwird skwird-bench; do
+              cargo check --locked -p "$program" ${target:+--target "$target"}
+            done
+          done
       # Ubuntu lets no unprivileged process make a user namespace, which
       # the tests of a mount made below a folder need (skwird_testkit's
       # `in_namespace`): its AppArmor rule lifted, on this runner alone.
