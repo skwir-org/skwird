@@ -58,10 +58,13 @@ impl Env {
         c
     }
 
-    /// An engine of the home, gone after `idle` seconds without a client.
+    /// An engine of the home, gone after `idle` seconds without a client,
+    /// its log in the test's folder ([`Env::log`]).
     fn engine(&mut self, idle: u64) {
         let home = self.home();
         let idle = idle.to_string();
+        let log = std::fs::File::create(self.s.join(format!("engine-{}.log", self.engines.len())))
+            .unwrap();
         let child = self
             .command(&[
                 "serve",
@@ -74,10 +77,19 @@ impl Env {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .unwrap();
         self.engines.push(child);
+    }
+
+    /// What every engine of the test logged.
+    fn log(&self) -> String {
+        (0..self.engines.len())
+            .map(|i| {
+                std::fs::read_to_string(self.s.join(format!("engine-{i}.log"))).unwrap_or_default()
+            })
+            .collect()
     }
 
     /// A client of the engine, once it answers and its index is ready.
@@ -92,7 +104,11 @@ impl Env {
                     return c;
                 }
             }
-            assert!(Instant::now() < deadline, "the engine never answered");
+            assert!(
+                Instant::now() < deadline,
+                "the engine never answered:\n{}",
+                self.log()
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -284,11 +300,11 @@ fn the_private_defaults_hold() {
     }
 }
 
-/// Wait until `done` holds, up to `seconds`.
-fn wait_for(seconds: u64, what: &str, mut done: impl FnMut() -> bool) {
+/// Wait until `done` holds, up to `seconds`; or say what `env` logged.
+fn wait_for(env: &Env, seconds: u64, what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while !done() {
-        assert!(Instant::now() < deadline, "{what}");
+        assert!(Instant::now() < deadline, "{what}:\n{}", env.log());
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -307,16 +323,16 @@ fn a_change_is_answered_live_without_a_sync() {
     env.engine(30);
     let mut c = env.client();
     let home = env.home();
-    wait_for(10, "live", || is_live(&mut c, &home));
+    wait_for(&env, 10, "live", || is_live(&mut c, &home));
     assert!(is_live(&mut c, &home.join("docs/d05")));
     let made = env.s.file(home.join("docs/d05/made live.txt"));
     let deep = env.s.file(home.join("new/folder/deep inside.txt"));
-    wait_for(5, "the changes answered without a sync", || {
+    wait_for(&env, 5, "the changes answered without a sync", || {
         let found = answered(&mut c, &named(&home, "live.txt"));
         found.contains(&made) && answered(&mut c, &named(&home, "deep inside")).contains(&deep)
     });
     env.s.remove("home/docs/d05/made live.txt");
-    wait_for(5, "a removal answered without a sync", || {
+    wait_for(&env, 5, "a removal answered without a sync", || {
         answered(&mut c, &named(&home, "made live")).is_empty()
     });
     assert!(is_live(&mut c, &home));
@@ -332,7 +348,7 @@ fn a_sync_is_a_barrier() {
     env.engine(30);
     let mut c = env.client();
     let home = env.home();
-    wait_for(10, "live", || is_live(&mut c, &home));
+    wait_for(&env, 10, "live", || is_live(&mut c, &home));
     for i in 0..5 {
         let made = env
             .s
@@ -361,7 +377,7 @@ fn a_root_moved_away_is_not_live() {
     env.engine(30);
     let mut c = env.client();
     let home = env.home();
-    wait_for(10, "live", || is_live(&mut c, &home));
+    wait_for(&env, 10, "live", || is_live(&mut c, &home));
     env.s.rename("home", "elsewhere");
-    wait_for(5, "not live once moved", || !is_live(&mut c, &home));
+    wait_for(&env, 5, "not live once moved", || !is_live(&mut c, &home));
 }
