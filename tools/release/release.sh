@@ -3,6 +3,7 @@
 # as skwir's are (its ADR-053, 074, 075):
 #
 #     tools/release/release.sh check [TAG]   the version agrees everywhere
+#     tools/release/release.sh notes         the release's notes, as GitHub shows them
 #     tools/release/release.sh build TAG     the bundle, in target/releases
 #     tools/release/release.sh verify TAG    the bundle is what it was
 #     tools/release/release.sh upload TAG    a GitHub draft of it
@@ -76,9 +77,31 @@ check() {
 }
 
 # The first section of CHANGELOG.md, its heading left out: the release's
-# notes.
+# notes. The file is wrapped for a terminal, and GitHub keeps a release's
+# line breaks: each paragraph and list item is joined onto one line, a code
+# block kept as it is, and the blank lines before and after left out.
 notes() {
-    awk '/^## / { n++; next } n == 1' CHANGELOG.md
+    awk '
+        function out(s) {
+            if (printed && gap) print ""
+            print s
+            printed = 1
+            gap = 0
+        }
+        function flush() {
+            if (block != "") out(block)
+            block = ""
+        }
+        /^## / { n++; next }
+        n != 1 { next }
+        fence { print; if ($0 ~ /^[[:space:]]*```/) fence = 0; next }
+        /^[[:space:]]*```/ { flush(); out($0); fence = 1; next }
+        /^[[:space:]]*$/ { flush(); gap = 1; next }
+        /^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]/ || /^(#|>|\|)/ { flush(); block = $0; next }
+        block == "" { block = $0; next }
+        { line = $0; sub(/^[[:space:]]+/, "", line); block = block " " line }
+        END { flush() }
+    ' CHANGELOG.md
 }
 
 # What rewrites this machine's paths in what is built: cargo's sources,
@@ -241,6 +264,7 @@ upload() {
 
 case "${1:-}" in
 check) check "${2:-}" ;;
+notes) notes ;;
 programs)
     if [ -z "${XMAC_CLANG:-}" ]; then
         exec nix develop "$tree#release" --command "$0" "$@"
