@@ -676,6 +676,12 @@ fn a_check_by_the_table_is_the_disks() {
             );
         }
     }
+    // The changes a tick after the crawl (the engine's, 2 s), as a check
+    // meets them: a change within it may leave a folder's time as it was,
+    // NTFS' clock moving by its ticks (15.6 ms), and the engine reads such
+    // a folder again whatever its time says (`again`). Made at once, the
+    // root's rename once passed for no change.
+    std::thread::sleep(Options::default().tick);
     s.write(r"tree\a\new.txt", b"x");
     s.rename(r"tree\b", r"tree\b2");
     s.remove(r"tree\c\d");
