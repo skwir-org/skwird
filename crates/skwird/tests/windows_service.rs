@@ -207,7 +207,13 @@ fn a_journal_made_again_is_checked_by_the_table(s: &Scratch, volume: &Path, root
     }
     let logged = log();
     let since = &logged[logged.rfind("serving 2 roots").unwrap()..];
-    assert!(!since.contains("resumed from"), "{since}");
+    // Root 0, on the volume whose journal was deleted; root 1, on the
+    // spare, resumes.
+    assert!(!since.contains("root 0: resumed from"), "{since}");
+    assert!(
+        since.contains("root 0: its volume's file table read"),
+        "{since}"
+    );
     assert!(since.contains("to check it by"), "{since}");
     assert!(since.contains("checked in"), "{since}");
 }
