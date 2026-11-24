@@ -884,15 +884,20 @@ device and an inode do not name one file.
   - ranges of size and of time. Times are instants, so a client
     computes calendar boundaries in its user's time zone.
 - **Names match as skwir matches them,** in protocol 0, so an answer
-  holds whatever skwir's query plugin would match (its `NamePat`):
+  holds whatever skwir's matcher would match (its `NameMatch`):
   - a substring, after `str::to_lowercase` of both sides, or exactly
     when the case is asked to count;
-  - a glob, as the `globset` crate compiles it, case-insensitive unless
-    asked, with no separator rule (a name holds none);
-  - both on the name's lossy UTF-8 form. A name that is not UTF-8 is
-    still answered, and travels byte for byte.
+  - a glob, as the `globset` crate compiles it (skwir's version, 0.4.22,
+    which reads POSIX classes), case-insensitive unless asked, with no
+    separator rule (a name holds none). One whose literal parts hold
+    more than ASCII, with case ignored, is matched on the name
+    lowercased, those parts lowercased first;
+  - since 0.2, in both Unicode forms (question 5): a term is matched
+    composed and decomposed, a glob in its literal parts alone;
+  - on the name's lossy UTF-8 form. A name that is not UTF-8 is still
+    answered, and travels byte for byte.
 
-  Normalization and fuzzy scoring stay open (question 5).
+  Fuzzy scoring stays open (question 5).
 - **The command line** has a text syntax of its own, compiled to the
   same queries.
 - **Answers may be wider, never narrower.** An answer may hold more
@@ -1889,8 +1894,8 @@ ADR-053, 074, 075):
     2026-11-24): what the engine does beyond the version it speaks, a
     word each, absent or empty meaning none. A client takes a word it
     does not know as absent; an engine says none it does not do. 0.1.0
-    says none. 0.2's would say `names-both-forms` (open question 5) and
-    `volumes` (open question 8). A client that matches a term in both
+    says none. 0.2 says `names-both-forms` (open question 5), and would
+    say `volumes` (open question 8). A client that matches a term in both
     Unicode forms asks no engine without `names-both-forms` for a term
     whose two forms differ, and walks instead: an index matching one
     form alone would hold less than the client matches;
@@ -2197,6 +2202,15 @@ ADR-053, 074, 075):
 
    Case folding stays `to_lowercase` (`ß` is not `ss`): what users
    expect, and folding changes lengths under a glob.
+
+   **Built on 2026-11-24,** after skwir's (its ADR-150): skwird's
+   matcher (`skwird_index::matching`) makes each term as skwir's does,
+   its glob parted as skwir parts it, and holds to skwir's own cases; a
+   name's mask is read where either form could match (the bits both
+   forms hold: a decomposed `é` holds an `e`, a composed one does not).
+   An exact name is matched as it is, never in another form: two names
+   that differ in form alone are two names. The engine says
+   `names-both-forms` in its hello.
 6. **fanotify on btrfs subvolumes:** answered by phase 0, as far as a
    trial goes (decision 3). A mark through the top-level subvolume,
    mounted read-only and detached, heard the changes made in three

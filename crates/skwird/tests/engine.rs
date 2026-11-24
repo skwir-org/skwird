@@ -1208,3 +1208,37 @@ fn totals_are_every_child_and_the_folders_own() {
     again.add_child(docs);
     assert_eq!(again, done.totals, "what is sent and the rest, the whole");
 }
+
+/// A name written decomposed is found by a term typed composed, and one
+/// written composed by a term typed decomposed, a glob's as a word's; and
+/// the engine says so in its hello (`names-both-forms`).
+#[test]
+fn a_name_is_found_by_a_term_in_either_form() {
+    let mut env = Env::new("engine-forms");
+    tree(&env);
+    let home = env.home();
+    let decomposed = env.s.file(home.join("docs/cafe\u{301} 1.txt"));
+    let composed = env.s.file(home.join("docs/th\u{e9} 2.txt"));
+    env.engine(30);
+    let mut c = env.client("a test");
+    assert!(
+        c.welcome()
+            .features
+            .iter()
+            .any(|f| f == skwird_protocol::NAMES_BOTH_FORMS),
+        "{:?}",
+        c.welcome()
+    );
+    for term in ["caf\u{e9}", "CAF\u{c9}", "caf\u{e9}*.txt"] {
+        assert!(
+            answered(&mut c, &named(&home, term)).contains(&decomposed),
+            "{term:?}"
+        );
+    }
+    for term in ["the\u{301}", "*the\u{301} ?.txt"] {
+        assert!(
+            answered(&mut c, &named(&home, term)).contains(&composed),
+            "{term:?}"
+        );
+    }
+}

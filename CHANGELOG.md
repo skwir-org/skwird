@@ -4,6 +4,19 @@ skwird's releases. Each section is its release's notes on GitHub
 (`tools/release/release.sh`): the first is the release being made, dated
 the day it is released.
 
+## 0.2.0 (unreleased)
+
+- **Names in both Unicode forms:** a term is matched composed and
+  decomposed (NFC and NFD), as skwir matches it, so that `café` typed
+  finds a name macOS wrote decomposed, and back. A glob is normalized in
+  its literal parts alone. No name is rewritten, and the index is
+  unchanged. The engine says so in its hello (`names-both-forms`).
+- **A sync answers at once on Windows and macOS:** on Windows, a sync of
+  any root is a barrier, where one of a root that did not hold the
+  engine's folders checked it whole; on macOS, a sync waits at most the
+  stream's 50 ms latency, not 0.5 s.
+- **macOS gives back the memory it freed** after a build, as Linux does.
+
 ## 0.1.0 (2026-11-24)
 
 The first release of skwird: an index of file names kept current by each

@@ -531,3 +531,37 @@ fn the_login_agent_is_written_and_taken() {
     assert!(!print().status.success(), "the agent is taken back");
     assert!(!file.exists());
 }
+
+/// A name written decomposed, as macOS' programs often write them, is
+/// found by a term typed composed, as keyboards type them, and back; and
+/// the engine says so in its hello (`names-both-forms`).
+#[test]
+fn a_name_is_found_by_a_term_in_either_form() {
+    let mut env = Env::new("mac-forms");
+    tree(&env);
+    let home = env.home();
+    let decomposed = env.s.file(home.join("docs/cafe\u{301} 1.txt"));
+    let composed = env.s.file(home.join("docs/th\u{e9} 2.txt"));
+    env.engine(30);
+    let mut c = env.client();
+    assert!(
+        c.welcome()
+            .features
+            .iter()
+            .any(|f| f == skwird_protocol::NAMES_BOTH_FORMS),
+        "{:?}",
+        c.welcome()
+    );
+    for term in ["caf\u{e9}", "CAF\u{c9}", "caf\u{e9}*.txt"] {
+        assert!(
+            answered(&mut c, &named(&home, term)).contains(&decomposed),
+            "{term:?}"
+        );
+    }
+    for term in ["the\u{301}", "*the\u{301} ?.txt"] {
+        assert!(
+            answered(&mut c, &named(&home, term)).contains(&composed),
+            "{term:?}"
+        );
+    }
+}
