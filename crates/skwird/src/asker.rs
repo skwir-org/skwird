@@ -288,12 +288,11 @@ fn has_acl(path: &Path) -> bool {
     }
 }
 
-/// On macOS, a folder's ACL is an extended one, which is not read yet
-/// (phase 5, step 7): any folder may have one, and is not known, never
-/// judged by its mode alone.
+/// Whether the folder at `path` has an ACL, an extended one as macOS keeps
+/// it: one that cannot be asked may.
 #[cfg(target_os = "macos")]
-fn has_acl(_: &Path) -> bool {
-    true
+fn has_acl(path: &Path) -> bool {
+    skwird_crawl::acl_at(path)
 }
 
 /// What `asker` may see of each folder's entries in `index`: whether they

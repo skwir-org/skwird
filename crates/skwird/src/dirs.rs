@@ -98,21 +98,34 @@ impl Dirs {
                 .filter(|p| p.is_absolute())
                 .unwrap_or_else(|| PathBuf::from(default))
         };
+        // On macOS (DESIGN 1, phase 5, step 7), macOS' own places, which
+        // launchd makes none of: its index in a cache's place, its state
+        // and configuration in the machine's application support, as
+        // Windows keeps them in its program data; and where every client
+        // looks for its socket (`skwird_client::system_socket`), macOS
+        // having no `/run`.
+        #[cfg(target_os = "macos")]
+        let (home, runtime, cache, state, config) = (
+            "/var/root",
+            "/var/run/skwird",
+            "/Library/Caches/skwird",
+            "/Library/Application Support/skwird/state",
+            "/Library/Application Support/skwird/config",
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (home, runtime, cache, state, config) = (
+            "/root",
+            "/run/skwird",
+            "/var/cache/skwird",
+            "/var/lib/skwird",
+            "/etc/skwird",
+        );
         Dirs {
-            home: PathBuf::from("/root"),
-            // Where every client looks (`skwird_client::system_socket`):
-            // macOS has no `/run`.
-            runtime: dir(
-                "RUNTIME_DIRECTORY",
-                if cfg!(target_os = "macos") {
-                    "/var/run/skwird"
-                } else {
-                    "/run/skwird"
-                },
-            ),
-            cache: dir("CACHE_DIRECTORY", "/var/cache/skwird"),
-            state: dir("STATE_DIRECTORY", "/var/lib/skwird"),
-            config: dir("CONFIGURATION_DIRECTORY", "/etc/skwird"),
+            home: PathBuf::from(home),
+            runtime: dir("RUNTIME_DIRECTORY", runtime),
+            cache: dir("CACHE_DIRECTORY", cache),
+            state: dir("STATE_DIRECTORY", state),
+            config: dir("CONFIGURATION_DIRECTORY", config),
         }
     }
 
@@ -229,6 +242,15 @@ pub fn make_system(dirs: &Dirs) -> Result<(), String> {
 #[cfg(unix)]
 pub fn make_system(dirs: &Dirs) -> Result<(), String> {
     make_shared(&dirs.runtime)?;
+    // On macOS, launchd makes none of them: its index and its
+    // configuration its own too, as systemd makes them on Linux
+    // (`CacheDirectoryMode=0700`). Its index is a list of every user's
+    // names (rule 2).
+    #[cfg(target_os = "macos")]
+    {
+        make_private(&dirs.cache)?;
+        make_private(&dirs.config)?;
+    }
     make_private(&dirs.state)
 }
 

@@ -133,16 +133,26 @@ pub fn removable(_: &Mount) -> bool {
     false
 }
 
-/// The users the system service keeps exclusions for (DESIGN 5): each
-/// user database entry's id and home, and each folder in `/home` by its
-/// owner, for a home only another source of the user database names.
+/// Where users' homes are: `/home` on Linux, `/Users` on macOS.
 #[cfg(target_os = "linux")]
+const HOMES: &str = "/home";
+#[cfg(target_os = "macos")]
+const HOMES: &str = "/Users";
+
+/// The users the system service keeps exclusions for (DESIGN 5): each
+/// entry's id and home of the user database's file, and each folder in
+/// [`HOMES`] by its owner, for a home only another source of the user
+/// database names. macOS' file names the system's users alone, root
+/// among them: its people are in its directory, each with a home in
+/// `/Users`. The directory is not asked: on a Mac joined to a network
+/// one, listing its users would ask the network's (rule 6).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn users() -> Vec<(u32, PathBuf)> {
     use std::os::unix::fs::MetadataExt;
     let mut users: Vec<(u32, PathBuf)> = std::fs::read_to_string("/etc/passwd")
         .map(|text| passwd_users(&text))
         .unwrap_or_default();
-    if let Ok(entries) = std::fs::read_dir("/home") {
+    if let Ok(entries) = std::fs::read_dir(HOMES) {
         for e in entries.flatten() {
             let path = e.path();
             if let Ok(meta) = std::fs::symlink_metadata(&path)
@@ -158,7 +168,7 @@ pub fn users() -> Vec<(u32, PathBuf)> {
 }
 
 /// Each entry's id and home, of a user database's text.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn passwd_users(text: &str) -> Vec<(u32, PathBuf)> {
     text.lines()
         .filter_map(|line| {
@@ -171,7 +181,7 @@ fn passwd_users(text: &str) -> Vec<(u32, PathBuf)> {
 }
 
 /// What came of reading a user's file.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub enum Own {
     /// Not there.
     Absent,
@@ -191,7 +201,6 @@ pub enum Own {
 #[cfg(target_os = "linux")]
 pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
     use rustix::fs::{Mode, OFlags, ResolveFlags};
-    use std::io::Read;
     let Ok(home_fd) = rustix::fs::open(
         home,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -210,6 +219,43 @@ pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
         Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Own::Absent,
         Err(_) => return Own::Refused,
     };
+    take_own(fd, uid)
+}
+
+/// A file of a user's own, at `rel` in their home, read for the system
+/// service (macOS): opened through the home's handle by a path that may
+/// hold no link at all (`O_NOFOLLOW_ANY`) and no `..` (`rel` is one of
+/// skwird's), and taken as on Linux. macOS gives no user a group of their
+/// own: a file their group may write is refused.
+#[cfg(target_os = "macos")]
+pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
+    use rustix::fs::{Mode, OFlags};
+    debug_assert!(!rel.split('/').any(|n| n == ".."));
+    let Ok(home_fd) = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return Own::Absent;
+    };
+    let fd = match rustix::fs::openat(
+        &home_fd,
+        rel,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW_ANY | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Own::Absent,
+        Err(_) => return Own::Refused,
+    };
+    take_own(fd, uid)
+}
+
+/// The file `fd` opened, taken if it is a file user `uid` or root owns
+/// that no one else may write: at most a mebibyte of it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take_own(fd: rustix::fd::OwnedFd, uid: u32) -> Own {
+    use std::io::Read;
     let Ok(st) = rustix::fs::fstat(&fd) else {
         return Own::Refused;
     };
@@ -227,6 +273,13 @@ pub fn read_own(home: &Path, uid: u32, rel: &str) -> Own {
         Ok(_) => Own::Read(bytes),
         Err(_) => Own::Refused,
     }
+}
+
+/// No group is a user's own on macOS: every user's primary group is the
+/// same (`staff`).
+#[cfg(target_os = "macos")]
+fn private_group(_: u32, _: u32) -> bool {
+    false
 }
 
 /// Whether group `gid` is user `uid`'s own private group: their primary
@@ -266,7 +319,8 @@ fn is_private_group(passwd: &str, group: &str, uid: u32, gid: u32) -> bool {
 
 /// Where a user's engine keeps their exclusions and what its clients
 /// registered, below their home, at the default places.
-#[cfg(target_os = "linux")]
+// On macOS too: a user's engine keeps its files at the XDG places there.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const OWN_FILES: (&str, &str) = (".config/skwird/exclude", ".local/state/skwird/registered");
 #[cfg(windows)]
 const OWN_FILES: (&str, &str) = (
@@ -275,7 +329,7 @@ const OWN_FILES: (&str, &str) = (
 );
 
 /// A folder a user's engine's clients registered, as the file keeps it.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(serde::Deserialize)]
 struct Registered {
     path: skwird_protocol::WirePath,
@@ -289,7 +343,7 @@ struct Registered {
 /// were there but not taken ([`read_own`]). On Windows, in their profile's local
 /// application data (`AppData\Local\skwird\config\exclude`,
 /// `AppData\Local\skwird\state\registered`), where their engine keeps them.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn own_exclusions(home: &Path, uid: u32) -> (Vec<PathBuf>, usize) {
     let mut paths = Vec::new();
     let mut refused = 0;
@@ -329,7 +383,7 @@ pub fn own_exclusions(home: &Path, uid: u32) -> (Vec<PathBuf>, usize) {
 /// Root owns every folder. A folder there is theirs if it is still that
 /// folder and they own it; a path where none is there yet, if it is in
 /// their home and they own that.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::FileId>) -> bool {
     use std::os::unix::fs::MetadataExt;
     if uid == 0 {
@@ -337,11 +391,23 @@ pub fn owned(uid: u32, home: &Path, resolved: &Path, id: Option<skwird_crawl::Fi
     }
     match id {
         Some(id) => std::fs::symlink_metadata(resolved)
-            .is_ok_and(|m| m.dev() == id.dev && m.ino() == id.ino && m.uid() == uid),
+            .is_ok_and(|m| dev_of(&m) == id.dev && m.ino() == id.ino && m.uid() == uid),
         None => {
             resolved.starts_with(home)
                 && std::fs::symlink_metadata(home).is_ok_and(|m| m.uid() == uid)
         }
+    }
+}
+
+/// A file's device, as the crawl keeps it: on macOS, its 32 bits, which
+/// std sign-extends.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn dev_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    if cfg!(target_os = "macos") {
+        meta.dev() & 0xFFFF_FFFF
+    } else {
+        meta.dev()
     }
 }
 
@@ -356,21 +422,20 @@ pub use windows::{
     keep_numbers, number_of, numbering, owned, read_own, roots as volume_roots, sid_of, users,
 };
 
-/// No user's exclusions are kept on macOS yet: its system service comes
-/// with phase 5.
-#[cfg(not(any(target_os = "linux", windows)))]
+/// No system service runs on this system (rule 7): no user's exclusions.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn users() -> Vec<(u32, PathBuf)> {
     Vec::new()
 }
 
-/// No user's file of exclusions is read on macOS yet.
-#[cfg(not(any(target_os = "linux", windows)))]
+/// No user's file of exclusions is read on this system.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn own_exclusions(_: &Path, _: u32) -> (Vec<PathBuf>, usize) {
     (Vec::new(), 0)
 }
 
-/// No folder is any user's own on macOS yet: none is registered for one.
-#[cfg(not(any(target_os = "linux", windows)))]
+/// No folder is any user's own on this system: none is registered for one.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn owned(_: u32, _: &Path, _: &Path, _: Option<skwird_crawl::FileId>) -> bool {
     false
 }

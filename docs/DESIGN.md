@@ -790,6 +790,15 @@ They are derived again with every other exclusion: at the service's
 start, at each sync and at each registration. A user whose files are
 not at the default places has what their clients register.
 
+**On macOS** (phase 5, step 7, 2026-11-24), the same, its users those
+of `/etc/passwd` (root and the system's) and each folder in `/Users` by
+its owner. Its people are in its directory, which is never asked: on a
+Mac joined to a network directory, listing them would ask the network
+(10). Their files are where their engine keeps them, the XDG places, and
+opened through the home by a path that may hold no link at all
+(`O_NOFOLLOW_ANY`). No group is a user's own on macOS, every user's
+primary group being `staff`: a file their group may write is refused.
+
 The default exclusions, at the system service, hold at their own place
 in each home, no link in their way, whoever owns them; reached through
 a link, only if the user owns what it leads to (the review found a user

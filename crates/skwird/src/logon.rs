@@ -13,9 +13,13 @@ use std::path::Path;
 /// The task's definition, for `program` run as `user` (a SID): the
 /// template's places filled, each value escaped as XML takes it.
 pub fn task(program: &Path, user: &str) -> String {
-    include_str!("../../../dist/windows/skwird-logon.xml")
-        .replace("{program}", &escape(&program.to_string_lossy()))
-        .replace("{user}", &escape(user))
+    fill(
+        include_str!("../../../dist/windows/skwird-logon.xml"),
+        &[
+            ("program", &escape(&program.to_string_lossy())),
+            ("user", &escape(user)),
+        ],
+    )
 }
 
 /// The task's name, the user's own: a name is the machine's, every
@@ -30,12 +34,45 @@ pub const AGENT: &str = "org.skwir.skwird";
 /// The `LaunchAgent`'s definition (macOS), for `program`, logging to `log`:
 /// the template's places filled, each value escaped as XML takes it.
 pub fn agent(program: &Path, log: &Path) -> String {
-    include_str!("../../../dist/macos/org.skwir.skwird.plist")
-        .replace("{program}", &escape(&program.to_string_lossy()))
-        .replace("{log}", &escape(&log.to_string_lossy()))
+    fill(
+        include_str!("../../../dist/macos/org.skwir.skwird.plist"),
+        &[
+            ("program", &escape(&program.to_string_lossy())),
+            ("log", &escape(&log.to_string_lossy())),
+        ],
+    )
 }
 
-fn escape(text: &str) -> String {
+/// `template` with each place (`{name}`) of `places` filled, in one pass:
+/// what a value holds is never read as a place, a path with `{log}` in it
+/// among them. A place no value is given for is left as it is.
+pub(crate) fn fill(template: &str, places: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after.find('}').and_then(|close| {
+            let name = &after[..close];
+            places
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| (*v, close))
+        });
+        if let Some((v, close)) = value {
+            out.push_str(v);
+            rest = &after[close + 1..];
+        } else {
+            out.push('{');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` as XML takes it in an element or an attribute.
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -161,7 +198,7 @@ pub fn remove() -> Result<String, String> {
 
 /// What `launchctl` said, run with `args`; its error where it failed.
 #[cfg(target_os = "macos")]
-fn launchctl(args: &[&str]) -> Result<String, String> {
+pub(crate) fn launchctl(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("launchctl")
         .args(args)
         .output()

@@ -16,6 +16,7 @@ pub mod asker;
 pub mod convert;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod coverage;
+pub mod daemon;
 pub mod dirs;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod engine;

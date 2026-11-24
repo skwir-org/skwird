@@ -918,27 +918,54 @@ pub fn full_disk_access() -> bool {
 /// A folder whose listing the cloud alone holds then fails to list, and
 /// is not covered.
 pub fn consent_withheld() -> &'static [PathBuf] {
-    static WITHHELD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
     WITHHELD.get_or_init(|| {
-        unsafe extern "C" {
-            fn setiopolicy_np(
-                iotype: libc::c_int,
-                scope: libc::c_int,
-                policy: libc::c_int,
-            ) -> libc::c_int;
-        }
-        // `IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES`, for the whole
-        // process (`IOPOL_SCOPE_PROCESS`), turned off.
-        // SAFETY: three numbers; the call changes this process' policy.
-        unsafe { setiopolicy_np(3, 0, 1) };
-        if full_disk_access() {
-            return Vec::new();
-        }
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-            return Vec::new();
-        };
-        // As roots are named, resolved: a home spelled through a link.
-        let home = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(home));
-        ASKED_CONSENT.iter().map(|rel| home.join(rel)).collect()
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+        withheld(home.iter().map(PathBuf::from))
     })
+}
+
+/// [`consent_withheld`], below each home of `homes` in place of the
+/// user's: the system service's, every user's home. Taken if it is asked
+/// before any folder is read, as the service asks it as it starts. A home
+/// made later, a user added while it runs, is not among them: its folders
+/// are read as any, and those the system refuses are denied.
+pub fn withhold_consent_below(homes: &[PathBuf]) -> &'static [PathBuf] {
+    WITHHELD.get_or_init(|| withheld(homes.iter().cloned()))
+}
+
+/// What [`consent_withheld`] decided, once a process.
+static WITHHELD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+fn withheld(homes: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
+    unsafe extern "C" {
+        fn setiopolicy_np(
+            iotype: libc::c_int,
+            scope: libc::c_int,
+            policy: libc::c_int,
+        ) -> libc::c_int;
+    }
+    // `IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES`, for the whole process
+    // (`IOPOL_SCOPE_PROCESS`), turned off.
+    // SAFETY: three numbers; the call changes this process' policy.
+    unsafe { setiopolicy_np(3, 0, 1) };
+    if full_disk_access() {
+        return Vec::new();
+    }
+    homes
+        .flat_map(|home| {
+            // As roots are named, resolved: a home spelled through a link.
+            let home = std::fs::canonicalize(&home).unwrap_or(home);
+            ASKED_CONSENT.iter().map(move |rel| home.join(rel))
+        })
+        .collect()
+}
+
+/// Whether the folder at `path` has an ACL (an extended one, macOS'),
+/// asked through the folder, opened following no link at its end: one
+/// that cannot be asked may.
+pub fn acl_at(path: &Path) -> bool {
+    match rustix::fs::open(path, dir_flags(), Mode::empty()) {
+        Ok(fd) => has_acl(fd.as_fd()),
+        Err(_) => true,
+    }
 }

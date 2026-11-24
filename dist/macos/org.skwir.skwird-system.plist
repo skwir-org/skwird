@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  skwird's system service on macOS (docs/DESIGN.md, decision 1;
+  docs/PLAN.md, phase 5, step 7): a LaunchDaemon, started by launchd at
+  boot as root, as systemd starts dist/systemd/skwird-system.service on
+  Linux and the service manager starts it on Windows.
+
+  `sudo skwird service add` writes it to /Library/LaunchDaemons, its
+  program that skwird, its log in /Library/Logs/skwird, with the roots
+  given (`--root`), and has launchd take it (`launchctl bootstrap
+  system`). `sudo skwird service remove` takes it back. A package may
+  install it the same way.
+
+  The folders macOS asks consent for in each home are read only with
+  Full Disk Access, which the user gives this program in System
+  Settings: a daemon cannot ask.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.skwir.skwird-system</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{program}</string>
+		<string>serve</string>
+		<string>--system</string>
+		<!-- Always: idle never ends it. -->
+		<string>--forever</string>{arguments}
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Started again where it failed, as systemd's Restart=on-failure. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<!-- A crawl yields to what the machine's users are doing. -->
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>StandardErrorPath</key>
+	<string>{log}</string>
+</dict>
+</plist>

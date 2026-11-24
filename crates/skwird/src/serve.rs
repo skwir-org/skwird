@@ -158,7 +158,16 @@ pub fn serve(config: &Config) -> Result<(), String> {
     // What this engine may not read without asking (DESIGN 4), decided once.
     #[cfg(target_os = "macos")]
     {
-        let withheld = skwird_crawl::consent_withheld().len();
+        // The system service's, below every user's home.
+        let withheld = if config.system {
+            let homes: Vec<std::path::PathBuf> = crate::system::users()
+                .into_iter()
+                .map(|(_, home)| home)
+                .collect();
+            skwird_crawl::withhold_consent_below(&homes).len()
+        } else {
+            skwird_crawl::consent_withheld().len()
+        };
         if withheld > 0 {
             log(&format!(
                 "{withheld} folders macOS asks consent for are not read: no Full Disk Access"

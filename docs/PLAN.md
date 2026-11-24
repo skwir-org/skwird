@@ -2481,14 +2481,45 @@ macOS 15, thrown away after its job. The gate lints for macOS
      holds it alone: `/` hears nothing of `/Users`, and an overflow there
      makes `/Users` alone checked again.
 
-   Its tests, on the runners: `/Users` a mount of the Data volume's device; a
+   Tested on the runners: `/Users` a mount of the Data volume's device; a
    change made through `/System/Volumes/Data/Users/...` heard by its
    firmlink's path; a change on a volume mounted below a root heard by
    that volume's root alone.
 
-   Left: the daemon itself (`skwird service add|remove`, its folders),
-   users' exclusions read from their homes, macOS' ACLs read and judged,
-   and its tests, which need root on a runner marked thrown away.
+   **The daemon** (2026-11-24):
+   - `sudo skwird service add [--root PATH]...` writes its `LaunchDaemon`
+     (`dist/macos/org.skwir.skwird-system.plist`: `serve --system
+     --forever`, the roots given, run at load, started again where it
+     failed, a background process of low-priority I/O) to
+     `/Library/LaunchDaemons`, root's alone to write, and has launchd take
+     it (`launchctl bootstrap system`); `remove` takes it back. Its log
+     is in `/Library/Logs/skwird`;
+   - its folders, macOS' own, made by it, since launchd makes none: its
+     index, state and configuration its own (0700), its socket's folder
+     every user's;
+   - each user's private folders kept out as on Linux: the users of
+     `/etc/passwd` (root, the system's) and each home in `/Users` by its
+     owner, the directory never asked, since a network's may be behind
+     it; each home's defaults, and the user's own exclusions and
+     registrations at the XDG places their engine keeps them, read through
+     the home by a path that holds no link (`O_NOFOLLOW_ANY`). No group is
+     a user's own on macOS (every user's is `staff`): a file their group
+     may write is refused;
+   - without Full Disk Access, the folders macOS asks consent for are
+     withheld below every user's home, not root's alone;
+   - a folder above a root is asked for its ACL, no longer taken to have
+     one.
+
+   Its test, on a runner marked thrown away: registered by `sudo` with a
+   root in `/Users/Shared`, it runs as root and answers its owner every
+   name, `nobody` those of folders open to every user alone; its folders
+   its own, its socket every user's; taken back, it answers no more.
+
+   The templates are filled in one pass (`logon::fill`): a value that
+   holds `{log}` is not read as a place.
+
+   Left: macOS' ACLs read and judged, and a home made while the service
+   runs, whose consent folders are not withheld.
 8. **Measured,** on a Mac when one is at hand.
 
 ## Later

@@ -34,9 +34,11 @@ status    what the engine says of itself
 logon     on Windows and macOS, start the engine at your logon (add), or
           no more (remove): on Windows a task of yours, running skwirdw.exe,
           skwird with no console window; on macOS a LaunchAgent of yours
-service   on Windows, the system service (add, as an administrator): every
-          user's files indexed, each user answered what they could list,
-          started at boot as LocalSystem; remove stops it and takes it back
+service   on Windows and macOS, the system service (add, as an
+          administrator; on macOS with sudo): every user's files indexed,
+          each user answered what they could list, started at boot as
+          LocalSystem, or root, a LaunchDaemon, on macOS; remove stops it and
+          takes it back
 
 The commands that ask start the engine where none answers, unless
 SKWIRD_NO_START is set. SKWIRD_WATCHES sets the most folders an engine
@@ -140,9 +142,17 @@ fn logon(what: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Register the system service and start it, or stop it and take it back
-/// (Windows): the roots named, if any, given to it.
+/// What registers the system service: the service manager on Windows,
+/// launchd on macOS.
+#[cfg(target_os = "macos")]
+use skwird::daemon as manager;
 #[cfg(windows)]
+use skwird::service as manager;
+
+/// Register the system service and start it, or stop it and take it back
+/// (Windows, and macOS' `LaunchDaemon`): the roots named, if any, given to
+/// it.
+#[cfg(any(windows, target_os = "macos"))]
 fn service(args: &Args) -> Result<(), String> {
     let said = match args.term.as_deref() {
         Some("add") => {
@@ -153,19 +163,19 @@ fn service(args: &Args) -> Result<(), String> {
                 given.push("--root".to_owned());
                 given.push(root.to_string_lossy().into_owned());
             }
-            skwird::service::add(&given)?
+            manager::add(&given)?
         }
-        Some("remove") => skwird::service::remove()?,
+        Some("remove") => manager::remove()?,
         _ => return Err("service takes add or remove".into()),
     };
     println!("{said}");
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn service(_: &Args) -> Result<(), String> {
     Err(
-        "service is Windows': elsewhere, the service manager's unit starts it \
+        "service is Windows' and macOS': elsewhere, the service manager's unit starts it \
          (dist/systemd/skwird-system.service)"
             .into(),
     )
