@@ -2665,18 +2665,58 @@ synthetic tree):
 | memory, live, then 10 idle minutes after | 47, 47 MB | 46, 17 MB | 114, 119 MB |
 | the processor over 10 idle minutes | 0.00 s | 0.00 s | 0.00 s |
 
-Idle is idle on every system. Two things to look at again:
-- **A sync waits on macOS and Windows** for about the stream's latency
-  (0.5 s) and nearly a second, where Linux answers at once. A sync
-  flushes the stream (above, "a latency of 0.5 s"), and should not wait
-  for it.
-- **macOS' engine holds twice and more Linux's memory,** and gives none
-  back idle: Linux's gives back what its crawl took (`malloc_trim`), and
-  macOS' has no such call there yet.
+Idle is idle on every system. Two things to look at again, both done
+the same day (`ci/all/followups`, measured again at `775664c`):
+- **A sync waited on macOS and Windows,** 0.51 s and 0.92 s, where
+  Linux answered at once. Now 0.06 s and 0.07 s:
+  - Windows: each root is heard on a stream of its own, and a cookie made
+    as a file was heard by the root holding the cookies' folder alone, so
+    a sync of the tree checked it whole. A cookie is now no file, asked of
+    the root's own thread, which says it after every change before it
+    (DESIGN, open question 2). Tried on the runner: 100 cookies asked
+    right after changes, each said after them all.
+  - macOS: a change just before the sync had opened the stream's
+    latency, 0.5 s, and the cookie waited it out. A probe on the runner
+    found no flush gives what the latency holds sooner (`FlushAsync`
+    gave nothing; `FlushSync` nothing asked as the cookie was made). The
+    latency is 50 ms now: what a sync waits at most.
+- **macOS' engine held twice and more Linux's memory** as `ps` says it:
+  114 MB resident live, 119 MB after. `ps`'s resident size there counts
+  what the allocator gave back as reusable and the system's libraries;
+  measured as macOS counts a process's own (its footprint,
+  `skwird-bench memory`), it holds 4.5 MB, Linux's 8.4 to 10.5, and 61.5
+  MB resident, 66.5 after. It gives back what it freed after a build, as
+  Linux does (`malloc_zone_pressure_relief`).
+
+Measured again at `775664c`, memory as resident and its own:
+
+| 1,040,000 entries | Linux | Windows | macOS |
+|---|---|---|---|
+| a sync after a change | 0.01 s | 0.07 s | 0.06 s |
+| memory, live | 48.3, 10.5 MB | 46.4, 39.6 MB | 61.5, 4.5 MB |
+| memory, 10 idle minutes after | 48.3, 8.4 MB | 16.6, 48.9 MB | 66.5, 4.5 MB |
+| the processor over 10 idle minutes | 0.00 s | 0.00 s | 0.01 s |
+
+One thing found, to look at: **Windows' engine holds its index as its
+own,** 39.6 to 48.9 MB for 1.04 million entries, over the budget of
+10 MB per million for memory at rest (DESIGN 10, "Memory, in two"): the
+index's files are mapped on Unix alone (`skwird_index::map`), and read
+into memory elsewhere. A mapping on Windows (`CreateFileMappingW`,
+`MapViewOfFile`) would make them pages the system drops, as on Unix.
+
+Found on the way: `2164a77` built no skwird for Windows, a feature its
+crate forgot hidden by the tests' kit's (`--all-targets` and
+`--workspace` take its features too). The gate and CI check each
+program alone since, as a release builds it.
 
 **For 0.2, with skwir's session:**
 - **Names in both Unicode forms** (open question 5): skwird's matcher
-  and skwir's together, in a release of each.
+  and skwir's together, in a release of each. Built on 2026-11-24, after
+  skwir's (its ADR-150): skwird's matcher makes each term as skwir's
+  does, holds to skwir's own cases, and reads a name where either form
+  could match; globset moved to 0.4.22, skwir's, which reads POSIX
+  classes. The engine says `names-both-forms` in its hello
+  (`skwird_protocol::NAMES_BOTH_FORMS`).
 - **Removable volumes on request** (open question 8): the request
   (Protocol, "Removable volumes") checked by skwir's session on
   2026-11-24: the six points it found are in it since (letting go
