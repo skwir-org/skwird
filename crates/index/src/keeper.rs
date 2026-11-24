@@ -219,6 +219,7 @@ impl Keeper {
                     // The exclusions may have changed while no engine ran.
                     let reconciled = keeper.reconcile();
                     keeper.read_acls(None);
+                    keeper.learn_descriptors();
                     keeper.root.let_go();
                     return Ok((
                         keeper,
@@ -660,6 +661,29 @@ impl Keeper {
     /// again only once its folder's change time moved, which a change of
     /// its ACL moves. One that cannot be read is left out: its folder is
     /// not known then, never answered as its mode alone says.
+    /// The security descriptors its folders are judged by, learned once for
+    /// each security id it holds (Windows' system service, DESIGN 4): an
+    /// index read back learned none, and a folder whose descriptor is not
+    /// held is denied every asker but `LocalSystem`. A root resumed, or
+    /// checked, reads again only what changed. Every system but Windows
+    /// keeps no descriptor.
+    #[cfg_attr(not(windows), allow(clippy::unused_self))]
+    fn learn_descriptors(&self) {
+        #[cfg(windows)]
+        if self.opts.acls {
+            let mut folders = Vec::new();
+            for (_, chunk) in self.index.tree().chunks() {
+                let view = chunk.view();
+                for b in 0..chunk.len() {
+                    if let Some(f) = view.facts(b) {
+                        folders.push((f.owner, f.id.ino));
+                    }
+                }
+            }
+            self.root.learn_all(folders);
+        }
+    }
+
     fn read_acls(&mut self, only: Option<&[FolderId]>) {
         if !self.opts.acls {
             return;

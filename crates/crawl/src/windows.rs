@@ -245,6 +245,21 @@ impl Root {
         descriptor_on(self.stat.id.dev, id)
     }
 
+    /// The descriptors of an index read back, learned (the system
+    /// service's, DESIGN 4): each folder's security id and file reference,
+    /// as the index kept them, each id's descriptor fetched once. A crawl
+    /// learns them as it reads; an index read back read nothing, and a
+    /// folder whose descriptor is not held is not known, so that every
+    /// asker would be denied what no change read again.
+    pub fn learn_all(&self, folders: impl IntoIterator<Item = (u32, u64)>) {
+        let mut seen = std::collections::HashSet::new();
+        for (id, folder) in folders {
+            if seen.insert(id) {
+                self.learn(id, folder);
+            }
+        }
+    }
+
     /// Fetch the descriptor of security id `id` through `folder` (its file
     /// reference), which holds it, unless it is held already. A descriptor
     /// that cannot be fetched is not held: its folders are not known.

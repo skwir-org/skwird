@@ -167,6 +167,14 @@ fn stopped_and_started_it_resumes(s: &Scratch, root: &Path) {
         assert!(Instant::now() < deadline, "never live again:\n{}", log());
         std::thread::sleep(Duration::from_millis(100));
     }
+    // A folder no change read again since the start, judged by its
+    // descriptor all the same: learned as the index was read back.
+    let all = answered(&mut c, &named(root, "notes"));
+    assert!(
+        all.contains(&root.join(r"closed\notes-closed.txt")),
+        "{all:?}\n{}",
+        log()
+    );
     let logged = log();
     let restart = logged.rfind("serving 2 roots").unwrap();
     let since = &logged[restart..];
