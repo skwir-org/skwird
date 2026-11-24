@@ -4,7 +4,7 @@ Each phase is useful alone, and ends with what was measured and what is
 left, honestly. The design is `docs/DESIGN.md`; a phase that changes a
 decision changes it there.
 
-## Where it stands (2026-11-23)
+## Where it stands (2026-11-24)
 
 Phase 0 is done. Phase 1 is done, its eight steps: a user's engine on
 Linux, started by its first client, answering protocol 0, measured on
@@ -22,12 +22,19 @@ module, proven as root in virtual machines. The choices phase 1 waited
 on were made on 2026-11-11 (DESIGN 2, 5 and the Protocol): private
 folders a client registers, tool stores indexed, network mounts never
 crawled, no crate on crates.io. skwir released
-0.6.0 on 2026-11-21, and its steps for skwird (below, "skwir, the first
-client") can take the client's copies now. Phase 4 is at its step 7
-(2026-11-23): a user's engine on Windows is built and tested under Wine,
-and the system service is built and tested on GitHub's Windows runners,
-which stand in for a Windows machine, the user having none (below,
-"Paused, and how it goes on").
+0.6.0 on 2026-11-21; its session builds on the client's copies (below,
+"skwir, the first client"), and skwird answers what it asked of it: links
+taken unfiltered, how far a journal's events are every change, and
+folder totals for its Usage view (step E, done on 2026-11-24). Phase 4
+is at its step 7, all but one of its gaps closed (2026-11-24): a user's
+engine on Windows built and tested under Wine; the system service built
+and tested on GitHub's Windows runners, which stand in for a Windows
+machine, the user having none (below, "Paused, and how it goes on"):
+its file table read and checked by, its journal followed and resumed
+from, its askers judged by their tokens, its users' exclusions kept, its
+volumes followed as they come and go. Left: folders above a root for a
+token that may not bypass traverse checking, and step 8, the
+measurement, on a Windows machine.
 
 ## Phase 0: measure (done)
 
@@ -2154,14 +2161,28 @@ above).
      told of: a volume found is a root where the roots were not named, one
      gone is let go of, a root whose volume is back checked and followed;
    - each followed root's volume is held, a handle registered: as its
-     removal is asked, the writer lets go of the root's watch and handles
-     before the service answers (`Command::LetGo`), and the root is not
-     live until its volume is back. The registration ends after the
-     manager's call, never from within it, which could wait for itself.
+     removal is asked, pending or done, the writer lets go of the root's
+     watch and handles before the service answers (`Command::LetGo`), and
+     the root is not live until its volume is back. A root whose path is
+     gone at any volume's removal is let go of too, whatever its handle
+     was told. The registration ends after the manager's call, never from
+     within it, which could wait for itself.
    - Tested on a runner: the spare volume a root is on, its virtual disk
-     detached while the service runs, is let go of and the detach goes
-     on; attached again, the root is live. Volumes found while it runs
+     detached while the service runs, is let go of; attached again, the
+     root is live. The first run found that a detach asks no one: the
+     root never let go, the detach going on all the same. Which of the
+     two ways lets go of it now (told as done, or found gone), the passing
+     run does not say. Volumes found while it runs
      are not tested there: the runner's own drives would be roots.
+   - **What its first run found,** a fault since the service was built:
+     an index read back learned no folder's descriptor, which only reading
+     a folder learns, so that a folder no change read again since the
+     start was denied every asker but `LocalSystem`. A root resumed reads
+     again what changed alone, as does a root checked. Each security id
+     an index holds has its descriptor fetched once now, as it is read
+     back (`Keeper::learn_descriptors`, `Root::learn_all`): one open for
+     each descriptor, not each folder. The restart test asks after it for
+     a file in the folder only the administrators may list.
 8. **Measured,** on a Windows machine when one is at hand: the user's
    choice of which. Until then, Wine's figures are labelled as Wine's,
    never as Windows'.
