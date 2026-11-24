@@ -227,6 +227,7 @@ dependencies = [
  "skwird-crawl",
  "skwird-testkit",
  "unicode-normalization",
+ "windows-sys",
 ]
 
 [[package]]
