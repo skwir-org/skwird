@@ -2461,6 +2461,37 @@ macOS 15, thrown away after its job. The gate lints for macOS
    Left: the daemon itself (`skwird service add|remove`, its folders and
    its socket in `/var/run/skwird`), macOS' ACLs read and judged, and
    its tests, which need root on a runner marked thrown away.
+
+   **To be decided** before it is built (the user's, each closing a
+   door):
+   - **Its roots.** Since macOS 10.15 the system's volume is read-only
+     and the users' files are on the Data volume, which firmlinks join
+     into `/` (`/Users` is `/System/Volumes/Data/Users`). The crawl tells
+     a mount by its device, so a root `/` would take `/Users` for a mount
+     and leave it out. Either `/` is the root and a firmlink
+     (`SF_FIRMLINK`) is crossed as fsearch crosses it, the Data volume's
+     folders named by their paths in `/`; or the Data volume is the root,
+     and every path a client names is turned from `/Users/...` to it and
+     back. The first is what users name, the second what the system
+     holds.
+   - **Who it runs as.** macOS has no capabilities: a daemon reads every
+     user's files as root, and the folders macOS asks consent for only
+     with Full Disk Access, which the user gives it in System Settings (a
+     daemon cannot ask). Without it, those folders are not covered, as a
+     user's engine leaves them (step 5).
+   - **Its folders:** `/var/run/skwird` (its socket, decided with the
+     client in step 2), and for its index, state and configuration
+     either Linux's (`/var/cache`, `/var/lib`, `/etc`, which macOS does
+     not use) or macOS' (`/Library/Caches/skwird`, `/var/db/skwird`,
+     `/Library/Application Support/skwird`).
+   - **macOS' ACLs.** Their entries name users and groups by UUID, which
+     only the system's membership calls turn into ids, nested groups
+     among them (`mbr_check_membership`). Either they are judged so, as
+     Linux's and Windows' are, or a folder with one stays not known, and
+     is answered to no one but root.
+   - **The workflow's mark** (`SKWIRD_TEST_MACHINE` in `macos.yml`), so
+     that the tests that need root, or have launchd start an engine, run
+     on the runners: a change to a workflow, pushed over SSH.
 8. **Measured,** on a Mac when one is at hand.
 
 ## Later
