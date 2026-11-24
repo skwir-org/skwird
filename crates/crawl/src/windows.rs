@@ -32,6 +32,7 @@
 
 pub mod journal;
 pub mod mft;
+pub mod plugged;
 pub(crate) mod security;
 pub mod volumes;
 pub mod watch;

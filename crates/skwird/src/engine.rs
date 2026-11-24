@@ -1995,8 +1995,51 @@ impl Writing<'_> {
     /// again ([`Writing::mounts_changed`]).
     #[cfg(windows)]
     fn let_go_of_volume(&mut self, i: usize, reply: &Sender<()>) {
+        // A kept volume's eject asked (the taskbar's "Safely remove"): a
+        // release, answered once its reads end, off the writer's turn.
+        let kept = self
+            .volume_roots
+            .iter()
+            .find(|(_, v)| v.root == i)
+            .map(|(id, v)| (id.clone(), Arc::clone(&v.reading)));
+        if let Some((id, reading)) = kept {
+            self.volumes
+                .released
+                .insert(id.clone(), Instant::now() + crate::volumes::RELEASED_FOR);
+            self.let_go_of_kept(&id);
+            let reply = reply.clone();
+            std::thread::spawn(move || {
+                reading.ended_within(crate::volumes::RELEASE_WAIT);
+                let _ = reply.send(());
+            });
+            return;
+        }
         self.let_go_of(i, "is being removed");
         let _ = reply.send(());
+    }
+
+    /// A kept volume's removal heard as it is asked (Windows): the writer
+    /// asked to let go of root `i` (`Command::LetGo`), and waited for, 10 s
+    /// at most, before the removal goes on.
+    #[cfg(windows)]
+    fn removal_heard(&self, i: usize, at: &Path) -> Option<skwird_crawl::RemovalHeard> {
+        let sender = self.sender.clone();
+        let heard = skwird_crawl::RemovalHeard::new(
+            at,
+            Box::new(move || {
+                let (reply, answer) = std::sync::mpsc::channel();
+                if sender.send(Command::LetGo { root: i, reply }).is_ok() {
+                    let _ = answer.recv_timeout(std::time::Duration::from_secs(10));
+                }
+            }),
+        );
+        match heard {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log(&format!("root {i}: its removal is not heard: {e}"));
+                None
+            }
+        }
     }
 
     /// Root `i`'s volume let go of, as it `goes` (Windows): its watch, its
@@ -2031,10 +2074,7 @@ impl Writing<'_> {
             return;
         }
         let now = Instant::now();
-        self.volumes.seen = Table::read()
-            .ok()
-            .and_then(|t| skwird_crawl::removable::seen(&t).ok())
-            .unwrap_or_default();
+        self.volumes.seen = skwird_crawl::removable::mounted().unwrap_or_default();
         // A release ends as its volume is seen unmounted.
         let seen = &self.volumes.seen;
         self.volumes.released.retain(|id, until| {
@@ -2085,6 +2125,8 @@ impl Writing<'_> {
                         at: at.clone(),
                         cancel: Cancel::default(),
                         reading: Arc::default(),
+                        #[cfg(windows)]
+                        held: self.removal_heard(i, &at),
                     },
                 );
                 log(&format!(
@@ -2095,6 +2137,10 @@ impl Writing<'_> {
                 #[cfg(target_os = "macos")]
                 if let Some(w) = &self.watcher {
                     self.marked[i] = watch_whole(w, i, &at, None).0;
+                }
+                #[cfg(windows)]
+                if let Some(w) = &self.watcher {
+                    self.marked[i] = watch_whole(w, i, &at, false, None).0;
                 }
                 self.open_later(i, at, Time::now(), ex.clone());
             }
@@ -2111,6 +2157,10 @@ impl Writing<'_> {
         let i = v.root;
         v.cancel.cancel();
         self.let_go.push(Arc::clone(&v.reading));
+        #[cfg(windows)]
+        if let Some(held) = v.held {
+            std::thread::spawn(move || drop(held));
+        }
         // Heard whole where roots are; on Linux, the watches of the folders
         // clients keep live there go with the scopes, and a watch holds no
         // mount.
@@ -2152,9 +2202,7 @@ impl Writing<'_> {
         if self.config.system {
             return Err("the system service keeps no removable volume".into());
         }
-        skwird_crawl::mounts::Table::read()
-            .map_err(|e| e.to_string())
-            .and_then(|t| skwird_crawl::removable::seen(&t))?;
+        skwird_crawl::removable::mounted()?;
         if crate::volumes::changed(&mut self.volumes.kept, client, keep, forget) {
             save_registered(&self.config.dirs, crate::volumes::FILE, &self.volumes.kept);
         }
@@ -2422,6 +2470,11 @@ struct VolumeRoot {
     at: PathBuf,
     cancel: Cancel,
     reading: Arc<crate::volumes::Reading>,
+    /// Its removal heard as it is asked (Windows): ended off the writer's
+    /// turn, as ending it waits for its call, which may wait for the
+    /// writer.
+    #[cfg(windows)]
+    held: Option<skwird_crawl::RemovalHeard>,
 }
 
 /// A client's `volumes` answered: what it keeps after and what is

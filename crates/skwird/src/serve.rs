@@ -341,6 +341,33 @@ fn sources(
             crate::live::listen(&w, &commands, &shared.readers);
         });
     }
+    // Windows' volumes arriving and going, heard for the removable volumes
+    // a user's engine keeps (`crate::volumes`), as the service hears them
+    // from its manager; and again 3 s after, a volume arrived being given
+    // its letter after it is told of.
+    #[cfg(windows)]
+    if !config.system {
+        static HEARD: std::sync::OnceLock<skwird_crawl::VolumesHeard> = std::sync::OnceLock::new();
+        let commands = commands.clone();
+        let heard = skwird_crawl::VolumesHeard::new(Box::new(move || {
+            let _ = commands.send(Command::Mounts);
+            let again = commands.clone();
+            let _ = std::thread::Builder::new()
+                .name("skwird-volumes".into())
+                .spawn(move || {
+                    std::thread::sleep(Duration::from_secs(3));
+                    let _ = again.send(Command::Mounts);
+                });
+        }));
+        match heard {
+            Ok(h) => {
+                let _ = HEARD.set(h);
+            }
+            Err(e) => log(&format!(
+                "volumes are not heard, so a kept volume is a root from the next start: {e}"
+            )),
+        }
+    }
     // macOS' mounts, followed for the removable volumes a user's engine
     // keeps (`crate::volumes`).
     #[cfg(target_os = "macos")]
@@ -1198,11 +1225,10 @@ pub(crate) fn named<T: Send + 'static>(
 
 /// What this engine says it does beyond its version (`Welcome::features`):
 /// names in both forms everywhere; removable volumes at a user's engine
-/// where its system's are seen (`skwird_crawl::removable`), Linux's and
-/// macOS' so far.
+/// (`skwird_crawl::removable`).
 fn features(system: bool) -> Vec<String> {
     let mut said = vec![wire::NAMES_BOTH_FORMS.to_owned()];
-    if !system && cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !system {
         said.push(wire::VOLUMES.to_owned());
     }
     said

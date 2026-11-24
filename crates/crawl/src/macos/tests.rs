@@ -569,7 +569,7 @@ fn a_disk_image_attached_is_a_removable_volume() {
     assert!(attached.success(), "hdiutil attach");
     let _attached = Attached { at: &at };
     let at = crate::canonical(&at).unwrap();
-    let seen = crate::removable::seen(&Table::read().unwrap()).unwrap();
+    let seen = crate::removable::mounted().unwrap();
     let stick = seen
         .iter()
         .find(|r| r.point == at)

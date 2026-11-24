@@ -601,3 +601,191 @@ fn a_second_engine_waits_and_takes_over() {
         "the second serves"
     );
 }
+
+/// `diskpart` run on `script`'s lines.
+fn diskpart(env: &Env, name: &str, script: &[String]) -> bool {
+    let file = env.s.join(format!("{name}.diskpart"));
+    std::fs::write(&file, script.join("\r\n")).unwrap();
+    Command::new("diskpart")
+        .arg("/s")
+        .arg(&file)
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Whether the volume mounted at `at` can be locked: only where no handle
+/// but this one is open on it (`FSCTL_LOCK_VOLUME`); unlocked at once.
+#[allow(unsafe_code)] // Windows' volume lock has no safe binding; each block says why it is sound.
+fn locks(at: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, GetVolumeNameForVolumeMountPointW,
+        OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::{FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME};
+    let mut point: Vec<u16> = at.as_os_str().encode_wide().collect();
+    point.extend("\\\0".encode_utf16());
+    let mut name = [0u16; 64];
+    // SAFETY: a NUL-ended path, and a buffer of its length.
+    if unsafe { GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
+        return false;
+    }
+    let end = name.iter().position(|&c| c == 0).unwrap_or(0);
+    // `\\?\Volume{…}`, its trailing backslash left out: the volume, not
+    // its root folder.
+    name[end - 1] = 0;
+    // SAFETY: a NUL-ended name; a handle of ours, closed below.
+    let volume = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if volume == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let mut got = 0u32;
+    // SAFETY: the handle above; no buffers.
+    let locked = unsafe {
+        DeviceIoControl(
+            volume,
+            FSCTL_LOCK_VOLUME,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &raw mut got,
+            std::ptr::null_mut(),
+        )
+    } != 0;
+    // SAFETY: as above; then the handle closed once.
+    unsafe {
+        if locked {
+            DeviceIoControl(
+                volume,
+                FSCTL_UNLOCK_VOLUME,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &raw mut got,
+                std::ptr::null_mut(),
+            );
+        }
+        CloseHandle(volume);
+    }
+    locked
+}
+
+/// A removable volume a client keeps (DESIGN, Protocol, "Removable
+/// volumes"), on Windows: a FAT32 virtual disk attached and mounted at a
+/// folder, seen by its serial with its label, not indexed until kept.
+/// Kept, a root there, its names answered, and a handle of the engine's
+/// open on it (its watch's): it cannot be locked. Released by where it is
+/// mounted, nothing of it is held: it can be. Detached, it is away;
+/// attached again, a root again; forgotten. On a machine of the tests'
+/// own alone (`skwird_testkit::throwaway`): it makes a disk, as an
+/// administrator.
+#[test]
+fn a_kept_virtual_disk_is_a_root_while_it_is_attached() {
+    if !skwird_testkit::throwaway() {
+        eprintln!("skipped: it makes a disk (SKWIRD_TEST_MACHINE)");
+        return;
+    }
+    let mut env = Env::new("win-volumes");
+    tree(&env);
+    let disk = env.s.join("stick.vhdx");
+    let at = env.s.dir("stick");
+    let vdisk = format!("select vdisk file=\"{}\"", disk.display());
+    let mount = format!("assign mount=\"{}\"", at.display());
+    assert!(
+        diskpart(
+            &env,
+            "make",
+            &[
+                format!(
+                    "create vdisk file=\"{}\" maximum=64 type=expandable",
+                    disk.display()
+                ),
+                vdisk.clone(),
+                "attach vdisk".into(),
+                "create partition primary".into(),
+                "format fs=fat32 quick label=TESTSTICK".into(),
+                mount.clone(),
+            ]
+        ),
+        "diskpart: made"
+    );
+    let attach = |env: &Env| {
+        diskpart(
+            env,
+            "attach",
+            &[
+                vdisk.clone(),
+                "attach vdisk".into(),
+                "select partition 1".into(),
+                mount.clone(),
+            ],
+        )
+    };
+    let detach = |env: &Env| diskpart(env, "detach", &[vdisk.clone(), "detach vdisk".into()]);
+    std::fs::write(at.join("on the stick.txt"), b"x").unwrap();
+    env.engine(60);
+    let mut c = env.client();
+    assert!(
+        c.welcome()
+            .features
+            .iter()
+            .any(|f| f == skwird_protocol::VOLUMES)
+    );
+    let v = c.volumes(&[], &[], &[]).unwrap();
+    let seen = v
+        .seen
+        .iter()
+        .find(|s| s.at == WirePath::of(&at))
+        .unwrap_or_else(|| panic!("the disk is not seen: {v:?}"));
+    assert_eq!(seen.filesystem, "FAT32");
+    assert_eq!(seen.label.as_deref(), Some("TESTSTICK"));
+    assert!(!seen.kept);
+    let id = seen.id.clone().expect("a serial");
+    assert!(id.len() == 9 && id.as_bytes()[4] == b'-', "{id}");
+    let v = c.volumes(&[&id], &[], &[]).unwrap();
+    assert_eq!(
+        v.kept[0].standing,
+        skwird_protocol::Standing::Indexed,
+        "{v:?}"
+    );
+    let file = at.join("on the stick.txt");
+    wait_for(30, "the kept disk indexed", || {
+        answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
+    });
+    assert!(!locks(&at), "locked while the engine watches it");
+    let v = c.release_at(&[&at]).unwrap();
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Released);
+    assert!(locks(&at), "the engine holds something on it");
+    assert!(detach(&env), "diskpart: detached");
+    wait_for(15, "the disk away", || {
+        c.volumes(&[], &[], &[])
+            .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
+    });
+    // `assign` may find the folder still holds its mount point: it says so,
+    // and the volume is mounted there all the same.
+    let _ = attach(&env);
+    wait_for(30, "the disk indexed again", || {
+        answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
+    });
+    let v = c.volumes(&[], &[&id], &[]).unwrap();
+    assert!(v.kept.is_empty(), "{v:?}");
+    drop(c);
+    assert!(detach(&env), "diskpart: detached");
+}

@@ -23,13 +23,16 @@
 //! On macOS: each volume the Finder shows, from a disk `DiskArbitration`
 //! says is plugged in ([`seen`]).
 //!
-//! On Windows, not yet: it says so.
+//! On Windows: each volume mounted, at each path it is mounted at, whose
+//! drive is removable (or optical), or whose disk is on a USB or SD bus or
+//! a virtual disk attached (`crate::windows::plugged`).
 
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::mounts::Table;
 
 /// A removable volume mounted.
@@ -48,8 +51,23 @@ pub struct Removable {
 
 /// The removable volumes mounted, in the mount table's order.
 #[cfg(target_os = "linux")]
-pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
-    Ok(seen_in(table, Path::new("/sys"), Path::new("/dev/disk")))
+pub fn mounted() -> Result<Vec<Removable>, String> {
+    let table = Table::read().map_err(|e| format!("the mount table cannot be read: {e}"))?;
+    Ok(seen_in(&table, Path::new("/sys"), Path::new("/dev/disk")))
+}
+
+/// The removable volumes mounted, in the mount table's order.
+#[cfg(target_os = "macos")]
+pub fn mounted() -> Result<Vec<Removable>, String> {
+    let table = Table::read().map_err(|e| format!("the mount table cannot be read: {e}"))?;
+    Ok(seen(&table))
+}
+
+/// The removable volumes mounted, each where it is mounted, in the
+/// system's order of volumes.
+#[cfg(windows)]
+pub fn mounted() -> Result<Vec<Removable>, String> {
+    crate::sys::plugged::mounted()
 }
 
 /// The removable volumes mounted, in the mount table's order (macOS):
@@ -59,7 +77,7 @@ pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
 /// UUID, the one `DiskArbitration` derives from a FAT or exFAT serial; its
 /// label, its volume's name.
 #[cfg(target_os = "macos")]
-pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
+fn seen(table: &Table) -> Vec<Removable> {
     let hidden = crate::sys::not_browsed();
     let mut seen: Vec<Removable> = Vec::new();
     for m in table.mounts() {
@@ -87,12 +105,12 @@ pub fn seen(table: &Table) -> Result<Vec<Removable>, String> {
             label: disk.name,
         });
     }
-    Ok(seen)
+    seen
 }
 
-/// Not yet on this system.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn seen(_: &Table) -> Result<Vec<Removable>, String> {
+/// Not on this system.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub fn mounted() -> Result<Vec<Removable>, String> {
     Err(format!(
         "removable volumes are not seen on {} yet",
         std::env::consts::OS
