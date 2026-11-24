@@ -450,3 +450,57 @@ fn a_change_on_a_volume_below_a_root_is_its_own_roots_alone() {
     );
     assert!(!heard.contains(&Heard::Overflow { scope: 0 }), "{heard:?}");
 }
+
+/// A folder's extended ACL is read whole, its entries in the order the
+/// system keeps them (a deny before an allow), each its kind and rights;
+/// a folder with none has none read.
+#[test]
+fn a_folders_extended_acl_is_read_whole() {
+    use crate::acl::{EVERYONE, LIST_DIRECTORY, SEARCH};
+    let s = Scratch::new("macos-acl-read");
+    s.file("shared/inside");
+    s.file("plain/inside");
+    for entry in ["group:staff allow list,search", "everyone deny delete"] {
+        let added = Command::new("chmod")
+            .args(["+a", entry])
+            .arg(s.join("shared"))
+            .status()
+            .unwrap();
+        assert!(added.success(), "chmod +a {entry}");
+    }
+    let root = open(&s);
+    let crawl = crawl_all(
+        &root,
+        &crate::Options {
+            acls: true,
+            ..opts(1)
+        },
+        &Cancel::default(),
+    )
+    .unwrap();
+    let id = |rel: &str| {
+        crawl
+            .folders
+            .iter()
+            .find(|f| f.rel == Path::new(rel))
+            .and_then(|f| f.stat)
+            .map(|s| s.id)
+            .unwrap()
+    };
+    let acl = root
+        .access_acl(Path::new("shared"), id("shared"))
+        .expect("its ACL");
+    let entries = acl.entries();
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    let (deny, allow) = (entries[0], entries[1]);
+    assert_eq!(
+        (deny.who, deny.flags & 0xf, deny.rights),
+        (EVERYONE, 2, 1 << 4)
+    );
+    assert_ne!(allow.who, EVERYONE, "staff's");
+    assert_eq!(
+        (allow.flags & 0xf, allow.rights),
+        (1, LIST_DIRECTORY | SEARCH)
+    );
+    assert_eq!(root.access_acl(Path::new("plain"), id("plain")), None);
+}

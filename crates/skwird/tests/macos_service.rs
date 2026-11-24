@@ -170,8 +170,10 @@ fn as_nobody(bin: &Path, root: &Path, text: &str) -> BTreeSet<PathBuf> {
 /// The service, registered by `sudo skwird service add` with a root of
 /// the test's own, runs as root and answers each user what they could
 /// list: its owner every name, `nobody` those of folders open to every
-/// user alone. Its index and state are its own, its socket every user's;
-/// taken back, it answers no more.
+/// user alone, as each folder's ACL says first (macOS' extended ones):
+/// one that denies them listing hides what its mode would show, one that
+/// lets them in shows what its mode would hide. Its index and state are
+/// its own, its socket every user's; taken back, it answers no more.
 #[test]
 fn the_service_answers_each_user_what_they_could_list() {
     if !skwird_testkit::throwaway() {
@@ -183,6 +185,19 @@ fn the_service_answers_each_user_what_they_could_list() {
     let s = Shared::new("service");
     s.folder("root/open", 0o755, "public-notes.txt");
     s.folder("root/closed", 0o700, "secret-notes.txt");
+    let denied = s.folder("root/denied", 0o755, "denied-notes.txt");
+    let let_in = s.folder("root/let-in", 0o700, "let-in-notes.txt");
+    for (folder, entry) in [
+        (&denied, "user:nobody deny list"),
+        (&let_in, "user:nobody allow list,search"),
+    ] {
+        let added = Command::new("chmod")
+            .args(["+a", entry])
+            .arg(folder)
+            .output()
+            .unwrap();
+        assert!(added.status.success(), "{}", said(&added));
+    }
     let root = skwird_crawl::canonical(s.0.join("root")).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
     // The program `nobody` runs, where they may run it.
@@ -212,11 +227,21 @@ fn the_service_answers_each_user_what_they_could_list() {
     let mut c = ready(&root);
     let open = root.join("open/public-notes.txt");
     let closed = root.join("closed/secret-notes.txt");
+    let denied = root.join("denied/denied-notes.txt");
+    let let_in = root.join("let-in/let-in-notes.txt");
     let mine = answered(&mut c, &named(&root, "notes"));
-    assert!(mine.contains(&open) && mine.contains(&closed), "{mine:?}");
+    for theirs in [&open, &closed, &denied, &let_in] {
+        assert!(mine.contains(theirs), "{mine:?}");
+    }
     let nobodys = as_nobody(&theirs, &root, "notes");
     assert!(nobodys.contains(&open), "{nobodys:?}\n{}", log());
     assert!(!nobodys.contains(&closed), "{nobodys:?}");
+    assert!(!nobodys.contains(&denied), "denied by its ACL: {nobodys:?}");
+    assert!(
+        nobodys.contains(&let_in),
+        "let in by its ACL: {nobodys:?}\n{}",
+        log()
+    );
 
     // Its folders: its index and state its own, its socket every user's.
     for own in [

@@ -1,7 +1,22 @@
-//! A folder's access ACL (`docs/DESIGN.md`, decision 4; phase 3, step
-//! 5b): read as Linux keeps it (`system.posix_acl_access`), and evaluated
-//! as the kernel evaluates it (acl(5)), so that the system service answers
-//! each asker what a folder with an ACL lets them list.
+//! A folder's access ACL (`docs/DESIGN.md`, decision 4): read as its
+//! system keeps it, and evaluated as its kernel evaluates it, so that the
+//! system service answers each asker what a folder with an ACL lets them
+//! list.
+//! - Linux's ([`Posix`], phase 3, step 5b): `system.posix_acl_access`,
+//!   acl(5).
+//! - macOS' ([`Extended`], phase 5, step 7): an extended ACL, as
+//!   `getattrlist` gives it (`ATTR_CMN_EXTENDED_SECURITY`), evaluated as
+//!   kauth does.
+//!
+//! Both are read and tested on every system; [`Acl`] is the one this
+//! system keeps.
+
+/// The ACL this system keeps: macOS' extended one.
+#[cfg(target_os = "macos")]
+pub type Acl = Extended;
+/// The ACL this system keeps: Linux's access ACL.
+#[cfg(not(target_os = "macos"))]
+pub type Acl = Posix;
 
 /// The tags of an ACL's entries, as the kernel writes them.
 const USER_OBJ: u16 = 0x01;
@@ -17,15 +32,15 @@ const VERSION: u32 = 2;
 /// An access ACL: each entry's tag, permissions (4 read, 2 write, 1
 /// search) and the user or group it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Acl {
+pub struct Posix {
     entries: Vec<(u16, u16, u32)>,
 }
 
-impl Acl {
+impl Posix {
     /// An ACL as the kernel writes it in `system.posix_acl_access`: a
     /// version, then entries of a tag, permissions and an id. None if it
     /// is not one, or lacks an entry every ACL has.
-    pub fn parse(bytes: &[u8]) -> Option<Acl> {
+    pub fn parse(bytes: &[u8]) -> Option<Posix> {
         let (version, rest) = bytes.split_first_chunk::<4>()?;
         if u32::from_le_bytes(*version) != VERSION || rest.len() % 8 != 0 {
             return None;
@@ -41,7 +56,7 @@ impl Acl {
             })
             .collect();
         let has = |tag| entries.iter().any(|&(t, ..)| t == tag);
-        (has(USER_OBJ) && has(GROUP_OBJ) && has(OTHER)).then_some(Acl { entries })
+        (has(USER_OBJ) && has(GROUP_OBJ) && has(OTHER)).then_some(Posix { entries })
     }
 
     fn perm(&self, tag: u16) -> Option<u16> {
@@ -101,8 +116,177 @@ impl Acl {
     }
 }
 
+/// What an extended ACL's entry is (`KAUTH_ACE_KINDMASK` of its flags): an
+/// allow or a deny. An audit or an alarm decides nothing.
+const KIND: u32 = 0xf;
+const PERMIT: u32 = 1;
+const DENY: u32 = 2;
+/// An entry for what is made inside alone, not for the folder itself
+/// (`KAUTH_ACE_ONLY_INHERIT`).
+const ONLY_INHERIT: u32 = 1 << 8;
+/// What an extended security's first word is (`KAUTH_FILESEC_MAGIC`).
+const FILESEC_MAGIC: u32 = 0x012c_c16d;
+/// A count of entries that says there is no ACL (`KAUTH_FILESEC_NOACL`).
+const NO_ACL: u32 = u32::MAX;
+/// Where an extended security's entries start: after its magic, its
+/// owner's and group's UUIDs, and its count and flags.
+const ENTRIES_AT: usize = 4 + 16 + 16 + 4 + 4;
+
+/// A folder's right to have its entries listed (`KAUTH_VNODE_LIST_DIRECTORY`).
+pub const LIST_DIRECTORY: u32 = 1 << 1;
+/// A folder's right to be passed through (`KAUTH_VNODE_SEARCH`).
+pub const SEARCH: u32 = 1 << 3;
+/// The generic rights an entry may name (`KAUTH_ACE_GENERIC_*`), each
+/// holding some of those.
+const GENERIC_ALL: u32 = 1 << 21;
+const GENERIC_EXECUTE: u32 = 1 << 22;
+const GENERIC_READ: u32 = 1 << 24;
+
+/// The UUID of `everyone`, the group every user is in
+/// (`ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C`).
+pub const EVERYONE: [u8; 16] = [
+    0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0, 0, 0, 0x0c,
+];
+
+/// macOS' extended ACL: its entries in order, each naming a user or a
+/// group by UUID, its kind and flags, and the rights it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Extended {
+    entries: Vec<Entry>,
+}
+
+/// An entry of an extended ACL (`kauth_ace`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// The user or group it applies to.
+    pub who: [u8; 16],
+    pub flags: u32,
+    pub rights: u32,
+}
+
+/// What an extended ACL decides of the rights asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decided {
+    /// An entry that applies denies one of them.
+    Denied,
+    /// The entries that apply allow them all.
+    Allowed,
+    /// These, which no entry decided, are left to the mode.
+    Left(u32),
+}
+
+impl Extended {
+    /// An extended ACL as `getattrlist` gives it (a `kauth_filesec`): its
+    /// magic, its owner's and its group's UUIDs, its count of entries and
+    /// its flags, then each entry, a UUID, flags and rights, each word in
+    /// the byte order its magic is in. None if it is not one; one of no
+    /// entries where it says it has none.
+    pub fn parse(bytes: &[u8]) -> Option<Extended> {
+        let word = |at: usize, big: bool| -> Option<u32> {
+            let w: [u8; 4] = bytes.get(at..at.checked_add(4)?)?.try_into().ok()?;
+            Some(if big {
+                u32::from_be_bytes(w)
+            } else {
+                u32::from_le_bytes(w)
+            })
+        };
+        let big = if word(0, false)? == FILESEC_MAGIC {
+            false
+        } else if word(0, true)? == FILESEC_MAGIC {
+            true
+        } else {
+            return None;
+        };
+        let count = word(ENTRIES_AT - 8, big)?;
+        if count == NO_ACL {
+            return Some(Extended {
+                entries: Vec::new(),
+            });
+        }
+        let entries = (0..usize::try_from(count).ok()?)
+            .map(|i| {
+                let at = ENTRIES_AT.checked_add(i.checked_mul(24)?)?;
+                let who: [u8; 16] = bytes.get(at..at.checked_add(16)?)?.try_into().ok()?;
+                Some(Entry {
+                    who,
+                    flags: word(at + 16, big)?,
+                    rights: word(at + 20, big)?,
+                })
+            })
+            .collect::<Option<Vec<Entry>>>()?;
+        Some(Extended { entries })
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// What the entries decide of the rights `asked` (of [`LIST_DIRECTORY`]
+    /// and [`SEARCH`]), as kauth decides them (`kauth_acl_evaluate`), in
+    /// order:
+    /// - an entry for what is made inside alone is passed over, and so is
+    ///   one that names none of the rights still to be decided, so that
+    ///   `applies` is asked of no other: the default ones, which name
+    ///   `delete` alone, never;
+    /// - an allow that applies takes the rights it names off those left,
+    ///   all allowed once none is;
+    /// - a deny that applies, of any right asked, refuses.
+    ///
+    /// What no entry decided is left to the mode. None where `applies`
+    /// cannot tell whether an entry is the asker's: the ACL is never
+    /// judged as if it were not.
+    pub fn decide(
+        &self,
+        asked: u32,
+        mut applies: impl FnMut(&[u8; 16]) -> Option<bool>,
+    ) -> Option<Decided> {
+        let mut left = asked;
+        for e in &self.entries {
+            if e.flags & ONLY_INHERIT != 0 {
+                continue;
+            }
+            let rights = expanded(e.rights);
+            let kind = e.flags & KIND;
+            let names = match kind {
+                PERMIT => rights & left != 0,
+                DENY => rights & asked != 0,
+                _ => false,
+            };
+            if !names || !applies(&e.who)? {
+                continue;
+            }
+            if kind == DENY {
+                return Some(Decided::Denied);
+            }
+            left &= !rights;
+            if left == 0 {
+                return Some(Decided::Allowed);
+            }
+        }
+        Some(Decided::Left(left))
+    }
+}
+
+/// The rights an entry names, its generic ones held as those they hold of
+/// a folder's listing and passing through (`ae_exp_g*`, as vnode
+/// authorization gives them).
+fn expanded(rights: u32) -> u32 {
+    let mut r = rights;
+    if rights & GENERIC_ALL != 0 {
+        r |= LIST_DIRECTORY | SEARCH;
+    }
+    if rights & GENERIC_READ != 0 {
+        r |= LIST_DIRECTORY;
+    }
+    if rights & GENERIC_EXECUTE != 0 {
+        r |= SEARCH;
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
+    use super::Posix as Acl;
     use super::*;
 
     fn acl(entries: &[(u16, u16, u32)]) -> Acl {
@@ -210,5 +394,150 @@ mod tests {
         no_other.extend_from_slice(&[1, 0, 7, 0, 255, 255, 255, 255]);
         no_other.extend_from_slice(&[4, 0, 5, 0, 255, 255, 255, 255]);
         assert_eq!(Acl::parse(&no_other), None, "no others' entry");
+    }
+
+    /// An extended security as `getattrlist` gives it, in `big` or little
+    /// byte order: its magic, two UUIDs, the count of `entries`, no flags,
+    /// then each entry.
+    fn security(entries: &[([u8; 16], u32, u32)], big: bool) -> Vec<u8> {
+        let w = |v: u32| {
+            if big {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let mut b = w(FILESEC_MAGIC).to_vec();
+        b.extend([0u8; 32]);
+        b.extend(w(u32::try_from(entries.len()).unwrap()));
+        b.extend(w(0));
+        for (who, flags, rights) in entries {
+            b.extend(who);
+            b.extend(w(*flags));
+            b.extend(w(*rights));
+        }
+        b
+    }
+
+    const DELETE: u32 = 1 << 4;
+    const SOMEONE: [u8; 16] = [7; 16];
+    const A_GROUP: [u8; 16] = [9; 16];
+
+    fn extended(entries: &[([u8; 16], u32, u32)]) -> Extended {
+        Extended::parse(&security(entries, false)).unwrap()
+    }
+
+    /// An extended ACL is read in the byte order its magic is in; one that
+    /// says it has none has no entry; what is not one, or is cut short, is
+    /// refused.
+    #[test]
+    fn an_extended_acl_is_read_in_its_magics_byte_order() {
+        for big in [false, true] {
+            let bytes = security(
+                &[
+                    (EVERYONE, DENY, DELETE),
+                    (SOMEONE, PERMIT, LIST_DIRECTORY | SEARCH),
+                ],
+                big,
+            );
+            let acl = Extended::parse(&bytes).unwrap();
+            assert_eq!(
+                acl.entries(),
+                &[
+                    Entry {
+                        who: EVERYONE,
+                        flags: DENY,
+                        rights: DELETE
+                    },
+                    Entry {
+                        who: SOMEONE,
+                        flags: PERMIT,
+                        rights: LIST_DIRECTORY | SEARCH
+                    },
+                ]
+            );
+        }
+        let mut none = security(&[], false);
+        none[36..40].copy_from_slice(&NO_ACL.to_le_bytes());
+        assert_eq!(Extended::parse(&none).unwrap().entries(), &[]);
+        assert_eq!(Extended::parse(&[0; 44]), None, "no magic");
+        let whole = security(&[(SOMEONE, PERMIT, SEARCH)], false);
+        assert_eq!(
+            Extended::parse(&whole[..whole.len() - 1]),
+            None,
+            "cut short"
+        );
+    }
+
+    /// The default entries name deletion alone: passed over, no asker
+    /// looked up, the mode left to decide.
+    #[test]
+    fn an_entry_that_names_no_right_asked_is_passed_over() {
+        let acl = extended(&[(EVERYONE, DENY, DELETE)]);
+        let decided = acl.decide(LIST_DIRECTORY | SEARCH, |_| panic!("looked up"));
+        assert_eq!(decided, Some(Decided::Left(LIST_DIRECTORY | SEARCH)));
+    }
+
+    /// In order: an allow takes off what it names, the rest left to the
+    /// mode; a deny of a right asked refuses, after an allow of another;
+    /// an allow of every right asked, before a deny, allows. One not the
+    /// asker's, or for what is made inside alone, is passed over; a
+    /// generic right holds those it holds.
+    #[test]
+    fn entries_decide_in_their_order() {
+        let me = |who: &[u8; 16]| Some(*who == SOMEONE || *who == EVERYONE);
+        let both = LIST_DIRECTORY | SEARCH;
+        let decide = |entries: &[([u8; 16], u32, u32)], asked| extended(entries).decide(asked, me);
+        assert_eq!(
+            decide(&[(SOMEONE, PERMIT, LIST_DIRECTORY)], both),
+            Some(Decided::Left(SEARCH))
+        );
+        assert_eq!(
+            decide(
+                &[
+                    (SOMEONE, PERMIT, LIST_DIRECTORY),
+                    (EVERYONE, DENY, LIST_DIRECTORY)
+                ],
+                both
+            ),
+            Some(Decided::Denied)
+        );
+        assert_eq!(
+            decide(
+                &[(SOMEONE, PERMIT, both), (EVERYONE, DENY, LIST_DIRECTORY)],
+                both
+            ),
+            Some(Decided::Allowed)
+        );
+        assert_eq!(
+            decide(&[(A_GROUP, DENY, both)], both),
+            Some(Decided::Left(both))
+        );
+        assert_eq!(
+            decide(&[(SOMEONE, DENY | ONLY_INHERIT, both)], both),
+            Some(Decided::Left(both))
+        );
+        assert_eq!(
+            decide(
+                &[
+                    (SOMEONE, PERMIT, GENERIC_READ),
+                    (SOMEONE, PERMIT, GENERIC_EXECUTE)
+                ],
+                both
+            ),
+            Some(Decided::Allowed)
+        );
+        assert_eq!(
+            decide(&[(SOMEONE, DENY, GENERIC_ALL)], SEARCH),
+            Some(Decided::Denied)
+        );
+    }
+
+    /// An entry whose asker cannot be told leaves the ACL undecided: never
+    /// judged as if it were not theirs.
+    #[test]
+    fn an_entry_that_cannot_be_told_decides_nothing() {
+        let acl = extended(&[(A_GROUP, DENY, LIST_DIRECTORY)]);
+        assert_eq!(acl.decide(LIST_DIRECTORY, |_| None), None);
     }
 }

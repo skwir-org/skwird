@@ -688,7 +688,9 @@ same rules, judged as Windows judges them:
 
 **On macOS** (2026-11-24, phase 5):
 - **Who asks:** the socket's peer (`LOCAL_PEERCRED`), its user and its
-  groups, 16 at most, which grants a peer in more less, never more.
+  groups, 16 at most. A peer given 16 may be in more: whether it is in a
+  folder's group is asked of the system (`mbr_check_membership`), or the
+  others' bits could grant what the group's would not.
 - **A folder with an ACL** (macOS keeps extended ones) says so as it is
   read where ACLs are asked (`ATTR_CMN_EXTENDED_SECURITY`), and is never
   judged by its mode alone.

@@ -2510,7 +2510,7 @@ macOS 15, thrown away after its job. The gate lints for macOS
    - a folder above a root is asked for its ACL, no longer taken to have
      one.
 
-   Its test, on a runner marked thrown away: registered by `sudo` with a
+   Tested on a runner marked thrown away: registered by `sudo` with a
    root in `/Users/Shared`, it runs as root and answers its owner every
    name, `nobody` those of folders open to every user alone; its folders
    its own, its socket every user's; taken back, it answers no more.
@@ -2518,8 +2518,30 @@ macOS 15, thrown away after its job. The gate lints for macOS
    The templates are filled in one pass (`logon::fill`): a value that
    holds `{log}` is not read as a place.
 
-   Left: macOS' ACLs read and judged, and a home made while the service
-   runs, whose consent folders are not withheld.
+   **macOS' ACLs** (2026-11-24, DESIGN 4):
+   - read whole where a folder has one (`Root::access_acl`, 64 KiB at
+     most, its size said by the system), as `getattrlist` gives it, in
+     the byte order its magic says (`acl::Extended`);
+   - judged as kauth judges them: entries in order, one for what is made
+     inside alone passed over, an allow taking off what it names, a deny
+     of a right asked refusing, what is left to the mode. An entry that
+     names neither listing nor passing through is passed over unasked:
+     the default ones, deletion's, never cost a lookup;
+   - matched against the asker by the system's membership calls,
+     `everyone` told without one; an entry that names another user is
+     not theirs; one the system cannot tell leaves the folder not known;
+   - a peer given 16 groups, the most the socket gives, is asked of the
+     system for a folder's group too.
+
+   Its tests: the judging, in the kernel's order, on every system; on the
+   runners, an ACL `chmod +a` gave read whole and in order, and one naming
+   the test's user by the UUID the system gives them; at the service, a
+   folder whose ACL denies `nobody` listing hidden from them, and one
+   closed by its mode that an ACL lets them into shown.
+
+   Left: a home made while the service runs, whose consent folders are
+   not withheld; the tests of a database of events made afresh, and of
+   Full Disk Access given, which need a Mac.
 8. **Measured,** on a Mac when one is at hand.
 
 ## Later

@@ -142,12 +142,17 @@ impl Root {
         Ok(fd)
     }
 
-    /// No POSIX access ACL on macOS: its ACLs are extended ones, which a
-    /// user's engine does not judge by (the system service's, later in
-    /// phase 5).
-    #[allow(clippy::unused_self)] // every system's Root answers it
-    pub fn access_acl(&self, _: &Path, _: FileId) -> Option<crate::acl::Acl> {
-        None
+    /// The extended ACL of the folder at `rel`, macOS' (phase 5, step 7),
+    /// if it is still the folder of identity `id`: opened beneath the root,
+    /// following no link. None if it is not, has none, or cannot be read
+    /// whole (64 KiB, some 2,700 entries).
+    pub fn access_acl(&self, rel: &Path, id: FileId) -> Option<crate::acl::Acl> {
+        let fd = self.dir().and_then(|d| open_beneath(&d, rel)).ok()?;
+        if folder_stat(&rustix::fs::fstat(&fd).ok()?).id != id {
+            return None;
+        }
+        let security = extended_security(fd.as_fd(), 1 << 16).ok()??;
+        crate::acl::Extended::parse(&security).filter(|acl| !acl.entries().is_empty())
     }
 
     /// Let go of its folder until it is next read: between reads, nothing of
@@ -391,6 +396,26 @@ fn has_acl(fd: BorrowedFd<'_>) -> bool {
     // The count of entries, after the security's magic and its owner's
     // and group's UUIDs: the same in either byte order where it says none.
     const COUNT_AT: usize = 4 + 16 + 16;
+    match extended_security(fd, 4096) {
+        Ok(None) => false,
+        Ok(Some(security)) => match security.get(COUNT_AT..COUNT_AT + 4) {
+            Some(w) => {
+                let n = u32::from_ne_bytes([w[0], w[1], w[2], w[3]]);
+                n != 0 && n != u32::MAX
+            }
+            // Too short to hold one.
+            None => false,
+        },
+        Err(_) => true,
+    }
+}
+
+/// The folder open as `fd`'s extended security, as `getattrlist` gives it
+/// (`ATTR_CMN_EXTENDED_SECURITY`, a `kauth_filesec`): none if it has
+/// none; an error where it cannot be asked, or does not fit in `room`
+/// bytes, which the call says (`FSOPT_REPORT_FULLSIZE`).
+fn extended_security(fd: BorrowedFd<'_>, room: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let cut = || std::io::Error::other("an extended security cut short");
     let mut wanted = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -400,7 +425,7 @@ fn has_acl(fd: BorrowedFd<'_>) -> bool {
         fileattr: 0,
         forkattr: 0,
     };
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; room];
     // SAFETY: the folder's descriptor, open; what is asked, ours; a
     // buffer of its length, which the call fills.
     let done = unsafe {
@@ -409,36 +434,35 @@ fn has_acl(fd: BorrowedFd<'_>) -> bool {
             (&raw mut wanted).cast(),
             buf.as_mut_ptr().cast(),
             buf.len(),
-            0,
+            libc::FSOPT_REPORT_FULLSIZE,
         )
     };
     if done != 0 {
-        return true;
+        return Err(std::io::Error::last_os_error());
     }
-    let mut f = Fields { b: &buf, at: 4 };
-    let Some(common) = f.u32() else { return true };
+    let mut f = Fields { b: &buf, at: 0 };
+    let whole = f.u32().ok_or_else(cut)?;
+    if whole as usize > room {
+        return Err(std::io::Error::other("an extended security too large"));
+    }
+    // The attributes returned, after the length: the common ones first.
+    let common = f.u32().ok_or_else(cut)?;
     if common & libc::ATTR_CMN_EXTENDED_SECURITY == 0 {
-        return false;
+        return Ok(None);
     }
+    // Its reference, after the five words of the attributes returned:
+    // where its data is, from the reference, and how long.
     f.at = 24;
     let here = f.at;
-    let (Some(offset), Some(len)) = (f.i32(), f.u32()) else {
-        return true;
-    };
-    if (len as usize) < COUNT_AT + 4 {
-        return false;
-    }
-    let Some(start) = isize::try_from(offset)
+    let (offset, len) = (f.i32().ok_or_else(cut)?, f.u32().ok_or_else(cut)?);
+    let start = isize::try_from(offset)
         .ok()
         .and_then(|o| here.checked_add_signed(o))
-    else {
-        return true;
-    };
-    let mut count = Fields {
-        b: &buf,
-        at: start + COUNT_AT,
-    };
-    count.u32().is_none_or(|n| n != 0 && n != u32::MAX)
+        .ok_or_else(cut)?;
+    let end = start.checked_add(len as usize).ok_or_else(cut)?;
+    buf.get(start..end)
+        .map(|s| Some(s.to_vec()))
+        .ok_or_else(cut)
 }
 
 /// One entry, as its folder's listing gave it.

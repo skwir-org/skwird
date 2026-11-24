@@ -194,35 +194,161 @@ impl Asker {
         {
             if folder.mode & skwird_crawl::ACL != 0 {
                 return match acl {
-                    Some(acl)
-                        if acl.allows(
-                            self.uid,
-                            self.gid,
-                            &self.groups,
-                            folder.owner,
-                            folder.group,
-                            bits,
-                        ) =>
-                    {
-                        Sight::Seen
-                    }
-                    Some(_) => Sight::Hidden,
+                    Some(acl) => self.judged(folder, acl, bits),
                     None => Sight::Unknown,
                 };
             }
-            let granted = if self.uid == folder.owner {
-                folder.mode >> 6
-            } else if self.gid == folder.group || self.groups.contains(&folder.group) {
-                folder.mode >> 3
-            } else {
-                folder.mode
-            };
-            if granted & bits == bits {
-                Sight::Seen
-            } else {
-                Sight::Hidden
+            self.by_mode(folder, bits)
+        }
+    }
+
+    /// Linux's: a folder with an access ACL judged by it alone (acl(5)).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn judged(&self, folder: Owned, acl: &skwird_crawl::acl::Acl, bits: u16) -> Sight {
+        if acl.allows(
+            self.uid,
+            self.gid,
+            &self.groups,
+            folder.owner,
+            folder.group,
+            bits,
+        ) {
+            Sight::Seen
+        } else {
+            Sight::Hidden
+        }
+    }
+
+    /// macOS': a folder with an extended ACL judged by it first, then by its
+    /// mode for what it left (DESIGN 4, kauth's order), its entries matched
+    /// against the asker by the system's membership calls; not known where
+    /// the system cannot tell.
+    #[cfg(target_os = "macos")]
+    fn judged(&self, folder: Owned, acl: &skwird_crawl::acl::Extended, bits: u16) -> Sight {
+        use skwird_crawl::acl::{Decided, LIST_DIRECTORY, SEARCH as PASS};
+        let rights = |bits: u16| {
+            (if bits & 0o4 != 0 { LIST_DIRECTORY } else { 0 })
+                | (if bits & 0o1 != 0 { PASS } else { 0 })
+        };
+        let me = std::cell::OnceCell::new();
+        match acl.decide(rights(bits), |who| membership::applies(self.uid, &me, who)) {
+            None => Sight::Unknown,
+            Some(Decided::Denied) => Sight::Hidden,
+            Some(Decided::Allowed) => Sight::Seen,
+            Some(Decided::Left(left)) => {
+                let bits = (if left & LIST_DIRECTORY != 0 { 0o4 } else { 0 })
+                    | u16::from(left & PASS != 0);
+                self.by_mode(folder, bits)
             }
         }
+    }
+
+    /// The owner's bits for its owner, the group's for a member of its
+    /// group, the others' for anyone else, as the kernel takes them. On
+    /// macOS, an asker the socket gave the most groups of (16) may be in
+    /// more: the system is asked whether they are in the folder's, or
+    /// the others' bits could grant what the group's would not.
+    #[cfg(unix)]
+    fn by_mode(&self, folder: Owned, bits: u16) -> Sight {
+        let member = self.gid == folder.group || self.groups.contains(&folder.group);
+        #[cfg(target_os = "macos")]
+        let member = if member || self.groups.len() < membership::CRED_GROUPS {
+            member
+        } else {
+            match membership::in_group(self.uid, folder.group) {
+                Some(member) => member,
+                None => return Sight::Unknown,
+            }
+        };
+        let granted = if self.uid == folder.owner {
+            folder.mode >> 6
+        } else if member {
+            folder.mode >> 3
+        } else {
+            folder.mode
+        };
+        if granted & bits == bits {
+            Sight::Seen
+        } else {
+            Sight::Hidden
+        }
+    }
+}
+
+/// Who is in which group, as macOS' directory says (membership.h): the
+/// calls the kernel's own judging asks, nested groups and `everyone`
+/// among them. No copy is kept: the system keeps its own.
+#[cfg(target_os = "macos")]
+mod membership {
+    /// The most groups a socket's peer is given with (`XU_NGROUPS`).
+    pub const CRED_GROUPS: usize = 16;
+    /// `ID_TYPE_UID`: a UUID that is a user's.
+    const ID_TYPE_UID: libc::c_int = 0;
+
+    unsafe extern "C" {
+        fn mbr_uid_to_uuid(uid: libc::uid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_gid_to_uuid(gid: libc::gid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_uuid_to_id(
+            uu: *const u8,
+            id: *mut libc::id_t,
+            kind: *mut libc::c_int,
+        ) -> libc::c_int;
+        fn mbr_check_membership(
+            user: *const u8,
+            group: *const u8,
+            ismember: *mut libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    /// User `uid`'s UUID.
+    pub fn user(uid: u32) -> Option<[u8; 16]> {
+        let mut uu = [0u8; 16];
+        // SAFETY: a buffer of the 16 bytes of a UUID, which the call fills.
+        (unsafe { mbr_uid_to_uuid(uid, uu.as_mut_ptr()) } == 0).then_some(uu)
+    }
+
+    /// Whether user `me` is in the group `group` names.
+    fn member(me: &[u8; 16], group: &[u8; 16]) -> Option<bool> {
+        let mut ismember: libc::c_int = 0;
+        // SAFETY: two UUIDs of 16 bytes each; a word the call writes.
+        let done = unsafe { mbr_check_membership(me.as_ptr(), group.as_ptr(), &raw mut ismember) };
+        (done == 0).then_some(ismember != 0)
+    }
+
+    /// Whether an entry naming `who` applies to user `uid` (their UUID in
+    /// `me`, asked once): they are who it names, or in the group it names.
+    /// One that names another user is not theirs. None where the system
+    /// cannot tell.
+    pub fn applies(
+        uid: u32,
+        me: &std::cell::OnceCell<Option<[u8; 16]>>,
+        who: &[u8; 16],
+    ) -> Option<bool> {
+        if *who == skwird_crawl::acl::EVERYONE {
+            return Some(true);
+        }
+        let me = (*me.get_or_init(|| user(uid)))?;
+        if me == *who {
+            return Some(true);
+        }
+        if let Some(member) = member(&me, who) {
+            return Some(member);
+        }
+        let (mut id, mut kind): (libc::id_t, libc::c_int) = (0, -1);
+        // SAFETY: a UUID of 16 bytes; two words the call writes.
+        let known = unsafe { mbr_uuid_to_id(who.as_ptr(), &raw mut id, &raw mut kind) } == 0;
+        (known && kind == ID_TYPE_UID).then_some(false)
+    }
+
+    /// Whether user `uid` is in group `gid`.
+    pub fn in_group(uid: u32, gid: u32) -> Option<bool> {
+        let me = user(uid)?;
+        let mut group = [0u8; 16];
+        // SAFETY: a buffer of the 16 bytes of a UUID, which the call fills.
+        if unsafe { mbr_gid_to_uuid(gid, group.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        member(&me, &group)
     }
 }
 
@@ -485,7 +611,8 @@ mod tests {
     }
 
     /// A folder with an ACL read is judged by it: the user it names may,
-    /// another may not.
+    /// another may not (Linux's).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_folder_with_an_acl_read_is_judged_by_it() {
         // user::rwx, user:1001:r-x, group::---, mask::r-x, other::---.
@@ -526,5 +653,62 @@ mod tests {
         assert_eq!(through(&someone, &[acl, open]), Sight::Unknown);
         assert_eq!(through(&someone, &[acl, closed]), Sight::Hidden);
         assert_eq!(through(&someone, &[None]), Sight::Hidden, "not stat-ed");
+    }
+
+    /// macOS' extended ACL as `getattrlist` gives it, of `entries` (a UUID,
+    /// flags, rights).
+    #[cfg(target_os = "macos")]
+    fn extended(entries: &[([u8; 16], u32, u32)]) -> skwird_crawl::acl::Extended {
+        let mut b = 0x012c_c16d_u32.to_le_bytes().to_vec();
+        b.extend([0u8; 32]);
+        b.extend(u32::try_from(entries.len()).unwrap().to_le_bytes());
+        b.extend(0u32.to_le_bytes());
+        for (who, flags, rights) in entries {
+            b.extend(who);
+            b.extend(flags.to_le_bytes());
+            b.extend(rights.to_le_bytes());
+        }
+        skwird_crawl::acl::Extended::parse(&b).unwrap()
+    }
+
+    /// On macOS, a folder with an extended ACL is judged by it first, then
+    /// by its mode for what it leaves: a deny of listing hides what the
+    /// mode would show, and leaves passing through to the mode; an allow
+    /// shows what the mode would hide; the default entry, deletion's,
+    /// leaves it all to the mode. An entry naming a user by the UUID the
+    /// system gives them applies to them, not to another.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_a_folder_is_judged_by_its_extended_acl_then_its_mode() {
+        use skwird_crawl::acl::{EVERYONE, LIST_DIRECTORY, SEARCH as PASS};
+        const PERMIT: u32 = 1;
+        const DENY: u32 = 2;
+        const DELETE: u32 = 1 << 4;
+        let someone = asker(1000, 20, &[20]);
+        let open = folder(0, 0, 0o755 | skwird_crawl::ACL);
+        let closed = folder(0, 0, 0o700 | skwird_crawl::ACL);
+        let deny_list = extended(&[(EVERYONE, DENY, LIST_DIRECTORY)]);
+        assert_eq!(someone.may_by(open, Some(&deny_list), LIST), Sight::Hidden);
+        assert_eq!(
+            someone.may_by(open, Some(&deny_list), SEARCH),
+            Sight::Seen,
+            "passing through left to the mode"
+        );
+        let allow = extended(&[(EVERYONE, PERMIT, LIST_DIRECTORY | PASS)]);
+        assert_eq!(someone.may_by(closed, Some(&allow), LIST), Sight::Seen);
+        let default = extended(&[(EVERYONE, DENY, DELETE)]);
+        assert_eq!(someone.may_by(open, Some(&default), LIST), Sight::Seen);
+        assert_eq!(someone.may_by(closed, Some(&default), LIST), Sight::Hidden);
+        // This test's user, by the UUID the system gives them.
+        let uid = rustix::process::getuid().as_raw();
+        let me = membership::user(uid).expect("this user's UUID");
+        let mine = extended(&[(me, DENY, LIST_DIRECTORY)]);
+        assert_eq!(
+            asker(uid, 20, &[20]).may_by(open, Some(&mine), LIST),
+            Sight::Hidden
+        );
+        // `nobody` is not them.
+        let nobody = asker(u32::MAX - 1, u32::MAX - 1, &[]);
+        assert_eq!(nobody.may_by(open, Some(&mine), LIST), Sight::Seen);
     }
 }
