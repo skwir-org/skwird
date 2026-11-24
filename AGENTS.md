@@ -106,6 +106,11 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   lock or initialising a once-cell. A pool thread that waits on it can
   pick up another task that waits on the same, until every thread is
   parked: fsearch 0.2 deadlocked so.
+- **Ask the property, not the system.** A check that means what a
+  system does, a root heard whole say, asks a constant named for it
+  (`engine::HEARD_WHOLE`), never `cfg!(windows)`. On macOS, a check of
+  Windows alone undid each root heard whole as soon as it was, and the
+  engine was never live.
 - **Fix structurally.** When a symptom returns or a fix needs
   hand-kept constants, find the invariant being broken, make it
   impossible, and write the rule here.

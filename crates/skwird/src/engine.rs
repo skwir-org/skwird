@@ -1559,8 +1559,8 @@ impl Writing<'_> {
     /// The folders clients keep live, watched: the watcher told, each root
     /// given those below it, each new one installed.
     fn apply_scopes(&mut self) {
-        // Windows hears each root whole: no folder is kept live alone.
-        if cfg!(windows) {
+        // A root heard whole: no folder is kept live alone.
+        if HEARD_WHOLE {
             return;
         }
         let Some(watcher) = &self.watcher else {
@@ -1651,8 +1651,8 @@ impl Writing<'_> {
             .map_or((0, 0), |w| (w.watching(), w.budget()));
         Watching {
             folders,
-            // Windows hears each root whole, with no share of watches.
-            share: (!cfg!(windows)).then_some(Share {
+            // Each root heard whole, with no share of watches.
+            share: (!HEARD_WHOLE).then_some(Share {
                 used: used as u64,
                 size: size as u64,
             }),
@@ -2084,6 +2084,15 @@ fn refresh(
     crate::memory::give_back();
     current
 }
+
+/// Whether a user's engine hears each root whole, by one handle a root on
+/// Windows (`ReadDirectoryChangesW`) and one stream for every root on
+/// macOS (`FSEvents`): live from its crawl or check, with no folder kept
+/// live alone and no share of watches. On Linux, inotify watches each
+/// folder, and what a user's engine keeps live is what its clients
+/// registered. The step that undid it on macOS was a check of Windows
+/// alone: each check of the kind asks this.
+const HEARD_WHOLE: bool = cfg!(any(windows, target_os = "macos"));
 
 /// How long a sync waits for its cookie before the check serves it.
 const BARRIER: std::time::Duration = std::time::Duration::from_secs(2);
