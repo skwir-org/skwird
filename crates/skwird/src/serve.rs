@@ -155,6 +155,16 @@ pub fn serve(config: &Config) -> Result<(), String> {
     let lock = crate::os::lock(&config.dirs.lock())?;
     let (listener, bound) = listen(config, &socket)?;
     log(&format!("serving {} roots", config.roots.len()));
+    // What this engine may not read without asking (DESIGN 4), decided once.
+    #[cfg(target_os = "macos")]
+    {
+        let withheld = skwird_crawl::consent_withheld().len();
+        if withheld > 0 {
+            log(&format!(
+                "{withheld} folders macOS asks consent for are not read: no Full Disk Access"
+            ));
+        }
+    }
     let shared = Arc::new(Shared::new(config.roots.clone(), config.system));
     let (commands, received) = channel();
     #[cfg(windows)]

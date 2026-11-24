@@ -82,6 +82,7 @@ impl Root {
 
     /// The folder at `path`, with a mount table given.
     pub fn open_with(path: &Path, exclusions: Exclusions, table: Table) -> Result<Root, Error> {
+        consent_withheld();
         // Told from its spelling first, so that a root on a dead server is
         // never stat-ed; then again once resolved.
         let on_network = |p: &Path| table.holding(p).is_some_and(Mount::network);
@@ -655,6 +656,14 @@ pub(crate) fn read(
     if let Some(network) = root.mount_at(rel) {
         return not_covered(None, mount_why(network));
     }
+    // Never opened without consent: opening it would ask the user, and
+    // wait for their answer.
+    if consent_withheld()
+        .iter()
+        .any(|f| root.path.join(rel).starts_with(f))
+    {
+        return not_covered(None, Why::Denied);
+    }
     let read_at = Time::now();
     let fd = match root.dir().and_then(|d| open_beneath(&d, rel)) {
         Ok(fd) => fd,
@@ -808,3 +817,64 @@ pub mod watch;
 
 #[cfg(test)]
 mod tests;
+
+/// The folders below a user's home that macOS asks consent for before a
+/// program reads them (fsearch's list): the user's own documents, those
+/// of other programs, the cloud's.
+const ASKED_CONSENT: &[&str] = &[
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Library/Mobile Documents",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/CloudStorage",
+    "Pictures/Photos Library.photoslibrary",
+    "Music/Music",
+    "Movies/TV",
+];
+
+/// Whether this process has Full Disk Access: the system's privacy
+/// database is readable with it alone, and a try without it fails at
+/// once, asking no one (fsearch's test).
+pub fn full_disk_access() -> bool {
+    std::fs::File::open("/Library/Application Support/com.apple.TCC/TCC.db").is_ok()
+}
+
+/// The folders this process may not read without asking (DESIGN 4): none
+/// with Full Disk Access; otherwise those macOS asks consent for, below
+/// the user's home. Never opened, since opening one asks the user and
+/// waits for their answer; not covered, as denied. Decided once a
+/// process: asked again at each start, since no event follows a consent
+/// given.
+///
+/// Decided with it, once: the system never fetches a file's contents
+/// from the cloud for this process (`setiopolicy_np`, as fsearch's
+/// threads do), since nothing skwird does may reach a network (rule 6).
+/// A folder whose listing the cloud alone holds then fails to list, and
+/// is not covered.
+pub fn consent_withheld() -> &'static [PathBuf] {
+    static WITHHELD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    WITHHELD.get_or_init(|| {
+        unsafe extern "C" {
+            fn setiopolicy_np(
+                iotype: libc::c_int,
+                scope: libc::c_int,
+                policy: libc::c_int,
+            ) -> libc::c_int;
+        }
+        // `IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES`, for the whole
+        // process (`IOPOL_SCOPE_PROCESS`), turned off.
+        // SAFETY: three numbers; the call changes this process' policy.
+        unsafe { setiopolicy_np(3, 0, 1) };
+        if full_disk_access() {
+            return Vec::new();
+        }
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return Vec::new();
+        };
+        // As roots are named, resolved: a home spelled through a link.
+        let home = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(home));
+        ASKED_CONSENT.iter().map(|rel| home.join(rel)).collect()
+    })
+}

@@ -88,9 +88,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as sys;
 #[cfg(target_os = "macos")]
-pub use macos::Root;
-#[cfg(target_os = "macos")]
 pub use macos::watch::{Heard, Position, Watcher, cookie_folder};
+#[cfg(target_os = "macos")]
+pub use macos::{Root, consent_withheld, full_disk_access};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod other;

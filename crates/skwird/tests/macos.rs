@@ -428,3 +428,46 @@ fn a_restarted_engine_resumes_from_its_history() {
     );
     assert!(!second.contains("root 0 checked"), "{second}");
 }
+
+/// The folders macOS asks consent for, in the home, are never opened
+/// without Full Disk Access: not covered, as denied, none of their names
+/// answered, and the engine says so. With it, they are read as any.
+#[test]
+fn folders_asked_consent_for_are_read_with_full_disk_access_alone() {
+    let mut env = Env::new("mac-consent");
+    tree(&env);
+    let home = env.home();
+    let desktop = env.s.file(home.join("Desktop/on the desktop.txt"));
+    env.s
+        .file(home.join("Library/Containers/an app/its own.txt"));
+    env.engine(30);
+    let mut c = env.client();
+    let found = answered(&mut c, &named(&home, "on the desktop"));
+    let holes: Vec<(PathBuf, Why)> = c
+        .coverage(&home)
+        .unwrap()
+        .holes
+        .into_iter()
+        .map(|h| (h.path.to_path(), h.why))
+        .collect();
+    if skwird_crawl::full_disk_access() {
+        eprintln!("this machine gives Full Disk Access: the folders are read");
+        assert!(found.contains(&desktop), "{found:?}");
+        assert!(!answered(&mut c, &named(&home, "its own")).is_empty());
+    } else {
+        assert!(found.is_empty(), "{found:?}");
+        assert!(answered(&mut c, &named(&home, "its own")).is_empty());
+        for asked in ["Desktop", "Library/Containers"] {
+            assert!(
+                holes.contains(&(home.join(asked), Why::Denied)),
+                "{asked}: {holes:?}"
+            );
+        }
+        assert!(
+            env.log()
+                .contains("folders macOS asks consent for are not read"),
+            "{}",
+            env.log()
+        );
+    }
+}
