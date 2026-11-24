@@ -31,6 +31,8 @@ pub struct Sum {
     pub alloc: u64,
     /// Every entry but folders, a file of several names once.
     pub files: u64,
+    /// Every entry but folders, each name counted.
+    pub names: u64,
     /// Folders below, the subtree's own not counted.
     pub folders: u64,
     /// The newest modification time of its files: none where it holds
@@ -66,6 +68,7 @@ impl Sum {
         self.size += other.size;
         self.alloc += other.alloc;
         self.files += other.files;
+        self.names += other.names;
         self.folders += other.folders;
         self.shared += other.shared;
         if let Some(t) = other.newest {
@@ -282,6 +285,8 @@ impl Index {
 /// has one name, or its count is not known (`partial` said then); held
 /// apart, by its identity, where it has several.
 fn add_file(part: &mut Part, item: &Item, name: &[u8], id: FileId, partial: &mut bool) {
+    // Each name counted, a file of several once (by its identity, below).
+    part.sum.names += 1;
     let ext = extension(name);
     let Some(a) = item.attrs else {
         part.sum.file(0, 0, ext, None);

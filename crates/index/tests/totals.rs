@@ -142,6 +142,7 @@ fn totals_are_what_the_tree_holds() {
         (1, 600, 0),
         "two names inside, once"
     );
+    assert_eq!(twice.names, 2, "each name counted");
     let empty = child(&totals, "empty");
     assert_eq!((empty.files, empty.folders, empty.newest), (0, 0, None));
     let excluded = child(&totals, "excluded");
@@ -156,6 +157,11 @@ fn totals_are_what_the_tree_holds() {
     // that both its names are in, and not shared.
     let own = &totals.own;
     assert_eq!(own.files, 3 + 1 + 1 + 1);
+    assert_eq!(
+        own.names,
+        3 + 1 + 2 + 2,
+        "the two names of each file of two"
+    );
     assert_eq!(own.folders, 6, "a, b, empty, excluded, linked, twice");
     assert_eq!(own.size, 600 + 70_000 + 500 + 600);
     assert_eq!(own.shared, 0);

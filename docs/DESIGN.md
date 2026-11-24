@@ -1767,7 +1767,9 @@ repositories, their versions their own.
       item, so a folder of a million entries is cheap on the wire. Without
       it, every child is sent.
     - **Totals:** `size` and `alloc` of its files (every entry but
-      folders), `files`, `folders` (below it, itself not counted),
+      folders), `files` (a file of several names once), `names` (each
+      name, as a listing shows them: Usage counts so, skwir's ask on
+      2026-11-24), `folders` (below it, itself not counted),
       `newest_file_mtime` (its files' alone), `by_extension: [{ext, files,
       alloc}]` (the name's last dot past its first byte on, lowercased;
       none for a name with none: the client types files, rule 5), and

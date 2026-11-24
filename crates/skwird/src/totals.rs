@@ -181,6 +181,7 @@ fn totals_of(sum: &totals::Sum) -> wire::Totals {
         alloc: sum.alloc,
         files: sum.files,
         folders: sum.folders,
+        names: sum.names,
         newest_file_mtime: sum.newest.map(convert::time),
         by_extension,
         shared: sum.shared,
