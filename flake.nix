@@ -126,6 +126,24 @@
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw.windows.pthreads}/lib";
         });
 
+      # What a release builds beside Linux's packages (tools/release,
+      # docs/DESIGN.md, decision 11): macOS' program from Linux, as skwir's
+      # is (its ADR-075), with the Apple SDK its `just macos-sdk` keeps in
+      # ~/.local/share/skwir-build/macos-sdk (Apple's licence the user's,
+      # never in the tree); clang itself and LLVM's Mach-O linker, which the
+      # SDK's wrappers call (`XMAC_CLANG`, `XMAC_LLD`), named, not on the
+      # PATH; rcodesign, to sign it ad hoc; zip, for Windows' programs.
+      devShells.release = self.devShells.${system}.default.overrideAttrs (old: {
+        nativeBuildInputs =
+          old.nativeBuildInputs
+          ++ [
+            pkgs.rcodesign
+            pkgs.zip
+          ];
+        XMAC_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+        XMAC_LLD = "${pkgs.lld}/bin/ld64.lld";
+      });
+
       formatter = pkgs.nixpkgs-fmt;
 
       # Linux's engine alone so far: macOS's is phase 5's.

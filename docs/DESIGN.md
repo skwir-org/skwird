@@ -1789,6 +1789,34 @@ the protocol, the command line, a package's files. The patch version
 is for fixes alone. Its packages sit beside skwir's in skwir.org's
 repositories, their versions their own.
 
+**Releases** (the user's choices, 2026-11-24), as skwir's are made (its
+ADR-053, 074, 075):
+- **Built and checked on the workstation** (`tools/release`): at a
+  tagged, clean commit, the gate, the flake's machines, the four Linux
+  packages tried in their roots, Windows' and macOS' programs built on
+  Linux, and a bundle of them with their checksums and notes. A draft
+  is uploaded to GitHub by `gh`; the user publishes it. A tag pushed
+  checks the release's metadata alone: one version, a dated changelog.
+- **What it holds:** the Linux packages (Debian's, Ubuntu's, Fedora's,
+  the AUR's), Windows' x86-64 programs (`skwird.exe`, `skwirdw.exe`),
+  macOS' arm64 program, signed ad hoc and not notarized, as Apple
+  silicon asks of anything it runs and skwir's builds are. An Intel Mac
+  builds it from source (below).
+- **The draft's own bytes run on their systems** before it is
+  published: a workflow run by hand takes its Windows and macOS
+  programs onto GitHub's runners and has each start, answer a query and
+  start at login there. What is built on Linux for another system is
+  otherwise never run on it.
+- **Homebrew:** a tap of skwir-org's (`skwir-org/homebrew-tap`), its
+  formula built from skwird's source and tested on the macOS runner by
+  the tap's own workflow. Built from source, it needs no program of the
+  release's, and serves Intel Macs too. winget waits for Windows proven
+  on a machine; skwir.org's repositories take skwird's packages with
+  skwir's next release.
+- **The name** is free (2026-11-24): no package `skwird` in Debian,
+  Ubuntu, Fedora, Arch, the AUR, Homebrew, nixpkgs, winget, crates.io or
+  PyPI (open question 9).
+
 ## Protocol (a sketch; experimental until declared stable)
 
 - **Transport.** A Unix socket on Linux and macOS: `/run/skwird/socket`
@@ -1941,6 +1969,27 @@ repositories, their versions their own.
     stat-ing the entries its events named and what is new (DESIGN 8).
     It is answered `watching {folders, share}`: each folder kept, live
     or why not, and the share of watches (open question 2).
+  - **Removable volumes** (a sketch for 0.2, open question 8, for skwir's
+    session to check against its harvest before it is built):
+    `volumes {keep, forget}`, answered `volumes {kept}`.
+    - **Asked by a client alone,** once its user said yes for that
+      volume, never at a start: the engine indexes no removable volume
+      unasked. It is the user's engine's alone; the system service
+      refuses it.
+    - **A volume is named by its own identity,** never its mount point:
+      its filesystem's UUID, or the serial number FAT and exFAT keep in
+      its place. One with neither is refused, and never indexed.
+    - **Kept with the client's registrations,** as its exclusions are,
+      by the user. A kept volume, mounted, is a root from then on: its
+      index read back and checked, or crawled. Unmounted, it is let go
+      of, its index kept by its identity. `forget` lets go of it and
+      removes its index.
+    - **Coverage:** a path on a kept volume not mounted is in no root,
+      and not covered. Mounted again, it is not covered until checked,
+      since no volume of FAT's keeps a journal to replay: then checked
+      as of the check, and live from there where its system hears it.
+    - **Answered** with each volume kept: its identity, where it is
+      mounted if it is, and its coverage.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
@@ -2069,6 +2118,23 @@ repositories, their versions their own.
    both its composed and decomposed forms (NFC and NFD), a way to meet
    normalization without changing names. A change here changes skwir's
    matching with it, or answers would hold less than skwir matches.
+
+   **Normalization, decided for 0.2** (the user's choice, 2026-11-24,
+   agreed with skwir's session): a term is matched in both its composed
+   and decomposed forms (NFC and NFD), fsearch's way, for substrings and
+   globs; no name is rewritten, and the index is unchanged. macOS'
+   programs often make names decomposed, and keyboards type composed: a
+   term typed is otherwise missed there. It lands in skwird's matcher and
+   skwir's together, since skwir verifies every name an index returns:
+   - lowercased first, then normalized;
+   - a glob normalized in its literal parts alone;
+   - one pattern where both forms are the same, every ASCII term among
+     them;
+   - on skwir's side, one matcher for every place it matches a name, and
+     plocate asked in both forms.
+
+   Case folding stays `to_lowercase` (`ß` is not `ss`): what users
+   expect, and folding changes lengths under a glob.
 6. **fanotify on btrfs subvolumes:** answered by phase 0, as far as a
    trial goes (decision 3). A mark through the top-level subvolume,
    mounted read-only and detached, heard the changes made in three
@@ -2080,8 +2146,21 @@ repositories, their versions their own.
    per volume by its UUID, as skwir's harvest asks. Roots under the
    home reach none, so phase 1 does not meet them. Network volumes are
    answered (2): never crawled.
+
+   **Decided for 0.2** (the user's choice, 2026-11-24, agreed in
+   principle with skwir's session, its harvest's rule, ADR-092): never
+   indexed unasked; a client asks for a volume once its user said yes,
+   by the volume's own identity, and the user's engine keeps it
+   (Protocol, "Removable volumes", a sketch for skwir's session to
+   check). The system service takes none: a stick of someone else's,
+   plugged in, would be answered to whoever may list it, and FAT lets
+   everyone. On macOS, DiskArbitration tells a disk inside the machine
+   from one plugged in: an internal one is the system service's, as on
+   Linux.
 9. **The name:** whether `skwird` is free in the distributions. No
    crate is published on crates.io (the user's choice, 2026-11-11).
+   Answered on 2026-11-24: free in Debian, Ubuntu, Fedora, Arch, the
+   AUR, Homebrew, nixpkgs, winget, crates.io and PyPI (11).
 10. **Snapshots** (found on 2026-11-22, phase 3, step 4): a btrfs
     snapshot is a subvolume, not a mount, so a root holding snapshots
     (snapper's `/.snapshots`, timeshift's, btrbk's) would index each

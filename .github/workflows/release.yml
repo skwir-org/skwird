@@ -1,0 +1,22 @@
+name: release
+# A tag checks the release's metadata alone: one version everywhere, a
+# dated changelog (tools/release/release.sh check). The release is built
+# and checked on the workstation, and uploaded as a draft from there
+# (docs/DESIGN.md, decision 11), as skwir's are (its ADR-053).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  agree:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: One version and a dated changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: tools/release/release.sh check "$TAG"

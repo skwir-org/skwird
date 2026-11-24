@@ -2558,6 +2558,69 @@ macOS 15, thrown away after its job. The gate lints for macOS
    Access given, which need a Mac.
 8. **Measured,** on a Mac when one is at hand.
 
+## The first release, 0.1.0, and what follows (planned 2026-11-24)
+
+The user's choices of 2026-11-24 (DESIGN 11, open questions 5, 8, 9).
+skwir's session agreed to each point that touches skwir, with its
+conditions, which are written where each is decided.
+
+**The release, 0.1.0:**
+1. **The name** (open question 9). Done on 2026-11-24: free everywhere a
+   package of skwird's would go.
+2. **The Homebrew tap**, `skwir-org/homebrew-tap`. Made on 2026-11-24:
+   its formula builds skwird from its main branch (`brew install --HEAD
+   skwir-org/tap/skwird`) until 0.1.0 has a tag; its workflow checks the
+   formula's style and audit, builds it and runs its test (an engine of
+   the test's own indexes a file and finds it) on the macOS runner.
+   Homebrew asks that a tap of anyone but its own be trusted first (`brew
+   trust skwir-org/tap`): the workflow trusts it as a user would, and the
+   README says so. Passing on the runner on 2026-11-24: style, audit,
+   build from source, test. skwir's session would add a cask for skwir
+   there, once skwir tells a cask's copy from a downloaded one (its
+   ADR-142), and never stripping macOS' quarantine: the user's to agree.
+3. **`tools/release`**, as skwir's: written on 2026-11-24 (`tools/release/release.sh`,
+   `docs/RELEASING.md`): `check` (one version, a dated
+   `CHANGELOG.md`), `build <tag>` (the gate and the flake's machines,
+   the four Linux packages tried, Windows' and macOS' programs built on
+   Linux, a bundle in `target/releases/<tag>` with checksums and the
+   notes), `upload <tag>` (a draft, by `gh`, never published by it).
+   Its programs' build paths are rewritten, as skwir's are: built
+   without, macOS' program held 71 paths of the workstation's home,
+   cargo's sources'. A program that still holds the home's path is
+   refused. `programs DIR` builds Windows' and macOS' alone, which was
+   tried: both built, signed (macOS', ad hoc), and free of it.
+4. **A tag's workflow** (`release.yml`): the metadata alone, as skwir's.
+   Written on 2026-11-24.
+5. **The draft tried on its systems** (`try.yml`, run by hand): its
+   Windows and macOS programs taken from the draft onto GitHub's
+   runners, each started, asked a query, and started at login on a
+   runner thrown away.
+   Written on 2026-11-24 (`tools/release/try-draft.sh`): run by hand, it
+   must be on `main` to be run; tried on a draft made for it, once it is.
+6. **`CHANGELOG.md`** and the notes of 0.1.0: what skwird is, what each
+   system has, and that Windows and macOS were tested on GitHub's
+   runners, not on a machine of the user's.
+   Written on 2026-11-24, undated until it is released.
+7. Once tagged and published: the formula's stable source (its URL and
+   checksum), the AUR's PKGBUILD published, and nixpkgs asked, each the
+   user's to do or ask.
+
+**Measured on the runners** (stand-ins, never step 8 of phases 4 and
+5): `measure.yml`, run by hand on Linux, macOS and Windows, over the
+synthetic tree of phase 1, step 7 (1.04 million entries): the crawl's
+time and the index's size, the time to a first answer and to live, a
+sync's wait, memory, and the processor over ten idle minutes.
+`skwird-bench` builds on Windows for it (`walk` and `index`). Shared
+machines and a synthetic tree: orders of magnitude, and what must not
+move (idle at zero), not the user's machines.
+
+**For 0.2, with skwir's session:**
+- **Names in both Unicode forms** (open question 5): skwird's matcher
+  and skwir's together, in a release of each.
+- **Removable volumes on request** (open question 8): the request
+  (Protocol, "Removable volumes") checked by skwir's session first;
+  DiskArbitration on macOS.
+
 ## Later
 
 - Packages, beside skwir's: skwir.org's apt and dnf repositories, the

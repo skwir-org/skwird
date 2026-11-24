@@ -1,0 +1,44 @@
+name: try
+# A release's draft tried on its systems before it is published
+# (docs/DESIGN.md, decision 11): its own Windows and macOS programs, built
+# on Linux, taken from the draft onto GitHub's runners, each started,
+# asked, and started at login there (tools/release/try-draft.sh). Run by
+# hand, once the draft is uploaded:
+#
+#     gh workflow run try.yml -f tag=v0.1.0
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The draft's tag (v0.1.0)"
+        required: true
+
+# A draft is seen by those who may write alone.
+permissions:
+  contents: write
+
+jobs:
+  try:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            system: macos
+          - os: windows-latest
+            system: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      # A machine thrown away after its job: the engine may be started at
+      # login there (skwird_testkit::throwaway).
+      SKWIRD_TEST_MACHINE: "1"
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: The draft's program, tried
+        run: tools/release/try-draft.sh "$TAG" "${{ matrix.system }}"
