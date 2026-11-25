@@ -184,6 +184,13 @@ impl Root {
         &self.fs
     }
 
+    /// Whether its folders' change times tell what changed in them, so
+    /// that a check by them proves a folder current: not on FUSE, whose
+    /// program sets them as it will.
+    pub fn times_tell(&self) -> bool {
+        self.fs != "fuse"
+    }
+
     pub fn table(&self) -> &Table {
         &self.table
     }

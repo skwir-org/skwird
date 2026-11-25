@@ -44,6 +44,10 @@ impl Root {
         match self.never {}
     }
 
+    pub fn times_tell(&self) -> bool {
+        match self.never {}
+    }
+
     pub fn table(&self) -> &Table {
         match self.never {}
     }

@@ -186,6 +186,13 @@ impl Root {
         &self.fs
     }
 
+    /// Whether its folders' change times tell what changed in them, so
+    /// that a check by them proves a folder current: not on a FUSE
+    /// program's volume (`macfuse`, `osxfuse`), which sets them as it will.
+    pub fn times_tell(&self) -> bool {
+        !self.fs.to_ascii_lowercase().contains("fuse")
+    }
+
     pub fn table(&self) -> &Table {
         &self.table
     }
