@@ -8,6 +8,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    # Only for checking the Home Manager module (`checks.home-manager`).
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
@@ -15,11 +20,16 @@
     nixpkgs,
     rust-overlay,
     flake-utils,
+    home-manager,
   }:
     {
       # `services.skwird` for NixOS (dist/nix/module.nix): skwird installed,
       # and a user's engine for every user's session.
       nixosModules.default = import ./dist/nix/module.nix self;
+      # `services.skwird` for Home Manager (dist/nix/home-manager.nix):
+      # skwird installed for one user, their engine for the session, their
+      # own exclusions; on Linux and macOS.
+      homeManagerModules.default = import ./dist/nix/home-manager.nix self;
       overlays.default = final: _: {
         skwird = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
@@ -146,13 +156,14 @@
 
       formatter = pkgs.nixpkgs-fmt;
 
-      # Linux's engine alone so far: macOS's is phase 5's.
-      packages = lib.optionalAttrs stdenv.hostPlatform.isLinux {
-        default = skwird;
-        # The root tests' machine, given cargo's binaries from the host
-        # (tools/vm/root-tests).
-        root-machine = (import ./tools/vm/root.nix {inherit pkgs;}).driver;
-      };
+      # Linux's engine and macOS' (phase 5).
+      packages =
+        {default = skwird;}
+        // lib.optionalAttrs stdenv.hostPlatform.isLinux {
+          # The root tests' machine, given cargo's binaries from the host
+          # (tools/vm/root-tests).
+          root-machine = (import ./tools/vm/root.nix {inherit pkgs;}).driver;
+        };
 
       # What needs a machine of its own runs in a virtual one, never on the
       # developer's system (AGENTS.md, Testing): QEMU, with KVM where the
@@ -164,6 +175,10 @@
         root = import ./tools/vm/root.nix {
           inherit pkgs;
           tests = rootTests;
+        };
+        # No machine: Home Manager's configurations, built and evaluated.
+        home-manager = import ./tools/nix/home-manager.nix {
+          inherit self pkgs nixpkgs home-manager;
         };
       };
     });

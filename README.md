@@ -72,6 +72,24 @@ services.skwird.enable = true;
 # services.skwird.system = true;     # the system service (experimental)
 ```
 
+And a Home Manager module, for one user, on Linux or macOS, NixOS or
+not: skwird installed, their engine for the session (the package's user
+units on Linux, a LaunchAgent on macOS, the one `skwird logon add`
+writes), and their own exclusions declared:
+
+```nix
+imports = [ skwird.homeManagerModules.default ];
+services.skwird.enable = true;
+# services.skwird.service = false;   # installed only: clients start it
+services.skwird.exclude = [ "~/Videos" "/mnt/scratch" ];
+```
+
+The system service needs root, so it is the NixOS module's. Inside
+NixOS, where NixOS runs skwird's system service or every user's session,
+`service` is off by default: one engine per user. Standalone, Home
+Manager cannot see the system's, and `service` is yours to turn off
+where the system runs skwird's system service.
+
 ### From a Linux package
 
 `tools/package/try.sh debian|ubuntu|fedora|arch` builds the package for

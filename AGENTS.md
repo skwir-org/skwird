@@ -138,6 +138,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   why it does not answer. They use KVM
   where the processor's virtualization is on; otherwise QEMU emulates
   the processor, many times slower.
+- The Home Manager module's check needs no machine:
+  `nix build .#checks.x86_64-linux.home-manager -L` builds its
+  configurations and evaluates them, macOS' among them, and one inside
+  NixOS. Run it, with the machines, when `dist/nix` changes.
 - A test that needs root lives in a `tests/root*.rs` of its crate, and
   starts with `let Some(m) = skwird_testkit::machine() else { return };`:
   it runs only as root in the root tests' machine, and is skipped

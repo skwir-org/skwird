@@ -2765,6 +2765,22 @@ program alone since, as a release builds it.
   asks, since phase 3's first step). Whether the name is free there is
   DESIGN's open question 9.
 
+  **Nix, every mode** (2026-11-25, the user's go): on NixOS, the module
+  (`services.skwird`) gives the three: the system service (`system`),
+  every user's session (`session`, on by default without the system
+  service), or the package alone, a client starting the engine. A Home
+  Manager module (`dist/nix/home-manager.nix`, `services.skwird`, as
+  skwir has its own) gives one user, on Linux or macOS, NixOS or not,
+  the package, their engine for the session (the package's own user
+  units, linked; on macOS, the LaunchAgent `skwird logon add` writes,
+  under its label) and their own exclusions, declared. Inside NixOS, its
+  `service` is off by default where NixOS runs skwird already: one
+  engine per user. The system service stays NixOS's, which root needs.
+  Its check (`checks.home-manager`) builds and evaluates its
+  configurations. The package is offered on macOS too since
+  (`aarch64-darwin`): evaluated by that check, built by no check yet.
+  Whether skwir's module turns skwird's on is skwir's session's to say.
+
   **Linux's, built and tried** (2026-11-23, DESIGN 11):
   - **The packages:** Debian's and Ubuntu's (cargo-deb), the RPM
     (cargo-generate-rpm) and the AUR's (`dist/aur/PKGBUILD`), each with

@@ -60,9 +60,10 @@ rustPlatform.buildRustPackage {
       mit
       asl20
     ];
-    # Linux's engine alone so far: Windows' is phase 4's, macOS's phase
-    # 5's (docs/PLAN.md).
-    platforms = lib.platforms.linux;
+    # Linux's and macOS' (phase 5); Windows' is built with MinGW
+    # (tools/release), not here. On macOS, its systemd units are unused:
+    # Home Manager's module makes a LaunchAgent there.
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
     mainProgram = "skwird";
   };
 }
