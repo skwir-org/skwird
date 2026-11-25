@@ -69,6 +69,12 @@ pub struct Root {
     table: Table,
     /// Where mounts start below it, and whether each reaches a network.
     below: std::collections::HashMap<PathBuf, bool>,
+    /// Mounts its table did not hold, found since by a listing (made while
+    /// a crawl ran), and whether each reaches a network: never entered,
+    /// as macOS cannot open a folder refusing to cross a mount.
+    found: std::sync::Mutex<std::collections::HashMap<PathBuf, bool>>,
+    /// Whether any was found: the lock is not taken for every folder.
+    any_found: std::sync::atomic::AtomicBool,
     exclusions: Exclusions,
 }
 
@@ -89,7 +95,7 @@ impl Root {
         if crate::mounts::lexical(path).is_some_and(|p| on_network(&p)) {
             return Err(Error::Network);
         }
-        let path = std::fs::canonicalize(path).map_err(Error::Root)?;
+        let path = crate::canonical(path).map_err(Error::Root)?;
         if on_network(&path) {
             return Err(Error::Network);
         }
@@ -110,6 +116,8 @@ impl Root {
             fs: name_of(&fs.f_fstypename),
             table,
             below,
+            found: std::sync::Mutex::default(),
+            any_found: std::sync::atomic::AtomicBool::new(false),
             exclusions,
         })
     }
@@ -194,7 +202,7 @@ impl Root {
     /// Where mounts start below it, by path below it, as its table last
     /// said.
     pub fn mounts_below(&self) -> Vec<PathBuf> {
-        self.below.keys().cloned().collect()
+        self.points().into_iter().map(|(p, _)| p).collect()
     }
 
     /// Read the mount table again, as each check does first.
@@ -207,21 +215,52 @@ impl Root {
     pub fn set_table(&mut self, table: Table) {
         self.below = table.below(&self.path);
         self.table = table;
+        self.found_mounts().clear();
+        *self.any_found.get_mut() = false;
+    }
+
+    fn found_mounts(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<PathBuf, bool>> {
+        self.found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether a mount starts at `rel`, and if so whether it reaches a
     /// network.
     pub(crate) fn mount_at(&self, rel: &Path) -> Option<bool> {
-        if self.below.is_empty() {
+        if let Some(&network) = self.below.get(rel) {
+            return Some(network);
+        }
+        if !self.any_found.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        self.below.get(rel).copied()
+        self.found_mounts().get(rel).copied()
+    }
+
+    /// A mount at `rel`, which its parent's listing says is one: kept if
+    /// its table did not hold it, so that no crawl or check enters it.
+    /// Whether it reaches a network is asked of the mount table as it is
+    /// now, asked of no volume; one it does not hold yet is taken to.
+    fn found_mount(&self, rel: &Path) {
+        if self.mount_at(rel).is_some() {
+            return;
+        }
+        let network = Table::read()
+            .ok()
+            .and_then(|t| t.below(&self.path).get(rel).copied())
+            .unwrap_or(true);
+        self.found_mounts().insert(rel.to_path_buf(), network);
+        self.any_found
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Where mounts start below it, and whether each reaches a network:
     /// what the check stats no folder at or below.
     pub(crate) fn points(&self) -> Vec<(PathBuf, bool)> {
-        self.below.iter().map(|(p, &n)| (p.clone(), n)).collect()
+        let mut points: Vec<(PathBuf, bool)> =
+            self.below.iter().map(|(p, &n)| (p.clone(), n)).collect();
+        points.extend(self.found_mounts().iter().map(|(p, &n)| (p.clone(), n)));
+        points
     }
 
     /// Whether `rel` or a folder above it, below the root, is excluded by
@@ -808,11 +847,15 @@ pub(crate) fn read(
     entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let mut listing = Listing::new(stat, read_at, again);
     for e in entries {
-        let mount = e.mount_point
-            || (!root.below.is_empty()
+        let mount = if e.mount_point {
+            root.found_mount(&rel.join(OsStr::from_bytes(&e.name)));
+            true
+        } else {
+            !root.below.is_empty()
                 && root
                     .mount_at(&rel.join(OsStr::from_bytes(&e.name)))
-                    .is_some());
+                    .is_some()
+        };
         let entry = if mount {
             // A mount point: what its listing gave is its volume's, and a
             // mount's are not this folder's.
@@ -1115,7 +1158,7 @@ fn withheld(homes: impl Iterator<Item = PathBuf>, homes_in: Option<PathBuf>) -> 
         };
     }
     // As roots are named, resolved: a home spelled through a link.
-    let resolved = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let resolved = |p: PathBuf| crate::canonical(&p).unwrap_or(p);
     let folders = homes
         .flat_map(|home| {
             let home = resolved(home);

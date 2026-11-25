@@ -167,6 +167,12 @@ fn a_volume_mounted_below_a_root_is_not_crossed() {
     );
     for root in [&before, &after] {
         let crawl = crawl_all(root, &opts(2), &Cancel::default()).unwrap();
+        // Found by its parent's listing where the table did not hold it,
+        // and never entered.
+        assert_eq!(
+            root.mounts_below(),
+            vec![Path::new("mounted").to_path_buf()]
+        );
         let not = not_covered(&crawl);
         assert_eq!(not.get(Path::new("mounted")), Some(&Why::Mount), "{not:?}");
         let list = listed(&crawl);
