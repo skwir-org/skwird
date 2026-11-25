@@ -380,8 +380,12 @@ pub struct Table {
     /// For each folder's record, its entries: a record's number, and which
     /// of its names.
     children: HashMap<u64, Vec<(u64, usize)>>,
-    /// The records not read: torn, or malformed. What they hold is not
-    /// known, so the folders holding them are not covered by the table.
+    /// The records not read: torn (read twice so), marked bad, or
+    /// malformed. What they hold is not known, nor which folders hold
+    /// them: a crawl is never read from a table holding one
+    /// ([`TableReader`]). A check by it is sound all the same, each folder
+    /// judged by its own record, and one whose record is unread found
+    /// nowhere, so read again from the disk.
     pub unread: Vec<u64>,
     /// When its read began: a folder changed within a tick of it is read
     /// again at the next check, as one listed so is.
@@ -688,10 +692,11 @@ impl Table {
 /// same `listed`. A folder is found by the identity its parent's listing
 /// gave it, the root by its own.
 ///
-/// What the table could not read (its torn records, [`Table::unread`])
-/// is in no listing: the system service follows the volume's journal from
-/// before the table's read, and a record torn by a change being written
-/// is read again once the journal says so.
+/// What the table could not read ([`Table::unread`]) would be in no
+/// listing, its folder called whole without it: a table holding such a
+/// record is not read so (the engine walks the root's folders instead).
+/// The journal says nothing of a record NTFS marked bad, nor of one the
+/// table cannot decode.
 pub struct TableReader<'a> {
     pub table: &'a Table,
 }
@@ -896,38 +901,132 @@ impl Volume {
             .runs
             .ok_or_else(|| invalid("a file table with no data"))?;
         let total = layout.mft_valid / layout.bytes_per_record;
-        let mut decoded = Vec::new();
-        let mut unread = Vec::new();
         let mut chunk = Pages::new(CHUNK);
-        let mut next: u64 = 0;
-        for run in runs {
-            let lcn = run
-                .lcn
-                .ok_or_else(|| invalid("a sparse run in the file table"))?;
-            let (mut at, end) = (lcn * cluster, (lcn + run.clusters) * cluster);
-            while at < end && next < total {
-                let len = usize::try_from((end - at).min(CHUNK as u64)).unwrap_or(CHUNK);
-                let bytes = &mut chunk.bytes_mut()[..len];
-                self.read_at(at, bytes)?;
-                for one in bytes.chunks_exact_mut(record) {
-                    if next >= total {
-                        break;
-                    }
-                    match decode(next, one) {
-                        Ok(d) => decoded.push(d),
-                        Err(Bad::Empty | Bad::Unused) => {}
-                        Err(Bad::Torn | Bad::Malformed) => unread.push(next),
-                    }
-                    next += 1;
-                }
-                at += len as u64;
+        let mut read = read_runs(
+            &runs,
+            cluster,
+            record,
+            total,
+            chunk.bytes_mut(),
+            &mut |at, bytes| self.read_at(at, bytes),
+        )?;
+        // A record torn as it was read, being written, is whole once the
+        // write is done: each read once again, the rest of the table read.
+        let mut unread = Vec::new();
+        for (n, at) in std::mem::take(&mut read.unread) {
+            let again = match at {
+                Some(at) => self
+                    .record_at(at, record, sector)
+                    .map(|mut r| decode(n, &mut r)),
+                None => Ok(Err(Bad::Torn)),
+            };
+            match again? {
+                Ok(d) => read.decoded.push(d),
+                Err(Bad::Empty | Bad::Unused) => {}
+                Err(Bad::Torn | Bad::Malformed) => unread.push(n),
             }
         }
-        let mut table = Table::of(decoded, unread);
+        let mut table = Table::of(read.decoded, unread);
         table.read_at = read_at;
         table.serial = layout.serial;
         Ok(table)
     }
+
+    /// The `record` bytes of the volume at `at`, read alone: the sectors
+    /// holding them, as a volume is read past its cache.
+    fn record_at(&self, at: u64, record: usize, sector: usize) -> std::io::Result<Vec<u8>> {
+        let sector = sector as u64;
+        let start = at - at % sector;
+        let skip = usize::try_from(at - start).map_err(|_| invalid("a sector too large"))?;
+        let len = (skip + record).next_multiple_of(sector as usize);
+        let mut pages = Pages::new(len);
+        let bytes = &mut pages.bytes_mut()[..len];
+        self.read_at(start, bytes)?;
+        Ok(bytes[skip..skip + record].to_vec())
+    }
+}
+
+/// What the table's runs hold ([`read_runs`]).
+#[derive(Debug, Default)]
+pub(crate) struct Runs {
+    pub decoded: Vec<Decoded>,
+    /// The records not read (torn, malformed), each with where it is on the
+    /// volume, to be read again; none for one split between two runs.
+    pub unread: Vec<(u64, Option<u64>)>,
+}
+
+/// The `total` records the table's `runs` hold, read through `read` (an
+/// offset on the volume, whole sectors) a `chunk` at a time, each decoded
+/// under its number, counted from the table's start. A run need not end
+/// on a record's end (512-byte clusters, 1 KiB records): a record split
+/// between two runs is put back together, and every record after it keeps
+/// its number.
+pub(crate) fn read_runs(
+    runs: &[Run],
+    cluster: u64,
+    record: usize,
+    total: u64,
+    chunk: &mut [u8],
+    read: &mut dyn FnMut(u64, &mut [u8]) -> std::io::Result<()>,
+) -> std::io::Result<Runs> {
+    fn decoded(n: u64, bytes: &mut [u8], at: Option<u64>, out: &mut Runs) {
+        match decode(n, bytes) {
+            Ok(d) => out.decoded.push(d),
+            Err(Bad::Empty | Bad::Unused) => {}
+            Err(Bad::Torn | Bad::Malformed) => out.unread.push((n, at)),
+        }
+    }
+    let mut out = Runs::default();
+    // The start of a record the chunk before ended within, and where it
+    // began on the volume while it goes on there (a chunk of the same
+    // run), none once it goes on elsewhere (the next run).
+    let mut split: Vec<u8> = Vec::with_capacity(record);
+    let mut split_at: Option<u64> = None;
+    let mut next: u64 = 0;
+    for run in runs {
+        let lcn = run
+            .lcn
+            .ok_or_else(|| invalid("a sparse run in the file table"))?;
+        let bounds = lcn.checked_mul(cluster).zip(
+            lcn.checked_add(run.clusters)
+                .and_then(|e| e.checked_mul(cluster)),
+        );
+        let (mut at, end) = bounds.ok_or_else(|| invalid("a run past the volume's end"))?;
+        while at < end && next < total {
+            let len = usize::try_from((end - at).min(chunk.len() as u64)).unwrap_or(chunk.len());
+            let bytes = &mut chunk[..len];
+            read(at, bytes)?;
+            let mut from = 0;
+            if !split.is_empty() {
+                if split_at.is_some_and(|s| s + split.len() as u64 != at) {
+                    split_at = None;
+                }
+                from = (record - split.len()).min(len);
+                split.extend_from_slice(&bytes[..from]);
+                if split.len() == record {
+                    decoded(next, &mut split, split_at, &mut out);
+                    next += 1;
+                    split.clear();
+                }
+            }
+            let rest = &mut bytes[from..];
+            let whole = rest.len() / record * record;
+            for (k, one) in rest[..whole].chunks_exact_mut(record).enumerate() {
+                if next >= total {
+                    break;
+                }
+                let offset = at + (from + k * record) as u64;
+                decoded(next, one, Some(offset), &mut out);
+                next += 1;
+            }
+            if next < total && whole < rest.len() {
+                split_at = Some(at + (from + whole) as u64);
+                split.extend_from_slice(&rest[whole..]);
+            }
+            at += len as u64;
+        }
+    }
+    Ok(out)
 }
 
 fn invalid(what: &str) -> std::io::Error {

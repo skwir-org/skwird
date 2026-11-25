@@ -215,6 +215,84 @@ fn runs_read_back() {
     );
 }
 
+/// The table's runs read as a volume holds them, its clusters of 512
+/// bytes and its records of 1 KiB: a run of three clusters ends within a
+/// record, which the next run ends, and every record after keeps its
+/// number. One torn is said with where it is, to be read again; one torn
+/// across two runs, with nowhere. Chunks smaller than a run, or than a
+/// record, read alike.
+#[test]
+fn a_record_split_between_two_runs_keeps_every_number() {
+    const CLUSTER: u64 = 512;
+    let made = |name: &str| {
+        record(
+            1,
+            IN_USE,
+            0,
+            &[
+                standard(EPOCH, EPOCH, 0x20, 0),
+                file_name(reference(ROOT, 5), name, 1),
+            ],
+        )
+    };
+    // Records 0 to 4, two clusters each, over runs of 3, 1, 2 and 4
+    // clusters: record 1 split between the first two.
+    let runs = [(10, 3), (20, 1), (30, 2), (40, 4)].map(|(lcn, clusters)| Run {
+        lcn: Some(lcn),
+        clusters,
+    });
+    let mut records: Vec<Vec<u8>> = (0..5).map(|n| made(&format!("record {n}"))).collect();
+    // Record 3 torn, whole in the last run.
+    records[3][STRIDE - 1] ^= 0xFF;
+    let flat: Vec<u8> = records.concat();
+    let mut disk = vec![0u8; 50 * CLUSTER as usize];
+    let mut at = 0;
+    for run in &runs {
+        let start = usize::try_from(run.lcn.unwrap() * CLUSTER).unwrap();
+        let len = usize::try_from(run.clusters * CLUSTER).unwrap();
+        disk[start..start + len].copy_from_slice(&flat[at..at + len]);
+        at += len;
+    }
+    let read = |disk: &[u8], chunk: usize| {
+        let mut buffer = vec![0u8; chunk];
+        super::read_runs(&runs, CLUSTER, RECORD, 5, &mut buffer, &mut |at, bytes| {
+            let at = usize::try_from(at).unwrap();
+            bytes.copy_from_slice(&disk[at..at + bytes.len()]);
+            Ok(())
+        })
+        .unwrap()
+    };
+    for chunk in [1 << 20, 1024, 512] {
+        let whole = read(&disk, chunk);
+        let names: Vec<(u64, Vec<u8>)> = whole
+            .decoded
+            .iter()
+            .map(|d| (d.number, d.names[0].name.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            [0, 1, 2, 4]
+                .map(|n| (n, wtf8(&format!("record {n}"))))
+                .to_vec(),
+            "chunks of {chunk}"
+        );
+        assert_eq!(
+            whole.unread,
+            vec![(3, Some(40 * CLUSTER))],
+            "chunks of {chunk}"
+        );
+        // Record 1's second sector torn, in the second run: unread, with
+        // nowhere to read it again whole.
+        let mut torn = disk.clone();
+        torn[20 * CLUSTER as usize + STRIDE - 1] ^= 0xFF;
+        assert_eq!(
+            read(&torn, chunk).unread,
+            vec![(1, None), (3, Some(40 * CLUSTER))],
+            "chunks of {chunk}"
+        );
+    }
+}
+
 /// The records of [`the_table_is_the_tree_its_names_make`], by number.
 fn tree_records() -> Vec<(u64, Vec<u8>)> {
     let root = reference(ROOT, 5);
