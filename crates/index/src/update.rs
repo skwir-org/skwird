@@ -472,26 +472,15 @@ impl Index {
                 attrs: entry.attrs,
                 child,
             };
-            match same {
-                None => m.changes.push(Change {
-                    op: Op::Added,
-                    name: name.to_vec(),
-                    entry: *entry,
-                }),
-                Some(was)
-                    if was.kind != item.kind
-                        || was.ino != item.ino
-                        || was.attrs != item.attrs
-                        || was.child != item.child =>
-                {
-                    m.changes.push(Change {
-                        op: Op::Changed,
-                        name: name.to_vec(),
-                        entry: *entry,
-                    });
-                }
-                Some(_) => {}
-            }
+            self.log_change(
+                same,
+                kept.is_some(),
+                &item,
+                name,
+                entry,
+                dev,
+                &mut m.changes,
+            );
             items.push(item);
         }
         for item in &old.items[o..] {
@@ -503,6 +492,60 @@ impl Index {
             });
         }
         items
+    }
+
+    /// The change an entry of `name`, now `item` from `entry`, logs against
+    /// the `same` one it had, its folder `kept` or not: none if nothing of
+    /// it changed.
+    #[allow(clippy::too_many_arguments)] // merge's own state, handed down
+    fn log_change(
+        &self,
+        same: Option<Item>,
+        kept: bool,
+        item: &Item,
+        name: &[u8],
+        entry: &Entry,
+        dev: u64,
+        changes: &mut Vec<Change>,
+    ) {
+        match same {
+            None => changes.push(Change {
+                op: Op::Added,
+                name: name.to_vec(),
+                entry: *entry,
+            }),
+            // A folder whose name holds another now (a folder of another
+            // identity, a file, a link): it is removed, and what holds
+            // its name added. Said as changed, it said nothing of the
+            // folder gone to whom asked of what was below it, the
+            // journal's events on the way to it its removal and making
+            // alone. Replayed, the two make the same entry.
+            Some(was) if was.kind == Kind::Folder && !kept => {
+                changes.push(Change {
+                    op: Op::Removed,
+                    name: name.to_vec(),
+                    entry: self.entry_of(&was, dev),
+                });
+                changes.push(Change {
+                    op: Op::Added,
+                    name: name.to_vec(),
+                    entry: *entry,
+                });
+            }
+            Some(was)
+                if was.kind != item.kind
+                    || was.ino != item.ino
+                    || was.attrs != item.attrs
+                    || was.child != item.child =>
+            {
+                changes.push(Change {
+                    op: Op::Changed,
+                    name: name.to_vec(),
+                    entry: *entry,
+                });
+            }
+            Some(_) => {}
+        }
     }
 
     /// An entry of a block, as the log and the journal give it: a folder's

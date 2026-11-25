@@ -262,6 +262,40 @@ fn the_journal_says_the_folder_asked_for_is_gone() {
         removed("top/other").is_empty(),
         "of the folder above's changes, those on the way alone"
     );
+    // Made again in its place, in one read of the folder above: removed,
+    // and made, never a change of times alone. So is a file put there.
+    s.file("top/asked/deep/one.txt");
+    k.refresh(&Cancel::default()).unwrap();
+    let ops = |k: &Keeper, asked: &str, since: Token| -> Vec<(PathBuf, Op)> {
+        let (events, _) = k.changes(Path::new(asked), since).unwrap();
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Entry { path, op, .. } if path == Path::new("top/asked") => Some((path, op)),
+                _ => None,
+            })
+            .collect()
+    };
+    let since = k.token().unwrap();
+    s.remove("top/asked");
+    s.dir("top/asked");
+    k.refresh(&Cancel::default()).unwrap();
+    let asked = PathBuf::from("top/asked");
+    assert_eq!(
+        ops(&k, "top/asked/deep", since),
+        [(asked.clone(), Op::Removed), (asked.clone(), Op::Added)],
+        "a folder above it made again"
+    );
+    let since = k.token().unwrap();
+    s.remove("top/asked");
+    s.file("top/asked");
+    k.refresh(&Cancel::default()).unwrap();
+    assert_eq!(
+        ops(&k, "top/asked", since),
+        [(asked.clone(), Op::Removed), (asked, Op::Added)],
+        "a file in its place"
+    );
+    s.remove("top/asked");
     // A folder above it no longer read: not covered, from there.
     s.dir("top/asked");
     k.refresh(&Cancel::default()).unwrap();
