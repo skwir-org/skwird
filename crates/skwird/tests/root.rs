@@ -1041,3 +1041,47 @@ fn a_kept_stick_is_a_root_while_it_is_mounted() {
     drop(engine);
     run("umount", &[at.0.as_os_str()]);
 }
+
+/// A btrfs on a USB stick, as the user's drives hold it: its mounts have
+/// numbers of their own (major 0), never their device's, and it is seen
+/// by its source's device, its btrfs UUID its identity; kept, its names
+/// are answered.
+#[test]
+fn a_btrfs_stick_is_seen_by_its_device() {
+    let Some(m) = machine() else { return };
+    let home = Place::new(&m.ext4, "btrfs-home");
+    std::fs::create_dir_all(&home.0).unwrap();
+    let dirs = Place::new(&m.ext4, "btrfs-dirs");
+    let at = Place::new(&m.ext4, "btrfs-stick");
+    std::fs::create_dir_all(&at.0).unwrap();
+    run("mount", &[m.stick_btrfs.as_os_str(), at.0.as_os_str()]);
+    std::fs::write(at.join("on the btrfs stick.txt"), b"x").unwrap();
+    let uuid = Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value"])
+        .arg(&m.stick_btrfs)
+        .output()
+        .unwrap();
+    let uuid = String::from_utf8(uuid.stdout).unwrap().trim().to_owned();
+    assert_eq!(uuid.len(), 36, "{uuid}");
+    let engine = UserEngine::start(&dirs.0, &home.0);
+    let mut c = engine.client();
+    let v = c.volumes(&[], &[], &[]).unwrap();
+    let seen = v
+        .seen
+        .iter()
+        .find(|s| s.at == WirePath::of(&at.0))
+        .unwrap_or_else(|| panic!("the btrfs stick is not seen: {v:?}"));
+    assert_eq!(seen.filesystem, "btrfs");
+    assert_eq!(seen.label.as_deref(), Some("TESTBTRFS"));
+    assert_eq!(seen.id.as_deref(), Some(uuid.as_str()));
+    c.volumes(&[&uuid], &[], &[]).unwrap();
+    let file = at.join("on the btrfs stick.txt");
+    wait_for(30, "the btrfs stick indexed", || {
+        answered(&mut c, &named(&at.0, "on the btrfs")) == [file.clone()].into()
+    });
+    let v = c.release_at(&[&at.0]).unwrap();
+    assert_eq!(v.kept[0].standing, skwird_protocol::Standing::Released);
+    drop(c);
+    drop(engine);
+    run("umount", &[at.0.as_os_str()]);
+}

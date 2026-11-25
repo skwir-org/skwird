@@ -5,7 +5,10 @@
 //!
 //! On Linux:
 //! - **A block device's filesystem:** a mount's device numbers name it in
-//!   sysfs (`/sys/dev/block/MAJOR:MINOR`). A FUSE program's (a phone over
+//!   sysfs (`/sys/dev/block/MAJOR:MINOR`); where they are anonymous, as
+//!   btrfs's and bcachefs's always are, its source does (`/dev/mapper/…`,
+//!   found on the user's machine: two USB drives, LUKS with btrfs inside,
+//!   were seen as none). A FUSE program's (a phone over
 //!   MTP, `GVfs`, rclone) or a network's names no block device, and is
 //!   never one. A mount of a folder of a filesystem, not its root (a
 //!   bind), is not the volume; a filesystem mounted twice is seen once.
@@ -53,7 +56,7 @@ pub struct Removable {
 #[cfg(target_os = "linux")]
 pub fn mounted() -> Result<Vec<Removable>, String> {
     let table = Table::read().map_err(|e| format!("the mount table cannot be read: {e}"))?;
-    Ok(seen_in(&table, Path::new("/sys"), Path::new("/dev/disk")))
+    Ok(seen_in(&table, Path::new("/sys"), Path::new("/dev")))
 }
 
 /// The removable volumes mounted, in the mount table's order.
@@ -117,26 +120,27 @@ pub fn mounted() -> Result<Vec<Removable>, String> {
     ))
 }
 
-/// [`seen`], sysfs read from `sys`, udev's names from `disk`.
+/// The removable volumes of `table`, sysfs read from `sys`, `/dev` from
+/// `dev`, udev's names from its `disk`.
 #[cfg(target_os = "linux")]
-pub fn seen_in(table: &Table, sys: &Path, disk: &Path) -> Vec<Removable> {
-    let mut seen: Vec<((u32, u32), Removable)> = Vec::new();
+pub fn seen_in(table: &Table, sys: &Path, dev: &Path) -> Vec<Removable> {
+    let disk = dev.join("disk");
+    let mut seen: Vec<(PathBuf, Removable)> = Vec::new();
     let devices =
         std::fs::canonicalize(sys.join("devices")).unwrap_or_else(|_| sys.join("devices"));
     for m in table.mounts() {
-        // No block device (major 0: tmpfs, FUSE, a network's), a loop
-        // device's (7), or a folder of a filesystem mounted elsewhere.
-        if m.dev.0 == 0 || m.dev.0 == 7 || m.network() || m.root != Path::new("/") {
+        // A loop device's (7), a network's, or a folder of a filesystem
+        // mounted elsewhere.
+        if m.dev.0 == 7 || m.network() || m.root != Path::new("/") {
             continue;
         }
-        if seen.iter().any(|(dev, _)| *dev == m.dev) {
-            continue;
-        }
-        let Ok(device) =
-            std::fs::canonicalize(sys.join(format!("dev/block/{}:{}", m.dev.0, m.dev.1)))
-        else {
+        let Some(device) = block_device(m, sys, dev) else {
             continue;
         };
+        // Seen once: a btrfs mounted twice has two numbers of its own.
+        if seen.iter().any(|(d, _)| *d == device) {
+            continue;
+        }
         if !removable(sys, &devices, &device, 0) {
             continue;
         }
@@ -144,7 +148,7 @@ pub fn seen_in(table: &Table, sys: &Path, disk: &Path) -> Vec<Removable> {
             continue;
         };
         seen.push((
-            m.dev,
+            device.clone(),
             Removable {
                 id: named(&disk.join("by-uuid"), name),
                 point: m.point.clone(),
@@ -154,6 +158,25 @@ pub fn seen_in(table: &Table, sys: &Path, disk: &Path) -> Vec<Removable> {
         ));
     }
     seen.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The sysfs folder of the block device mount `m` is a filesystem of, `dev`
+/// standing for `/dev`. Its device numbers name it, but where they are
+/// anonymous (major 0): btrfs and bcachefs give such numbers of their own
+/// to every mount, never their device's, and it is found by the mount's
+/// source, a path under `/dev` (`/dev/mapper/luks-…`, which leads to
+/// `/dev/dm-1`). A tmpfs's, a FUSE program's or a network's source is no
+/// such path: none. A filesystem of several devices names one of them,
+/// enough to tell whether it is removable.
+#[cfg(target_os = "linux")]
+fn block_device(m: &crate::mounts::Mount, sys: &Path, dev: &Path) -> Option<PathBuf> {
+    if m.dev.0 != 0 {
+        return std::fs::canonicalize(sys.join(format!("dev/block/{}:{}", m.dev.0, m.dev.1))).ok();
+    }
+    let below = Path::new(&m.source).strip_prefix("/dev").ok()?;
+    let node = std::fs::canonicalize(dev.join(below)).ok()?;
+    let name = node.file_name()?;
+    std::fs::canonicalize(sys.join("class/block").join(name)).ok()
 }
 
 /// Whether the block device at `device` (its sysfs folder, below
@@ -233,6 +256,10 @@ mod tests {
     use crate::mounts::Mount;
 
     fn mount(dev: (u32, u32), point: &str, fstype: &str, root: &str) -> Mount {
+        mount_from(dev, point, fstype, root, "/dev/synthetic")
+    }
+
+    fn mount_from(dev: (u32, u32), point: &str, fstype: &str, root: &str, source: &str) -> Mount {
         Mount {
             id: u64::from(dev.0 * 1000 + dev.1),
             parent: 1,
@@ -240,7 +267,7 @@ mod tests {
             root: root.into(),
             point: point.into(),
             fstype: fstype.into(),
-            source: "/dev/synthetic".into(),
+            source: source.into(),
             local: true,
         }
     }
@@ -248,6 +275,7 @@ mod tests {
     /// A synthetic sysfs and udev's folders: a USB stick, an SD card with
     /// no identity, a card reader's disk that says it is removable, an
     /// encrypted volume on the stick, an internal disk, a loop device.
+    #[allow(clippy::too_many_lines)] // One machine's sysfs and /dev, written out.
     fn machine(s: &Scratch) -> (PathBuf, PathBuf) {
         let sys = s.dir("sys");
         let devices = |rel: &str| s.dir(format!("sys/devices/{rel}"));
@@ -314,9 +342,52 @@ mod tests {
             )
             .unwrap();
         }
-        let disk = s.dir("disk");
-        s.dir("disk/by-uuid");
-        s.dir("disk/by-label");
+        // Two USB drives, LUKS with btrfs inside, as the user's are: one
+        // on a whole disk (sdd), one on a partition (sde2); and a btrfs of
+        // the internal disk's (nvme0n1p3). btrfs's mounts have anonymous
+        // numbers: their sources name their devices.
+        let usb3 = "pci0000:00/0000:00:14.0/usb3";
+        let whole = devices(&format!("{usb3}/3-1/3-1:1.0/host7/block/sdd"));
+        std::fs::write(whole.join("removable"), "0\n").unwrap();
+        let parted = devices(&format!("{usb3}/3-2/3-2:1.0/host8/block/sde"));
+        std::fs::write(parted.join("removable"), "0\n").unwrap();
+        s.write(
+            format!("sys/devices/{usb3}/3-2/3-2:1.0/host8/block/sde/sde2/partition"),
+            b"2\n",
+        );
+        s.write(
+            "sys/devices/pci0000:00/0000:00:1d.0/nvme/nvme0/nvme0n1/nvme0n1p3/partition",
+            b"3\n",
+        );
+        s.dir("sys/devices/virtual/block/dm-3/slaves/sdd");
+        s.dir("sys/devices/virtual/block/dm-4/slaves/sde2");
+        for (name, rel) in [
+            ("dm-3", "virtual/block/dm-3".to_owned()),
+            ("dm-4", "virtual/block/dm-4".to_owned()),
+            ("sdd", format!("{usb3}/3-1/3-1:1.0/host7/block/sdd")),
+            ("sde2", format!("{usb3}/3-2/3-2:1.0/host8/block/sde/sde2")),
+            (
+                "nvme0n1p3",
+                "pci0000:00/0000:00:1d.0/nvme/nvme0/nvme0n1/nvme0n1p3".to_owned(),
+            ),
+        ] {
+            symlink(
+                sys.join("devices").join(rel),
+                sys.join("class/block").join(name),
+            )
+            .unwrap();
+        }
+        let dev = s.dir("dev");
+        let disk = s.dir("dev/disk");
+        s.dir("dev/disk/by-uuid");
+        s.dir("dev/disk/by-label");
+        s.dir("dev/mapper");
+        for node in ["dm-3", "dm-4", "nvme0n1p3"] {
+            s.write(format!("dev/{node}"), b"");
+        }
+        for (name, node) in [("luks-whole", "dm-3"), ("luks-parted", "dm-4")] {
+            symlink(format!("../{node}"), dev.join("mapper").join(name)).unwrap();
+        }
         for (dir, name, device) in [
             ("by-uuid", "ABCD-1234", "sdb1"),
             ("by-uuid", "0b6d3a4e-5f61-4c2a-9d7e-1a2b3c4d5e6f", "dm-0"),
@@ -326,11 +397,18 @@ mod tests {
                 "f0e1d2c3-b4a5-4697-8879-6a5b4c3d2e1f",
                 "nvme0n1p2",
             ),
+            ("by-uuid", "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d", "dm-3"),
+            ("by-uuid", "4b5c6d7e-8f9a-4b2c-8d3e-1f2a3b4c5d6e", "dm-4"),
+            (
+                "by-uuid",
+                "5c6d7e8f-9a0b-4c3d-9e4f-2a3b4c5d6e7f",
+                "nvme0n1p3",
+            ),
             ("by-label", "SYNTHETIC\\x20STICK", "sdb1"),
         ] {
             symlink(format!("../../{device}"), disk.join(dir).join(name)).unwrap();
         }
-        (sys, disk)
+        (sys, dev)
     }
 
     /// A USB stick, an SD card, a card reader's disk and an encrypted
@@ -341,10 +419,10 @@ mod tests {
     #[test]
     fn removable_volumes_are_seen_by_their_identity() {
         let s = Scratch::new("removable");
-        let (sys, disk) = machine(&s);
+        let (sys, dev) = machine(&s);
         let table = Table::of(vec![
             mount((259, 2), "/", "ext4", "/"),
-            mount((0, 25), "/run", "tmpfs", "/"),
+            mount_from((0, 25), "/run", "tmpfs", "/", "tmpfs"),
             mount((8, 17), "/media/someone/SYNTHETIC STICK", "vfat", "/"),
             mount((8, 17), "/mnt/again", "vfat", "/"),
             mount((8, 17), "/srv/a folder of it", "vfat", "/inside"),
@@ -353,9 +431,15 @@ mod tests {
             mount((253, 0), "/media/someone/sealed", "ext4", "/"),
             mount((253, 1), "/home", "ext4", "/"),
             mount((7, 0), "/snap/a/1", "squashfs", "/"),
-            mount((0, 60), "/run/user/1000/gvfs", "fuse.gvfsd-fuse", "/"),
+            mount_from(
+                (0, 60),
+                "/run/user/1000/gvfs",
+                "fuse.gvfsd-fuse",
+                "/",
+                "gvfsd-fuse",
+            ),
         ]);
-        let seen = seen_in(&table, &sys, &disk);
+        let seen = seen_in(&table, &sys, &dev);
         let said: Vec<(Option<&str>, &str, &str, Option<&str>)> = seen
             .iter()
             .map(|r| {
@@ -388,6 +472,59 @@ mod tests {
                     "/media/someone/sealed",
                     "ext4",
                     None
+                ),
+            ]
+        );
+    }
+
+    /// btrfs's mounts have numbers of their own (major 0), never their
+    /// device's: two USB drives, LUKS with btrfs inside, one on a whole
+    /// disk and one on a partition, as the user's are, are seen by their
+    /// sources' devices; one mounted twice is seen once, and a subvolume
+    /// of it mounted apart is not the volume. A btrfs of the internal
+    /// disk, and a tmpfs, are not seen.
+    #[test]
+    fn a_btrfs_on_luks_is_seen_by_its_source() {
+        let s = Scratch::new("removable-btrfs");
+        let (sys, dev) = machine(&s);
+        let whole = "/dev/mapper/luks-whole";
+        let table = Table::of(vec![
+            mount_from((0, 76), "/run/media/someone/WHOLE", "btrfs", "/", whole),
+            mount_from((0, 77), "/mnt/whole again", "btrfs", "/", whole),
+            mount_from((0, 78), "/mnt/snapshots", "btrfs", "/@snapshots", whole),
+            mount_from(
+                (0, 98),
+                "/run/media/someone/PARTED",
+                "btrfs",
+                "/",
+                "/dev/mapper/luks-parted",
+            ),
+            mount_from((0, 30), "/data", "btrfs", "/", "/dev/nvme0n1p3"),
+            mount_from((0, 25), "/run", "tmpfs", "/", "tmpfs"),
+        ]);
+        let seen = seen_in(&table, &sys, &dev);
+        let said: Vec<(Option<&str>, &str, &str)> = seen
+            .iter()
+            .map(|r| {
+                (
+                    r.id.as_deref(),
+                    r.point.to_str().unwrap(),
+                    r.fstype.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    Some("3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d"),
+                    "/run/media/someone/WHOLE",
+                    "btrfs"
+                ),
+                (
+                    Some("4b5c6d7e-8f9a-4b2c-8d3e-1f2a3b4c5d6e"),
+                    "/run/media/someone/PARTED",
+                    "btrfs"
                 ),
             ]
         );

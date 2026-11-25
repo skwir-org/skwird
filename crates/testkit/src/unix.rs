@@ -433,6 +433,10 @@ pub struct Machine {
     /// on the device and labelled `TEST STICK`, mounted nowhere: the
     /// device, for a test to mount.
     pub stick: PathBuf,
+    /// A second, its btrfs filesystem made whole on the device and
+    /// labelled `TESTBTRFS`, mounted nowhere: btrfs's mounts have device
+    /// numbers of their own, never their device's.
+    pub stick_btrfs: PathBuf,
 }
 
 impl Machine {
@@ -487,6 +491,7 @@ pub fn machine() -> Option<Machine> {
         slow: path("slow"),
         slow_device: path("slow_device"),
         stick: path("stick"),
+        stick_btrfs: path("stick_btrfs"),
     })
 }
 

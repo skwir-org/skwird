@@ -52,6 +52,7 @@ in
         slow=/mnt/slow
         slow_device=/dev/mapper/slow
         stick=/dev/sda
+        stick_btrfs=/dev/sdb
       '';
     };
 
@@ -69,6 +70,18 @@ in
       machine.succeed(
           "mkfs.vfat -n 'TEST STICK' /dev/sda",
           "udevadm trigger --settle /dev/sda",
+      )
+      # A second, btrfs, whose mounts have numbers of their own, never
+      # their device's (/dev/sdb).
+      stick2 = os.path.join(os.environ.get("TMPDIR", "/tmp"), "stick-btrfs.img")
+      with open(stick2, "wb") as f:
+          f.truncate(256 << 20)
+      machine.send_monitor_command(f"drive_add 0 if=none,id=stick2,format=raw,file={stick2}")
+      machine.send_monitor_command("device_add usb-storage,bus=xhci.0,drive=stick2,id=stick2,removable=on")
+      machine.wait_until_succeeds("test -b /dev/sdb")
+      machine.succeed(
+          "mkfs.btrfs -q -L TESTBTRFS /dev/sdb",
+          "udevadm trigger --settle /dev/sdb",
       )
       machine.succeed(
           "mkfs.ext4 -q /dev/vdb",

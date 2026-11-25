@@ -2066,7 +2066,12 @@ ADR-053, 074, 075):
       is its underlying devices', removable where one is; a loop device's
       never is (snaps' packages are mounted from them). A block device's
       filesystem alone, mounted at its root: a bind of a folder of it is
-      not the volume, and one mounted twice is seen once.
+      not the volume, and one mounted twice is seen once. Its device is
+      named by its mount's numbers, or, where they are anonymous (major
+      0), as btrfs's and bcachefs's always are, by its source, a path
+      under `/dev`: found on the user's machine (2026-11-25), where two
+      USB drives, LUKS with btrfs inside, were seen as none. The root
+      tests' machine has a btrfs USB stick since, beside the FAT one.
     - **The identity** is udev's name in `/dev/disk/by-uuid`, as blkid
       spells it; the label, udev's in `/dev/disk/by-label`, unescaped.
     - **Kept** in the state folder (`volumes`), each client's, as its
