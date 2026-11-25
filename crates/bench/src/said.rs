@@ -21,7 +21,15 @@ pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = n as f64;
     let mut unit = 0;
-    while value >= 1000.0 && unit + 1 < UNITS.len() {
+    // A unit up where the figure, rounded to the tenth said, reaches 1000:
+    // 999,950 B is "1.0 MB", never "1000.0 KB".
+    while unit + 1 < UNITS.len()
+        && (if unit == 0 {
+            value
+        } else {
+            (value * 10.0).round() / 10.0
+        }) >= 1000.0
+    {
         value /= 1000.0;
         unit += 1;
     }
@@ -34,10 +42,12 @@ pub fn bytes(n: u64) -> String {
 
 /// A time as "1.23 s", "45.1 ms" or "812 µs".
 pub fn time(d: Duration) -> String {
+    // The unit chosen by the figure as it is rounded: 999.96 ms is "1.00 s",
+    // 999.6 µs is "1.0 ms".
     let s = d.as_secs_f64();
-    if s >= 1.0 {
+    if s >= 1.0 || (s * 1e3 * 10.0).round() >= 10_000.0 {
         format!("{s:.2} s")
-    } else if s >= 0.001 {
+    } else if s >= 0.001 || (s * 1e6).round() >= 1000.0 {
         format!("{:.1} ms", s * 1e3)
     } else {
         format!("{:.0} µs", s * 1e6)
@@ -55,6 +65,10 @@ mod tests {
         assert_eq!(count(1000), "1,000");
         assert_eq!(count(2_104_331), "2,104,331");
         assert_eq!(bytes(999), "999 B");
+        assert_eq!(bytes(999_950), "1.0 MB");
+        assert_eq!(bytes(999_940), "999.9 KB");
+        assert_eq!(time(Duration::from_micros(999_960)), "1.00 s");
+        assert_eq!(time(Duration::from_nanos(999_600)), "1.0 ms");
         assert_eq!(bytes(31_200_000), "31.2 MB");
         assert_eq!(time(Duration::from_millis(1234)), "1.23 s");
         assert_eq!(time(Duration::from_micros(45_100)), "45.1 ms");

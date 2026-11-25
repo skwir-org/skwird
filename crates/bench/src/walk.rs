@@ -82,9 +82,23 @@ struct Counts {
     read: Vec<(usize, Folder, (PathBuf, StoredFolder))>,
 }
 
-/// The root, opened as the crawl opens it.
+/// The user's home, as the engine finds it (`skwird::dirs`): `USERPROFILE`
+/// on Windows, `HOME` elsewhere. None known, the bench refuses: it could
+/// keep out no private folder.
+pub fn home() -> Result<PathBuf, String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{var} is not set: the private folders could not be kept out"))
+}
+
+/// The root, opened as the engine opens it, its default exclusions kept
+/// out (the private folders, `.ssh`, `.gnupg` and the like): every step
+/// measures the tree the engine reads, and reads nothing it never does.
 pub fn open(root: &Path) -> Result<Root, String> {
-    Root::open(root, Exclusions::none()).map_err(|e| e.to_string())
+    let (exclusions, _) = Exclusions::resolve(skwird_crawl::exclude::defaults(&home()?));
+    Root::open(root, exclusions).map_err(|e| e.to_string())
 }
 
 pub fn walk(root: &Root, opts: &Options) -> Result<Walked, String> {

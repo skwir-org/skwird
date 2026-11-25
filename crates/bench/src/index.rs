@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use skwird_crawl::{Cancel, Exclusions, Kind, Options, Root, Time};
+use skwird_crawl::{Cancel, Kind, Options, Time};
 use skwird_index::build::crawl_and_build;
 use skwird_index::store;
 use skwird_index::tree::Limits;
@@ -18,8 +18,9 @@ use crate::said::{bytes, count, time};
 fn peak_memory() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1000)
+    // In KiB, as the kernel counts.
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
 }
 
 fn name(text: &str) -> Query {
@@ -89,11 +90,8 @@ fn time_queries(index: &Index) {
 pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), String> {
     // The engine's default exclusions: a private folder's names are never
     // kept, not even in a measurement's index.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let (exclusions, _) = Exclusions::resolve(skwird_crawl::exclude::defaults(&home));
-    let root = Root::open(path, exclusions).map_err(|e| e.to_string())?;
+    let home = crate::walk::home()?;
+    let root = crate::walk::open(path)?;
     let opts = Options {
         threads,
         ..Options::default()
@@ -139,10 +137,8 @@ pub fn run(path: &Path, threads: usize, keep: Option<PathBuf>) -> Result<(), Str
     );
     time_queries(&index);
     let dir = keep.unwrap_or_else(|| {
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cache =
+            std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home.join(".cache"), PathBuf::from);
         cache.join("skwird-bench").join("index")
     });
     let start = Instant::now();

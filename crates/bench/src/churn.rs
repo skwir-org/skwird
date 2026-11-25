@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use skwird_crawl::{
-    Cancel, Entry, Exclusions, FileId, Heard, Kind, Options, Outcome, Root, Time, Watch, Watcher,
-    crawl_below, read_folder_watched,
+    Cancel, Entry, FileId, Heard, Kind, Options, Outcome, Root, Time, Watch, Watcher, crawl_below,
+    read_folder_watched,
 };
 use skwird_index::block::{Facts, State};
 use skwird_index::build::facts;
@@ -293,7 +293,7 @@ pub fn run(folder: &Path, command: &[String]) -> Result<(), String> {
     let (program, args) = command
         .split_first()
         .ok_or("churn takes a command to run, after --")?;
-    let root = Root::open(folder, Exclusions::none()).map_err(|e| e.to_string())?;
+    let root = crate::walk::open(folder)?;
     let watcher =
         Arc::new(Watcher::new(1, Watcher::share()).map_err(|e| format!("cannot watch: {e}"))?);
     watcher.set_scopes(vec![root.path().to_path_buf()]);
@@ -322,6 +322,7 @@ pub fn run(folder: &Path, command: &[String]) -> Result<(), String> {
         .map(|&(quiet, most)| Batched::new(quiet, most, &model))
         .collect();
     let mut child = Command::new(program)
+        .current_dir(folder)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
