@@ -508,14 +508,16 @@ impl Client {
             Some(s) => vec![s.clone()],
             None => find.sockets(),
         };
-        // Each socket that something listens on, and how its engine failed.
-        let mut failed: Vec<(&PathBuf, Error)> = Vec::new();
+        // How the first engine that listens and failed failed.
+        let mut failed: Option<Error> = None;
         for socket in &sockets {
             match Client::open(socket, &find.client, find.silence, stop) {
                 Ok(client) => return Ok(client),
                 Err(e @ (Error::Version | Error::Stopped)) => return Err(e),
                 Err(e) if nothing_listens(&e) => {}
-                Err(e) => failed.push((socket, e)),
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
             }
         }
         let Some(program) = &find.start else {
@@ -526,7 +528,7 @@ impl Client {
         // (silent, gone in the middle of its hello, refusing), the system
         // service's or where one started would, none is started beside it,
         // nor waited for. An engine going away listens no more.
-        if let Some((_, e)) = failed.into_iter().next() {
+        if let Some(e) = failed {
             return Err(Error::NoEngine(format!("one runs, and failed: {e}")));
         }
         // No engine started for a search given up on.
