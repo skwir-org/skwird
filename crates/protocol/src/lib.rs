@@ -507,12 +507,14 @@ pub struct Welcome {
 /// and indexes a removable volume a client keeps.
 pub const VOLUMES: &str = "volumes";
 
-/// A [`Welcome::features`] word: a name term is matched in both its
-/// Unicode forms, composed and decomposed (NFC and NFD), lowercased first
-/// where case is ignored; a glob in its literal parts alone (DESIGN, open
-/// question 5). A client that matches so asks no engine without it for a
-/// term whose two forms differ: the index would hold less than it
-/// matches.
+/// A [`Welcome::features`] word: a name term is matched as skwir's
+/// `name_match` matches it (DESIGN, open question 5): in its forms as
+/// typed, composed and decomposed (NFC and NFD), each once; where case is
+/// ignored, folded on the term and the name (`to_lowercase`, `ς` taken as
+/// `σ`); a glob in its literal parts, its escapes and its classes' single
+/// members, a range's ends as typed; an ASCII name against the term's one
+/// ASCII form. A client that matches so asks no engine without it for a
+/// term whose forms differ: the index would hold less than it matches.
 pub const NAMES_BOTH_FORMS: &str = "names-both-forms";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
