@@ -2094,6 +2094,44 @@ ADR-053, 074, 075):
       kept and answered, released and unmounted with nothing held on it,
       mounted again and its index read back, forgotten and its index
       removed.
+
+    **As built on macOS** (2026-11-25): each volume the Finder shows (not
+    `MNT_DONTBROWSE`: Xcode's simulators' images are hidden), from a disk
+    `DiskArbitration` says is plugged in: its device not inside the
+    machine, its media removable (an SD card in a reader inside it), or a
+    disk image. Its identity is its volume's UUID, lowercase, the one
+    `DiskArbitration` derives from a FAT or exFAT serial: reading the
+    serial itself takes root (the sketch's "serial as blkid prints it" is
+    Linux's spelling; each engine's is its own, and a client never derives
+    one). Its label, its volume's name. A user's engine follows mounts by a
+    kqueue's `EVFILT_FS`, and says each change again a second after,
+    `DiskArbitration` describing a volume a while after it is mounted. A
+    kept volume's root is heard whole by the roots' stream, its index read
+    back checked first. Its reads are throttled (`setiopolicy_np`). Tried
+    on the runner on a FAT disk image attached where the Finder shows it:
+    seen, kept, answered, released by its mount point with nothing of it
+    held (`lsof`), detached with no force, attached again, forgotten.
+
+    **As built on Windows** (2026-11-25): each volume, at each path it is
+    mounted at, removable where its drive says so (a stick, a card, an
+    optical disc), or where its disk is on a USB or SD card's bus or is a
+    virtual disk attached, asked through a handle opened for no access.
+    Its identity, FAT's and exFAT's serial as `XXXX-XXXX`, as Linux spells
+    it; any other's, its volume's GUID, lowercase, this machine's. A
+    user's engine hears volumes arrive and go by `CM_Register_Notification`
+    (no window, no service manager), and again 3 s after; and a kept
+    volume's root holds a handle of its own on the volume, registered to
+    be told when its removal is asked (the taskbar's "Safely remove"):
+    the writer releases it, answers once its reads end, and the handle is
+    closed before the call returns, as the system service lets go of its
+    volumes. A root that is a volume's mount point is opened through it,
+    to the volume. Its reads are in the background mode
+    (`THREAD_MODE_BACKGROUND_BEGIN`). Tried on the runner on a FAT32
+    virtual disk mounted at a folder: seen, kept, answered and not
+    lockable while watched, released by its mount point and lockable
+    (`FSCTL_LOCK_VOLUME`, which fails where any other handle is open),
+    detached, attached again, forgotten. Not tried there: an eject from
+    the taskbar, which a test cannot ask.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
@@ -2284,9 +2322,9 @@ ADR-053, 074, 075):
    plugged in, would be answered to whoever may list it, and FAT lets
    everyone. On macOS, DiskArbitration tells a disk inside the machine
    from one plugged in: an internal one is the system service's, as on
-   Linux. Built on Linux on 2026-11-25 (Protocol, "Removable volumes",
-   as built); macOS and Windows next, each with its own follower of
-   mounts for a user's engine.
+   Linux. Built on Linux, macOS and Windows on 2026-11-25 (Protocol,
+   "Removable volumes", as built), each with its own follower of mounts
+   for a user's engine.
 9. **The name:** whether `skwird` is free in the distributions. No
    crate is published on crates.io (the user's choice, 2026-11-11).
    Answered on 2026-11-24: free in Debian, Ubuntu, Fedora, Arch, the
