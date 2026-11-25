@@ -632,9 +632,13 @@ fn locks(at: &Path) -> bool {
     point.extend("\\\0".encode_utf16());
     let mut name = [0u16; 64];
     // SAFETY: a NUL-ended path, and a buffer of its length.
-    if unsafe { GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
-        return false;
-    }
+    let named =
+        unsafe { GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), 64) } != 0;
+    assert!(
+        named,
+        "no volume mounted at the disk's folder: {}",
+        std::io::Error::last_os_error()
+    );
     let end = name.iter().position(|&c| c == 0).unwrap_or(0);
     // `\\?\Volume{…}`, its trailing backslash left out: the volume, not
     // its root folder.
@@ -715,7 +719,12 @@ fn ask_removal(at: &Path) -> Result<(), String> {
     };
     let mut point: Vec<u16> = at.as_os_str().encode_wide().collect();
     point.extend("\\0".encode_utf16());
-    let target = name_of(&point).ok_or("no volume mounted there")?;
+    let target = name_of(&point).ok_or_else(|| {
+        format!(
+            "no volume mounted there: {}",
+            std::io::Error::last_os_error()
+        )
+    })?;
     let mut len = 0u32;
     // SAFETY: the count written; the volumes' interface class; no device.
     unsafe {
@@ -898,7 +907,9 @@ fn a_kept_virtual_disk_is_a_root_while_it_is_attached() {
     // An eject asked as the taskbar asks it, while the engine watches the
     // volume: it lets go of it when told, and the removal goes on.
     assert!(!locks(&at), "not watched again");
-    ask_removal(&at).unwrap();
+    if let Err(e) = ask_removal(&at) {
+        panic!("{e}; the engine says: {:?}", c.volumes(&[], &[], &[]));
+    }
     wait_for(15, "the disk away once removed", || {
         c.volumes(&[], &[], &[])
             .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
