@@ -117,7 +117,7 @@ impl Probe {
 /// where it is mounted from (the device, the same for every subvolume of
 /// one btrfs filesystem).
 fn mounted_from(dir: &Path) -> Option<(String, PathBuf)> {
-    let dir = std::fs::canonicalize(dir).ok()?;
+    let dir = skwird_crawl::canonical(dir).ok()?;
     let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     let mut best: Option<(usize, String, PathBuf)> = None;
     for line in info.lines() {

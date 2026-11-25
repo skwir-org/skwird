@@ -168,7 +168,7 @@ fn domain() -> String {
 #[cfg(target_os = "macos")]
 pub fn add() -> Result<String, String> {
     let me = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
+        .and_then(skwird_crawl::canonical)
         .map_err(|e| format!("cannot find this program: {e}"))?;
     let dirs = crate::dirs::Dirs::from_env()?;
     crate::dirs::make_private(&dirs.state)?;

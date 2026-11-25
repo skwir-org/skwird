@@ -67,7 +67,7 @@ pub fn add(args: &[String]) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
     as_root("add")?;
     let me = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
+        .and_then(skwird_crawl::canonical)
         .map_err(|e| format!("cannot find this program: {e}"))?;
     let logs = Path::new(LOGS);
     std::fs::create_dir_all(logs).map_err(|e| format!("cannot make its log's folder: {e}"))?;

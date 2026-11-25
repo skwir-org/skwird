@@ -42,6 +42,8 @@ impl Scratch {
         std::fs::create_dir_all(&root).expect("cannot make the scratch folder");
         // The walk opens folders without following links: the scratch
         // folder is named as the system resolves it.
+        // std's: the testkit is the crawl's, and cannot call its canonical.
+        #[allow(clippy::disallowed_methods)]
         let root = std::fs::canonicalize(&root).expect("cannot resolve the scratch folder");
         Scratch {
             root,
@@ -512,7 +514,9 @@ impl Place {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).expect("cannot make a place");
-        Place(std::fs::canonicalize(path).expect("cannot resolve a place"))
+        #[allow(clippy::disallowed_methods)] // the testkit cannot call the crawl's
+        let resolved = std::fs::canonicalize(path).expect("cannot resolve a place");
+        Place(resolved)
     }
 
     pub fn join(&self, rel: &str) -> PathBuf {

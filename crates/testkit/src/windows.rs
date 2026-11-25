@@ -50,6 +50,9 @@ impl Scratch {
         let _ = std::fs::remove_dir_all(verbatim(&root));
         std::fs::create_dir_all(&root).expect("cannot make the scratch folder");
         // Named as the crawl names it: resolved, and plainly.
+        // std's, made plain here: the testkit is the crawl's, and cannot
+        // call its canonical.
+        #[allow(clippy::disallowed_methods)]
         let root = plain(&std::fs::canonicalize(&root).expect("cannot resolve the scratch folder"));
         Scratch { root }
     }

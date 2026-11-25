@@ -120,7 +120,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--probe" => {
                 let dir = it.next().ok_or("--probe takes a folder")?;
                 parsed.probes.push(
-                    std::fs::canonicalize(dir).map_err(|e| format!("cannot reach a probe: {e}"))?,
+                    skwird_crawl::canonical(dir)
+                        .map_err(|e| format!("cannot reach a probe: {e}"))?,
                 );
             }
             "--" => {
@@ -149,7 +150,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     // The walk opens folders without following links: a root given through
     // one is walked where it leads.
     parsed.path =
-        std::fs::canonicalize(&parsed.path).map_err(|e| format!("cannot reach the path: {e}"))?;
+        skwird_crawl::canonical(&parsed.path).map_err(|e| format!("cannot reach the path: {e}"))?;
     Ok(parsed)
 }
 

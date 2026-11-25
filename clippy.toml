@@ -1,0 +1,7 @@
+# What AGENTS.md says never to call, refused by the lints rather than kept
+# by review alone (round 1 of 0.2's review found each again, five and six
+# times). A call that must be made says why, in an `allow` beside it.
+disallowed-methods = [
+  { path = "std::fs::canonicalize", reason = "a path compared is resolved by skwird_crawl::canonical: std's is verbatim on Windows (AGENTS.md, Engineering)" },
+  { path = "std::ffi::OsStr::as_encoded_bytes", reason = "a name's bytes are its own on Unix (OsStrExt) and its WTF-8 on Windows (skwird_crawl::wtf8), which Rust's encoding does not promise (AGENTS.md, Engineering)" },
+]

@@ -118,6 +118,8 @@ pub use exclude::Exclusions;
 /// plainly (`C:\Users`), not in the verbatim form the system gives
 /// (`\\?\C:\Users`), as clients name them.
 pub fn canonical(path: impl AsRef<std::path::Path>) -> std::io::Result<PathBuf> {
+    // The one call of std's, which every other path compared goes through.
+    #[allow(clippy::disallowed_methods)]
     let resolved = std::fs::canonicalize(path)?;
     #[cfg(windows)]
     let resolved = windows::plain(&resolved);
