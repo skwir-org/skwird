@@ -291,7 +291,10 @@ fn walk_into(dir: &OwnedFd, rel: &Path, mount: u64, walk: &mut Walk) {
     }
     for name in names {
         let path = rel.join(OsStr::from_bytes(name.to_bytes()));
+        // An entry that cannot be stat-ed (a folder readable, not
+        // searchable): its folder is not read whole, and says so.
         let Ok(st) = rustix::fs::statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW) else {
+            walk.not_read.insert(rel.to_path_buf());
             continue;
         };
         let kind = match FileType::from_raw_mode(st.st_mode) {

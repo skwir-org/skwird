@@ -234,6 +234,13 @@ fn plain(path: &Path) -> PathBuf {
 /// `path` in its verbatim form, which takes any length: rebuilt from its
 /// components, since a verbatim path takes `\` alone as a separator.
 fn verbatim(path: &Path) -> PathBuf {
+    // `..` would be dropped, not resolved, and the test act elsewhere than
+    // it says.
+    assert!(
+        !path.components().any(|c| matches!(c, Component::ParentDir)),
+        "a test's path names no `..`: {}",
+        path.display()
+    );
     let mut parts = path.components();
     match parts.next() {
         Some(Component::Prefix(p)) => match p.kind() {
@@ -303,7 +310,12 @@ fn walk_into(dir: &Path, rel: &Path, volume: u64, walk: &mut Walk) {
         let path = rel.join(&name);
         let full = dir.join(&name);
         // The listing's own facts: a link's, never its target's.
-        let Ok(meta) = entry.metadata() else { continue };
+        // An entry that cannot be told: its folder is not read whole, and
+        // says so.
+        let Ok(meta) = entry.metadata() else {
+            walk.not_read.insert(rel.to_path_buf());
+            continue;
+        };
         let reparse = std::os::windows::fs::MetadataExt::file_attributes(&meta)
             & FILE_ATTRIBUTE_REPARSE_POINT
             != 0;
@@ -315,6 +327,7 @@ fn walk_into(dir: &Path, rel: &Path, volume: u64, walk: &mut Walk) {
             Kind::File
         };
         let Some((dev, ino)) = identity(&full) else {
+            walk.not_read.insert(rel.to_path_buf());
             continue;
         };
         walk.entries.insert(
