@@ -204,6 +204,7 @@ name = "skwird-client"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rustix",
  "skwird-protocol",
  "windows-sys",
 ]
@@ -215,6 +216,7 @@ dependencies = [
  "libc",
  "rustix",
  "skwird-testkit",
+ "unicode-normalization",
  "windows-sys",
 ]
 

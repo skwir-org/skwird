@@ -837,6 +837,15 @@ components. One that names no folder yet is kept by its resolved path,
 and applies to the folder made there. An empty or relative path is
 refused, never taken to mean everything.
 
+A path is compared as its volume compares names (found on 2026-11-25).
+Windows' and macOS' volumes ignore case, and macOS' the form a name is
+written in: `secret`, named before it exists, applied to no `Secret`
+made later, whose names were then indexed. There, paths are compared
+folded (lowercased, and on macOS composed). On a volume of theirs that
+tells case, a folder differing from an excluded one by case alone is
+excluded too: an exclusion may keep out one folder more, never one
+less.
+
 **The folders an index holds as excluded are always those the
 exclusions name** (found on 2026-11-21). They are derived again from
 the list whenever either side changes, never kept up by the events

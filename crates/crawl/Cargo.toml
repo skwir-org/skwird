@@ -17,6 +17,8 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # getattrlistbulk and getfsstat, which rustix has no binding for.
 libc.workspace = true
+# An exclusion compared as APFS compares names, whatever their form.
+unicode-normalization = "0.1.26"
 
 [target.'cfg(windows)'.dependencies]
 # The walk: folders opened relative to their root, listed in batches

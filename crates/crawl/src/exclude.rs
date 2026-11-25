@@ -13,7 +13,12 @@
 //! - a path that names no folder yet is kept by its resolved path, and
 //!   applies to the folder made there;
 //! - an empty or relative path, or one whose missing part holds `..`, is
-//!   refused, never taken to mean everything.
+//!   refused, never taken to mean everything;
+//! - where volumes ignore case (Windows, macOS) and, on macOS, the form a
+//!   name is written in, so does the path's comparison: a folder made
+//!   later as `Secret` is excluded by `secret`. On a volume that tells
+//!   case, a folder differing from an excluded one by its case alone is
+//!   excluded too: never one less.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -72,6 +77,26 @@ pub enum Refused {
 pub struct Exclusions {
     by_id: HashSet<FileId>,
     by_path: HashSet<PathBuf>,
+    /// Each path folded, where volumes ignore case, and the last names
+    /// folded, so that a folder's whole path is folded only where its own
+    /// name could be one.
+    #[cfg(any(windows, target_os = "macos"))]
+    folded: HashSet<String>,
+    #[cfg(any(windows, target_os = "macos"))]
+    folded_names: HashSet<String>,
+}
+
+/// A path as a volume that ignores case compares it: lowercased, and on
+/// macOS composed, as APFS compares a name whatever form it is written in.
+#[cfg(any(windows, target_os = "macos"))]
+fn fold(path: &std::ffi::OsStr) -> String {
+    let lower = path.to_string_lossy().to_lowercase();
+    #[cfg(target_os = "macos")]
+    let lower = {
+        use unicode_normalization::UnicodeNormalization;
+        lower.nfc().collect()
+    };
+    lower
 }
 
 impl Exclusions {
@@ -89,12 +114,7 @@ impl Exclusions {
         for path in paths {
             let path = path.as_ref();
             match resolve_one(path) {
-                Ok((resolved, id)) => {
-                    exclusions.by_path.insert(resolved);
-                    if let Some(id) = id {
-                        exclusions.by_id.insert(id);
-                    }
-                }
+                Ok((resolved, id)) => exclusions.keep(resolved, id),
                 Err(why) => refused.push((path.to_path_buf(), why)),
             }
         }
@@ -115,17 +135,43 @@ impl Exclusions {
         if !keep(&resolved, id) {
             return Ok(false);
         }
+        self.keep(resolved, id);
+        Ok(true)
+    }
+
+    fn keep(&mut self, resolved: PathBuf, id: Option<FileId>) {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            self.folded.insert(fold(resolved.as_os_str()));
+            if let Some(name) = resolved.file_name() {
+                self.folded_names.insert(fold(name));
+            }
+        }
         self.by_path.insert(resolved);
         if let Some(id) = id {
             self.by_id.insert(id);
         }
-        Ok(true)
     }
 
     /// Whether the folder with this identity, at this resolved path, is
     /// excluded.
     pub fn holds(&self, id: Option<FileId>, path: &Path) -> bool {
-        id.is_some_and(|id| self.by_id.contains(&id)) || self.by_path.contains(path)
+        id.is_some_and(|id| self.by_id.contains(&id))
+            || self.by_path.contains(path)
+            || self.holds_folded(path)
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    fn holds_folded(&self, path: &Path) -> bool {
+        path.file_name()
+            .is_some_and(|name| self.folded_names.contains(&fold(name)))
+            && self.folded.contains(&fold(path.as_os_str()))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[allow(clippy::unused_self)] // the same call as on the systems that fold
+    fn holds_folded(&self, _: &Path) -> bool {
+        false
     }
 
     pub fn is_empty(&self) -> bool {
@@ -177,8 +223,16 @@ fn resolve_one(path: &Path) -> Result<(PathBuf, Option<FileId>), Refused> {
 fn folder_id(path: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok()?;
+    // On macOS, std widens the signed device number with its sign, and
+    // the crawl's identities keep its bits (`macos::dev`): the same here,
+    // or the two never compare equal on a device whose high bit is set.
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::cast_possible_truncation)] // a device number's 32 bits
+    let dev = u64::from(meta.dev() as u32);
+    #[cfg(not(target_os = "macos"))]
+    let dev = meta.dev();
     meta.is_dir().then(|| FileId {
-        dev: meta.dev(),
+        dev,
         ino: meta.ino(),
     })
 }
@@ -191,6 +245,29 @@ fn folder_id(path: &Path) -> Option<FileId> {
 #[cfg(not(any(unix, windows)))]
 fn folder_id(_: &Path) -> Option<FileId> {
     None
+}
+
+/// Where volumes ignore case, a folder made later with another case, or
+/// on macOS in another form, is excluded; on Linux it is another folder.
+#[cfg(test)]
+#[test]
+fn an_exclusion_holds_whatever_the_case_of_the_folder_made_later() {
+    let s = skwird_testkit::Scratch::new("exclude-case");
+    let base = crate::canonical(s.path()).unwrap();
+    let (ex, refused) = Exclusions::resolve([base.join("secret").join("Café")]);
+    assert!(refused.is_empty(), "{refused:?}");
+    // macOS composes too; Windows compares no form.
+    let name = if cfg!(target_os = "macos") {
+        "CAFE\u{301}"
+    } else {
+        "CAF\u{c9}"
+    };
+    let later = base.join("Secret").join(name);
+    assert_eq!(
+        ex.holds(None, &later),
+        cfg!(windows) || cfg!(target_os = "macos")
+    );
+    assert!(!ex.holds(None, &base.join("Secret")));
 }
 
 #[cfg(all(test, unix))]
