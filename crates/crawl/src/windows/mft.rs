@@ -1026,6 +1026,11 @@ pub(crate) fn read_runs(
             at += len as u64;
         }
     }
+    // Runs that end before the table does hold a record in neither list:
+    // the table is refused, its root walked, never built without it.
+    if next < total {
+        return Err(invalid("a file table whose runs end before it does"));
+    }
     Ok(out)
 }
 

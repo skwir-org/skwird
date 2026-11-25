@@ -357,8 +357,10 @@ unsafe extern "system" fn removal_callback(
         removal.state().volume = None;
     } else if action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED {
         // SAFETY: the context is an `Arc`'s, alive until every
-        // registration of it ends, this one among them: one more count of
-        // it taken, for what ends this registration later.
+        // registration of it ends, this one among them (its `RemovalHeard`
+        // or the thread that ends its registrations holds a count). One
+        // more count is taken for this call's own `Arc`, given back as it
+        // is dropped: `refused` may end this registration and keep a clone.
         let removal = unsafe {
             Arc::increment_strong_count(removal);
             Arc::from_raw(removal)

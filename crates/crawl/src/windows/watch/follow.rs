@@ -236,9 +236,10 @@ impl Follower {
     /// What a batch of records says of root `scope` at `root`, `whole`
     /// where every record of it was read: each entry once, in the order
     /// heard; an overflow at the end if a folder could not be told, or a
-    /// record not read. And whether the root's folder is no longer where
-    /// it was, asked where a folder was renamed or removed: its watch then
-    /// ends, its path leading to nothing heard.
+    /// record not read. The root's folder no longer where it was, asked
+    /// where a folder was renamed or removed, is said last, as
+    /// [`Heard::Lost`]: its watch then ends, its path leading to nothing
+    /// heard.
     fn heard(
         &self,
         records: &[journal::Record],

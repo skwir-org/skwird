@@ -291,6 +291,15 @@ fn a_record_split_between_two_runs_keeps_every_number() {
             "chunks of {chunk}"
         );
     }
+    // A table said longer than its runs hold is refused: a record past
+    // their end would be in neither list.
+    let mut buffer = vec![0u8; 1024];
+    let short = super::read_runs(&runs, CLUSTER, RECORD, 6, &mut buffer, &mut |at, bytes| {
+        let at = usize::try_from(at).unwrap();
+        bytes.copy_from_slice(&disk[at..at + bytes.len()]);
+        Ok(())
+    });
+    assert!(short.is_err(), "runs holding fewer records than the table");
 }
 
 /// The records of [`the_table_is_the_tree_its_names_make`], by number.

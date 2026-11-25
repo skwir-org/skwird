@@ -599,10 +599,15 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
     loop {
         // The read before the cookies: a wait gives the first of those
         // set, so a change told before a cookie was asked is read first.
-        let mut waits: Vec<HANDLE> = vec![stop.0, l.root.done.0, asked.event.0];
+        // The cookies last: the wait gives the first event set, and a
+        // change told before a cookie was asked, the root's own rename in
+        // its parent among them, is read before it.
+        let mut waits: Vec<HANDLE> = vec![stop.0, l.root.done.0];
         if let Some(p) = &l.parent {
             waits.push(p.done.0);
         }
+        waits.push(asked.event.0);
+        let cookies = u32::try_from(waits.len() - 1).unwrap_or(2);
         // SAFETY: three or four events of ours, alive for the wait.
         let woken = unsafe {
             WaitForMultipleObjects(
@@ -616,13 +621,13 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
             // What is pending is cancelled as it is dropped.
             return;
         }
-        if woken == WAIT_OBJECT_0 + 2 {
+        if woken == WAIT_OBJECT_0 + cookies {
             // Every change told before this was read: the read pending was
             // given none.
             queue.push(asked.take().into_iter().map(Heard::Cookie));
             continue;
         }
-        if woken == WAIT_OBJECT_0 + 3
+        if woken == WAIT_OBJECT_0 + 2
             && let Some(parent) = &mut l.parent
         {
             // A folder beside the root made, renamed or removed (or more of
@@ -655,9 +660,11 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
             return;
         }
         queue.push(said.into_iter().map(|h| match h {
-            Heard::Entry { scope, rel } => Heard::Entry {
-                scope,
-                rel: long_names(&l.path, rel),
+            Heard::Entry { scope, rel } => match long_names(&l.path, rel) {
+                Some(rel) => Heard::Entry { scope, rel },
+                // A name that could not be looked up: where its change
+                // was is not known.
+                None => Heard::Overflow { scope },
             },
             other => other,
         }));
@@ -674,11 +681,13 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
 /// index knows its entries by their long names alone: a folder heard so
 /// would be found nowhere, a file heard so not read again. A name that
 /// cannot be found (gone since) ends the path there: its folder is read
-/// again, the name gone from it, and what was below it with it.
-fn long_names(root: &Path, rel: PathBuf) -> PathBuf {
+/// again, the name gone from it, and what was below it with it. None
+/// where a name could not be looked up otherwise (the volume not ready,
+/// the system short of resources): the change's place is not known.
+fn long_names(root: &Path, rel: PathBuf) -> Option<PathBuf> {
     // As nearly every path heard is: given on as it is, nothing made.
     if !rel.as_os_str().encode_wide().any(|u| u == u16::from(b'~')) {
-        return rel;
+        return Some(rel);
     }
     let mut out = PathBuf::new();
     for part in rel.components() {
@@ -691,18 +700,19 @@ fn long_names(root: &Path, rel: PathBuf) -> PathBuf {
             out.push(name);
             continue;
         }
-        let Some(long) = long_name(&root.join(&out).join(name)) else {
+        let Some(long) = long_name(&root.join(&out).join(name)).ok()? else {
             out.push(name);
-            return out;
+            return Some(out);
         };
         out.push(long);
     }
-    out
+    Some(out)
 }
 
 /// The long name of the entry at `path`, found by its name, short or
-/// long: none if nothing is there.
-fn long_name(path: &Path) -> Option<OsString> {
+/// long: none if nothing is there, the error if it could not be looked
+/// up.
+fn long_name(path: &Path) -> Result<Option<OsString>, u32> {
     use windows_sys::Win32::Storage::FileSystem::{
         FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, WIN32_FIND_DATAW,
     };
@@ -722,7 +732,14 @@ fn long_name(path: &Path) -> Option<OsString> {
         )
     };
     if find == INVALID_HANDLE_VALUE {
-        return None;
+        // SAFETY: no call between the one that failed and this.
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        let gone = matches!(
+            error,
+            windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
+                | windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND
+        );
+        return if gone { Ok(None) } else { Err(error) };
     }
     // SAFETY: the search made above, closed once.
     unsafe { FindClose(find) };
@@ -731,7 +748,7 @@ fn long_name(path: &Path) -> Option<OsString> {
         .iter()
         .position(|&c| c == 0)
         .unwrap_or(found.cFileName.len());
-    Some(OsString::from_wide(&found.cFileName[..end]))
+    Ok(Some(OsString::from_wide(&found.cFileName[..end])))
 }
 
 /// The changes a buffer of `FILE_NOTIFY_INFORMATION` records says, each
@@ -853,26 +870,26 @@ mod tests {
             return;
         }
         assert_eq!(
-            long_names(&root, rel.clone()),
-            Path::new(r"a long folder name\a long file name.txt"),
+            long_names(&root, rel.clone()).as_deref(),
+            Some(Path::new(r"a long folder name\a long file name.txt")),
             "{rel:?}"
         );
         let folder = rel.parent().unwrap().to_path_buf();
         assert_eq!(
-            long_names(&root, folder.join("gone.txt")),
-            Path::new(r"a long folder name\gone.txt")
+            long_names(&root, folder.join("gone.txt")).as_deref(),
+            Some(Path::new(r"a long folder name\gone.txt"))
         );
         assert_eq!(
-            long_names(&root, PathBuf::from(r"GONE~1\below\it.txt")),
-            Path::new(r"GONE~1")
+            long_names(&root, PathBuf::from(r"GONE~1\below\it.txt")).as_deref(),
+            Some(Path::new(r"GONE~1"))
         );
         assert_eq!(
-            long_names(&root, PathBuf::from("keep~1.txt")),
-            Path::new("keep~1.txt")
+            long_names(&root, PathBuf::from("keep~1.txt")).as_deref(),
+            Some(Path::new("keep~1.txt"))
         );
         assert_eq!(
-            long_names(&root, PathBuf::from(r"no tilde\gone.txt")),
-            Path::new(r"no tilde\gone.txt")
+            long_names(&root, PathBuf::from(r"no tilde\gone.txt")).as_deref(),
+            Some(Path::new(r"no tilde\gone.txt"))
         );
     }
 }
