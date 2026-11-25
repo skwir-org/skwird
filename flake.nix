@@ -51,7 +51,6 @@
         targets = ["x86_64-pc-windows-gnu" "aarch64-apple-darwin"];
       };
 
-
       # The package (`packages.default`, dist/nix/package.nix), made as
       # skwir's is: built from what the build reads of the git tree (the
       # workspace, the units, the licences), so a change to the docs or the
@@ -154,7 +153,8 @@
         XMAC_LLD = "${pkgs.lld}/bin/ld64.lld";
       });
 
-      formatter = pkgs.nixpkgs-fmt;
+      # The files are laid out as alejandra lays them out.
+      formatter = pkgs.alejandra;
 
       # Linux's engine and macOS' (phase 5).
       packages =

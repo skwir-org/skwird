@@ -9,13 +9,11 @@
 {
   lib,
   rustPlatform,
-
   # The flake's (see above).
   src,
   version,
   cargoLock,
 }:
-
 rustPlatform.buildRustPackage {
   pname = "skwird";
   inherit version src cargoLock;
