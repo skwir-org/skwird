@@ -687,13 +687,124 @@ fn locks(at: &Path) -> bool {
     locked
 }
 
+/// The removal of the volume mounted at `at` asked, as the taskbar's
+/// "Safely remove" asks it, of its volume's device
+/// (`CM_Query_And_Remove_SubTreeW`): whether it went, or who vetoed it. A
+/// handle open on the volume vetoes it.
+#[allow(unsafe_code)] // Windows' devices have no safe binding; each block says why it is sound.
+fn ask_removal(at: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW,
+        CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_PropertyW, CM_LOCATE_DEVNODE_NORMAL,
+        CM_Locate_DevNodeW, CM_Query_And_Remove_SubTreeW, CM_REMOVE_UI_NOT_OK, CR_SUCCESS,
+    };
+    use windows_sys::Win32::Devices::Properties::DEVPKEY_Device_InstanceId;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    use windows_sys::Win32::System::Ioctl::GUID_DEVINTERFACE_VOLUME;
+    let text = |w: &[u16]| {
+        let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
+        String::from_utf16_lossy(&w[..end])
+    };
+    let name_of = |point: &[u16]| {
+        let mut name = [0u16; 64];
+        // SAFETY: a NUL-ended path, and a buffer of its length.
+        let ok =
+            unsafe { GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), 64) };
+        (ok != 0).then(|| text(&name))
+    };
+    let mut point: Vec<u16> = at.as_os_str().encode_wide().collect();
+    point.extend("\\0".encode_utf16());
+    let target = name_of(&point).ok_or("no volume mounted there")?;
+    let mut len = 0u32;
+    // SAFETY: the count written; the volumes' interface class; no device.
+    unsafe {
+        CM_Get_Device_Interface_List_SizeW(
+            &raw mut len,
+            &GUID_DEVINTERFACE_VOLUME,
+            std::ptr::null(),
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+        )
+    };
+    let mut list = vec![0u16; len as usize];
+    // SAFETY: a buffer of `len` wide characters, which the call fills.
+    let listed = unsafe {
+        CM_Get_Device_Interface_ListW(
+            &GUID_DEVINTERFACE_VOLUME,
+            std::ptr::null(),
+            list.as_mut_ptr(),
+            len,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+        )
+    };
+    if listed != CR_SUCCESS {
+        return Err(format!(
+            "the volumes' interfaces cannot be listed: {listed}"
+        ));
+    }
+    for interface in list.split(|&c| c == 0).take_while(|i| !i.is_empty()) {
+        let mut path = interface.to_vec();
+        path.extend("\\0".encode_utf16());
+        if name_of(&path).as_deref() != Some(target.as_str()) {
+            continue;
+        }
+        let mut named = interface.to_vec();
+        named.push(0);
+        let mut kind = 0u32;
+        let mut id = [0u16; 512];
+        let mut size = 1024u32;
+        // SAFETY: a NUL-ended interface; the key; a buffer of `size` bytes.
+        let got = unsafe {
+            CM_Get_Device_Interface_PropertyW(
+                named.as_ptr(),
+                &DEVPKEY_Device_InstanceId,
+                &raw mut kind,
+                id.as_mut_ptr().cast(),
+                &raw mut size,
+                0,
+            )
+        };
+        if got != CR_SUCCESS {
+            return Err(format!("the volume's device is not told: {got}"));
+        }
+        let mut device = 0u32;
+        // SAFETY: a NUL-ended instance id, the node written.
+        let found =
+            unsafe { CM_Locate_DevNodeW(&raw mut device, id.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) };
+        if found != CR_SUCCESS {
+            return Err(format!("the volume's device is not found: {found}"));
+        }
+        let mut veto = 0;
+        let mut by = [0u16; 260];
+        // SAFETY: the node found; the veto's kind and name written, of the
+        // name's length.
+        let done = unsafe {
+            CM_Query_And_Remove_SubTreeW(
+                device,
+                &raw mut veto,
+                by.as_mut_ptr(),
+                260,
+                CM_REMOVE_UI_NOT_OK,
+            )
+        };
+        return if done == CR_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("vetoed ({done}), of kind {veto}, by {}", text(&by)))
+        };
+    }
+    Err("no device of the volume".into())
+}
+
 /// A removable volume a client keeps (DESIGN, Protocol, "Removable
 /// volumes"), on Windows: a FAT32 virtual disk attached and mounted at a
 /// folder, seen by its serial with its label, not indexed until kept.
 /// Kept, a root there, its names answered, and a handle of the engine's
 /// open on it (its watch's): it cannot be locked. Released by where it is
 /// mounted, nothing of it is held: it can be. Detached, it is away;
-/// attached again, a root again; forgotten. On a machine of the tests'
+/// attached again, a root again. Its removal asked as the taskbar asks it,
+/// the engine lets go of it, and it goes: away. Forgotten. On a machine of
+/// the tests'
 /// own alone (`skwird_testkit::throwaway`): it makes a disk, as an
 /// administrator.
 #[test]
@@ -783,6 +894,14 @@ fn a_kept_virtual_disk_is_a_root_while_it_is_attached() {
     let _ = attach(&env);
     wait_for(30, "the disk indexed again", || {
         answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
+    });
+    // An eject asked as the taskbar asks it, while the engine watches the
+    // volume: it lets go of it when told, and the removal goes on.
+    assert!(!locks(&at), "not watched again");
+    ask_removal(&at).unwrap();
+    wait_for(15, "the disk away once removed", || {
+        c.volumes(&[], &[], &[])
+            .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
     });
     let v = c.volumes(&[], &[&id], &[]).unwrap();
     assert!(v.kept.is_empty(), "{v:?}");

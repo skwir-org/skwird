@@ -51,6 +51,17 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 skwird-testkit.workspace = true
 
+# The Windows tests' devices: a volume's removal asked as the taskbar asks
+# it (tests/windows.rs).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Devices_DeviceAndDriverInstallation",
+  "Win32_Devices_Properties",
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Ioctl",
+] }
+
 [lints]
 workspace = true
 

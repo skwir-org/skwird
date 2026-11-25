@@ -82,3 +82,66 @@ mod tests {
         .unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::ffi::c_int;
+
+    unsafe extern "C" {
+        fn getiopolicy_np(iotype: c_int, scope: c_int) -> c_int;
+    }
+
+    /// The thread's disk policy is throttled once asked, and another
+    /// thread's is not: each thread that reads asks for itself.
+    #[test]
+    fn a_thread_reads_throttled_once_asked() {
+        // `IOPOL_TYPE_DISK`, `IOPOL_SCOPE_THREAD`, `IOPOL_THROTTLE`.
+        // SAFETY: a call of plain integers, about this thread alone.
+        let policy = || unsafe { getiopolicy_np(0, 1) };
+        std::thread::spawn(move || {
+            assert_ne!(policy(), 3);
+            super::background();
+            assert_eq!(policy(), 3);
+            std::thread::spawn(move || assert_ne!(policy(), 3))
+                .join()
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use windows_sys::Win32::Foundation::{ERROR_THREAD_MODE_ALREADY_BACKGROUND, GetLastError};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+
+    /// The thread is in the background mode once asked: asked again, the
+    /// system says it is already. Another thread is not. Wine's answer is
+    /// not Windows'.
+    #[test]
+    fn a_thread_reads_in_the_background_once_asked() {
+        if skwird_testkit::under_wine() {
+            return;
+        }
+        // Whether this thread is in the background mode already.
+        let already = || {
+            // SAFETY: the calling thread's own pseudo-handle, and a mode.
+            let begun =
+                unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
+            // SAFETY: no argument.
+            begun == 0 && unsafe { GetLastError() } == ERROR_THREAD_MODE_ALREADY_BACKGROUND
+        };
+        std::thread::spawn(move || {
+            super::background();
+            assert!(already(), "not in the background mode");
+            std::thread::spawn(move || assert!(!already(), "inherited"))
+                .join()
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+}
