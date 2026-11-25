@@ -45,7 +45,11 @@ users' exclusions kept. Left: step 8, the measurement, on a Mac, and
 what a Mac alone can test (Full Disk Access given, an event database
 made afresh). skwird 0.1.0 was released on 2026-11-24 (below, "The
 first release"): Linux's four packages, Windows' and macOS' programs,
-and a Homebrew formula built from its source.
+and a Homebrew formula built from its source. 0.2.0 was made on
+2026-11-25, after a review of two rounds (below, "The review before
+0.2"): names in skwir's three forms, removable volumes on request,
+Windows' index mapped, a Home Manager module; its draft is the user's to
+publish.
 
 ## Phase 0: measure (done)
 

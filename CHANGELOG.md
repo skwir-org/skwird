@@ -4,7 +4,7 @@ skwird's releases. Each section is its release's notes on GitHub
 (`tools/release/release.sh`): the first is the release being made, dated
 the day it is released.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-25)
 
 - **Names in both Unicode forms:** a term is matched as typed, composed
   and decomposed (NFC and NFD), as skwir matches it, so that `café`
