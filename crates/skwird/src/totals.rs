@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 
 use skwird_index::block::FolderId;
+use skwird_index::keeper::TooOld;
 use skwird_index::{Index, Sight, totals};
 use skwird_protocol::{self as wire, Answer, WirePath};
 
@@ -26,7 +27,9 @@ use crate::asker::Asker;
 use crate::convert;
 use crate::coverage::coverage_at;
 use crate::engine::{Command, Published, Shared};
-use crate::serve::{BATCH, Reached, Writer, denied, failure, outside, reached, seeing, send};
+use crate::serve::{
+    LINE_ROOM, Reached, Writer, batches, denied, failure, json_len, outside, reached, seeing, send,
+};
 
 /// What the folder at `root` holds, answered to `who`: its children sent
 /// on `writer` as request `id`'s, so many with `largest`, the rest
@@ -58,19 +61,22 @@ pub(crate) fn answer(
     let Some((i, rel)) = shared.locate(&path) else {
         return Answer::TotalsDone(Box::new(done(String::new(), outside())));
     };
-    let Some(token) = token_now(commands, i, &rel) else {
-        return failure("internal", "the engine is going");
+    let unread = || wire::Coverage {
+        names: wire::Proof::NotCovered(wire::Why::Unread),
+        attrs: wire::Proof::NotCovered(wire::Why::Unread),
+        holes: Vec::new(),
+    };
+    let token = match token_now(commands, i, &rel) {
+        Some(Ok(token)) => token,
+        // No token to go on from: the root is being opened (a first crawl,
+        // a kept volume's pause), checked on a thread of its own, or let go
+        // of. Nothing of it is counted yet.
+        Some(Err(TooOld)) => return Answer::TotalsDone(Box::new(done(String::new(), unread()))),
+        None => return failure("internal", "the engine is going"),
     };
     let index = match shared.snapshot(i) {
         Published::Ready(index) => index,
-        Published::Opening => {
-            let unread = wire::Coverage {
-                names: wire::Proof::NotCovered(wire::Why::Unread),
-                attrs: wire::Proof::NotCovered(wire::Why::Unread),
-                holes: Vec::new(),
-            };
-            return Answer::TotalsDone(Box::new(done(token, unread)));
-        }
+        Published::Opening => return Answer::TotalsDone(Box::new(done(token, unread()))),
         Published::Failed(why) => return failure("internal", why),
     };
     let seeing = seeing(shared, i, &index, who);
@@ -110,16 +116,19 @@ pub(crate) fn answer(
         None => (children, None),
     };
     let mut count = 0;
-    for batch in sent.chunks(BATCH) {
+    for (batch, fits) in batches(&sent) {
         if cancelled.load(Ordering::Relaxed) {
             break;
+        }
+        if !fits {
+            return too_long();
         }
         if !send(writer, id, Answer::Children(batch.to_vec())) {
             break;
         }
         count += batch.len() as u64;
     }
-    Answer::TotalsDone(Box::new(wire::TotalsDone {
+    let done = Answer::TotalsDone(Box::new(wire::TotalsDone {
         mtime: found.mtime.map(convert::time),
         totals: totals_of(&found.own),
         nlink: if found.partial {
@@ -130,7 +139,22 @@ pub(crate) fn answer(
         count,
         rest,
         ..done(token, coverage)
-    }))
+    }));
+    if json_len(&done) > LINE_ROOM {
+        return too_long();
+    }
+    done
+}
+
+/// A folder's totals, or a child's, longer than a line a client reads:
+/// `by_extension` names every extension below it, so that it sums to its
+/// files' size, and a folder of mail (each name its own extension) holds
+/// tens of thousands. Said so, not sent as a line the client refuses.
+fn too_long() -> Answer {
+    failure(
+        "internal",
+        "the totals are longer than a line may be: too many extensions below",
+    )
 }
 
 /// The folders the totals passed over added to `coverage`'s holes, by
@@ -189,8 +213,10 @@ fn totals_of(sum: &totals::Sum) -> wire::Totals {
 }
 
 /// Root `i`'s journal token now, at `rel`: a `changes` from nothing, which
-/// the writer answers with no event and the token to go on from.
-fn token_now(commands: &Sender<Command>, i: usize, rel: &Path) -> Option<String> {
+/// the writer answers with no event and the token to go on from, or with
+/// none where it holds no index of the root now. None where the engine is
+/// going.
+fn token_now(commands: &Sender<Command>, i: usize, rel: &Path) -> Option<Result<String, TooOld>> {
     let (reply, answer) = channel();
     commands
         .send(Command::Changes {
@@ -200,6 +226,5 @@ fn token_now(commands: &Sender<Command>, i: usize, rel: &Path) -> Option<String>
             reply,
         })
         .ok()?;
-    let (_, token, _) = answer.recv().ok()?.ok()?;
-    Some(token.text())
+    Some(answer.recv().ok()?.map(|(_, token, _)| token.text()))
 }

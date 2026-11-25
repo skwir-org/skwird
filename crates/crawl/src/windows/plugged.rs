@@ -19,20 +19,22 @@
 //!   volume, registered to be told when its removal is asked (from the
 //!   taskbar's "Safely remove"); the engine lets go of everything held
 //!   there, and the handle is closed before the call returns, so that the
-//!   removal goes on. A volume a handle is open on is in use.
+//!   removal goes on. A volume a handle is open on is in use. An eject
+//!   another program refuses is told too: the volume is held and
+//!   registered again, and the engine takes it back.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_NOTIFY_ACTION, CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL,
     CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL, CM_NOTIFY_ACTION_DEVICEQUERYREMOVE,
-    CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
-    CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, CM_Register_Notification, CM_Unregister_Notification,
-    CR_SUCCESS, HCMNOTIFICATION,
+    CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER,
+    CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+    CM_Register_Notification, CM_Unregister_Notification, CR_SUCCESS, HCMNOTIFICATION,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -305,25 +307,39 @@ impl Drop for VolumesHeard {
     }
 }
 
+/// What a volume's registrations call back with: the volume, and what to
+/// tell.
 struct Removal {
-    volume: Mutex<Option<OwnedHandle>>,
+    path: PathBuf,
+    state: Mutex<Registered>,
     on: Box<dyn Fn() + Send + Sync>,
+    refused: Box<dyn Fn() + Send + Sync>,
+}
+
+/// The volume's handle (closed as its removal is asked), its registration
+/// on it, and whether the registration is being ended.
+struct Registered {
+    volume: Option<OwnedHandle>,
+    notify: HCMNOTIFICATION,
+    ended: bool,
 }
 
 /// A volume's removal heard as it is asked: `on` called, which lets go of
 /// everything held there, then the handle closed, before the call returns
-/// and the removal goes on. Dropped off the thread that asks the removal
-/// (ending a registration waits for its callback).
+/// and the removal goes on. Refused (another program holds the volume), a
+/// handle is opened on it again, registered again so that its next
+/// removal is heard, and `refused` called, which takes it back. Dropped
+/// off the thread that asks the removal (ending a registration waits for
+/// its callback).
 pub struct RemovalHeard {
-    notify: HCMNOTIFICATION,
-    removal: Box<Removal>,
+    removal: Arc<Removal>,
 }
 
-// SAFETY: a registration, ended once as it is dropped; its context is a
-// handle under a lock and a `Sync` closure.
-unsafe impl Send for RemovalHeard {}
+// SAFETY: a registration, ended once; its context a handle and a
+// registration under a lock, and `Sync` closures.
+unsafe impl Send for Removal {}
 // SAFETY: as above.
-unsafe impl Sync for RemovalHeard {}
+unsafe impl Sync for Removal {}
 
 unsafe extern "system" fn removal_callback(
     _: HCMNOTIFICATION,
@@ -332,41 +348,45 @@ unsafe extern "system" fn removal_callback(
     _: *const CM_NOTIFY_EVENT_DATA,
     _: u32,
 ) -> u32 {
+    let removal = context.cast::<Removal>();
     if action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVE {
-        // SAFETY: the context given at registration, alive until it ends.
-        let removal = unsafe { &*context.cast::<Removal>() };
+        // SAFETY: the context given at registration, alive until every
+        // registration of it ends.
+        let removal = unsafe { &*removal };
         (removal.on)();
-        removal
-            .volume
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        removal.state().volume = None;
+    } else if action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED {
+        // SAFETY: the context is an `Arc`'s, alive until every
+        // registration of it ends, this one among them: one more count of
+        // it taken, for what ends this registration later.
+        let removal = unsafe {
+            Arc::increment_strong_count(removal);
+            Arc::from_raw(removal)
+        };
+        Removal::refused(&removal);
     }
     0
 }
 
-impl RemovalHeard {
-    /// The removal of the volume holding `path` heard from now on, on a
-    /// handle of its own.
-    pub fn new(path: &Path, on: Box<dyn Fn() + Send + Sync>) -> std::io::Result<RemovalHeard> {
-        let volume = crate::windows::journal::Volume::handle_of(path)?;
-        let raw = volume.as_raw_handle();
-        let removal = Box::new(Removal {
-            volume: Mutex::new(Some(volume)),
-            on,
-        });
+impl Removal {
+    fn state(&self) -> std::sync::MutexGuard<'_, Registered> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Register `removal` on the volume handle `handle`.
+    fn register(removal: &Arc<Removal>, handle: &OwnedHandle) -> std::io::Result<HCMNOTIFICATION> {
         // SAFETY: an all-zero filter is a valid one, before its fields.
         let mut filter: CM_NOTIFY_FILTER = unsafe { std::mem::zeroed() };
         filter.cbSize = u32::try_from(std::mem::size_of::<CM_NOTIFY_FILTER>()).unwrap_or(0);
         filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE;
-        filter.u.DeviceHandle.hTarget = raw;
+        filter.u.DeviceHandle.hTarget = handle.as_raw_handle();
         let mut notify: HCMNOTIFICATION = std::ptr::null_mut();
         // SAFETY: the filter, naming a handle of ours, read for the call;
-        // the context, boxed, alive as long as the registration.
+        // the context, an `Arc`'s, alive as long as any registration of it.
         let done = unsafe {
             CM_Register_Notification(
                 &raw const filter,
-                (&raw const *removal).cast(),
+                Arc::as_ptr(removal).cast(),
                 Some(removal_callback),
                 &raw mut notify,
             )
@@ -376,19 +396,77 @@ impl RemovalHeard {
                 "the volume's removal cannot be heard: {done}"
             )));
         }
-        Ok(RemovalHeard { notify, removal })
+        Ok(notify)
+    }
+
+    /// The removal refused: the volume held again, registered again on the
+    /// new handle (a registration's handle closed tells nothing more), the
+    /// old registration ended off this callback, which it waits for; then
+    /// told. Not once the registrations are being ended.
+    fn refused(removal: &Arc<Removal>) {
+        {
+            let mut state = removal.state();
+            if state.ended {
+                return;
+            }
+            let again = crate::windows::journal::Volume::handle_of(&removal.path)
+                .and_then(|volume| Removal::register(removal, &volume).map(|n| (volume, n)));
+            if let Ok((volume, notify)) = again {
+                let old = std::mem::replace(&mut state.notify, notify) as usize;
+                state.volume = Some(volume);
+                let keep = Arc::clone(removal);
+                std::thread::spawn(move || {
+                    // SAFETY: the registration replaced, ended once, off its
+                    // own callback; its context kept alive until it is.
+                    unsafe { CM_Unregister_Notification(old as HCMNOTIFICATION) };
+                    drop(keep);
+                });
+            }
+        }
+        (removal.refused)();
+    }
+}
+
+impl RemovalHeard {
+    /// The removal of the volume holding `path` heard from now on, on a
+    /// handle of its own: `on` called as it is asked, `refused` if it is
+    /// refused.
+    pub fn new(
+        path: &Path,
+        on: Box<dyn Fn() + Send + Sync>,
+        refused: Box<dyn Fn() + Send + Sync>,
+    ) -> std::io::Result<RemovalHeard> {
+        let volume = crate::windows::journal::Volume::handle_of(path)?;
+        let removal = Arc::new(Removal {
+            path: path.to_path_buf(),
+            state: Mutex::new(Registered {
+                volume: None,
+                notify: std::ptr::null_mut(),
+                ended: false,
+            }),
+            on,
+            refused,
+        });
+        // Under its lock: a callback waits for it to be whole.
+        let mut state = removal.state();
+        state.notify = Removal::register(&removal, &volume)?;
+        state.volume = Some(volume);
+        drop(state);
+        Ok(RemovalHeard { removal })
     }
 }
 
 impl Drop for RemovalHeard {
     fn drop(&mut self) {
-        // SAFETY: the registration made, ended once, never from its own
-        // callback; its handle closed after, with `removal`.
-        unsafe { CM_Unregister_Notification(self.notify) };
-        self.removal
-            .volume
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let notify = {
+            let mut state = self.removal.state();
+            state.ended = true;
+            state.notify
+        };
+        // SAFETY: the registration now, ended once, never from its own
+        // callback, which none replaces once ended; its handle closed
+        // after.
+        unsafe { CM_Unregister_Notification(notify) };
+        self.removal.state().volume = None;
     }
 }

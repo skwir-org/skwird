@@ -2070,22 +2070,38 @@ ADR-053, 074, 075):
       every root: a client that knows no `volumes` reads every coverage
       as before.
     - **Removable** where its disk says so (`removable` in sysfs), or sits
-      on a USB or an SD card's bus (an MMC host): USB hard drives and SSDs
-      say they are not removable. A device mapper's (an encrypted volume)
-      is its underlying devices', removable where one is; a loop device's
-      never is (snaps' packages are mounted from them). A block device's
-      filesystem alone, mounted at its root: a bind of a folder of it is
-      not the volume, and one mounted twice is seen once. Its device is
-      named by its mount's numbers, or, where they are anonymous (major
-      0), as btrfs's and bcachefs's always are, by its source, a path
-      under `/dev`: found on the user's machine (2026-11-25), where two
+      on a USB bus, or is an SD card (an MMC host's card whose `type` is
+      `SD`): USB hard drives and SSDs say they are not removable, and an
+      eMMC soldered in the machine is an MMC host's too. A device mapper's
+      (an encrypted volume) is its underlying devices', removable where one
+      is; a loop device's never is (snaps' packages are mounted from
+      them). Never the running system's: `/`, `/home`, `/boot`, `/usr` and
+      the like, whatever their disk (a system booted from a USB disk). The
+      system service leaves out what a user's engine would see, by the
+      same function (`skwird_crawl::removable::is_removable`): its own copy
+      missed encrypted volumes and SD cards, and indexed them.
+    - **A block device's filesystem alone,** as mounted at its root: a
+      bind of a folder of it is not the volume, one mounted twice is seen
+      once, and one a later mount at the same point hides is not seen. A
+      btrfs mounted through a subvolume alone is its volume, as mounted.
+      Its device is named by its mount's numbers, or, where they are
+      anonymous (major 0), as a btrfs's always are, every mount of one
+      btrfs sharing them, by its source: a block device's node under
+      `/dev`, stat'ed, its numbers naming it in sysfs, never its text
+      alone, and trusted for btrfs alone (a tmpfs's, an overlay's or a
+      FUSE program's source is free text). Found in use (2026-11-25): two
       USB drives, LUKS with btrfs inside, were seen as none. The root
       tests' machine has a btrfs USB stick since, beside the FAT one.
     - **The identity** is udev's name in `/dev/disk/by-uuid`, as blkid
-      spells it; the label, udev's in `/dev/disk/by-label`, unescaped.
+      spells it; the label, udev's in `/dev/disk/by-label`, unescaped. A
+      btrfs's are its filesystem's own, in `/sys/fs/btrfs/<uuid>`, which
+      each of its devices is listed in: udev's link of a btrfs of several
+      devices names one of them alone.
     - **Kept** in the state folder (`volumes`), each client's, as its
       exclusions are. Its index is in the cache, named by its identity's
-      hash (`volume-…`).
+      hash (`volume-…`). Forgotten, its index is removed once no read of
+      it runs (a crawl's end saves it); and, derived from what is kept, at
+      each start the index of every volume no client keeps is.
     - **Read 3 s after it is seen mounted,** and every thread its crawl
       reads on in the idle I/O class (`skwird_crawl::pace`, the crawl's
       `background`), which a check of it keeps.
@@ -2100,9 +2116,19 @@ ADR-053, 074, 075):
     - **Released by its mount point too** (`release_at`, asked by skwir's
       session the same day): a client that ejects any volume knows where
       it is mounted, never its identity. Every kept volume mounted at or
-      below each point is released. Nothing else needs it: the engine
-      reads nothing past a mount below its roots (a hole, `mount`), so a
-      volume mounted there, kept or not, holds nothing of the engine's.
+      below each point is released, each point resolved as a path compared
+      is (`skwird_crawl::canonical`); a twin's mount point releases
+      nothing, as it is read by none, and the root of its identity, mounted
+      elsewhere, stays one. Nothing else needs it: the engine reads nothing
+      past a mount below its roots (a hole, `mount`), so a volume mounted
+      there, kept or not, holds nothing of the engine's.
+    - **Checked on a thread of its own,** as it is opened: with its own
+      cancel, and counted as a read, so that a release cancels the check
+      and waits for it, never for the writer's turn, which answers
+      meanwhile; a sync of it waits for the check. What the thread of an
+      opening or a check gives back is taken by that opening alone
+      (`Opening::generation`): a volume let go of, and another mounted at
+      its mount point since, are the same root.
     - **Proven in the root tests' machine** on a USB stick QEMU emulates,
       plugged in through its monitor: seen by its FAT serial and label,
       kept and answered, released and unmounted with nothing held on it,

@@ -290,6 +290,12 @@ pub enum Command {
         root: usize,
         reply: Sender<()>,
     },
+    /// The eject of the kept volume `id` was refused, another program
+    /// holding it (Windows): its release ended, it is a root again.
+    #[cfg(windows)]
+    EjectRefused {
+        id: String,
+    },
     /// What the watcher of this generation heard ([`crate::live::listen`]).
     Heard {
         generation: u64,
@@ -300,12 +306,14 @@ pub enum Command {
         generation: u64,
         heard: Vec<fanotify::Heard>,
     },
-    /// Root `root` opened on a thread of its own ([`Writing::open_later`]):
-    /// its keeper, none if it could not be, whether it was built, and
-    /// whether it was proven current there (by its crawl, or by the check
-    /// of an index read back).
+    /// Root `root` opened on a thread of its own ([`Writing::open_later`]),
+    /// or a kept volume's checked ([`Writing::check_later`]), the
+    /// `generation`th opening the writer began: its keeper, none if it
+    /// could not be, whether it was built, and whether it was proven
+    /// current there (by its crawl, or by the check of an index read back).
     Opened {
         root: usize,
+        generation: u64,
         keeper: Option<Box<Keeper>>,
         built: bool,
         current: bool,
@@ -591,6 +599,13 @@ fn log_reconciled(root: usize, r: Reconciled) {
     }
 }
 
+/// The syncs `replies` answered.
+fn answered(replies: Vec<Sender<()>>) {
+    for reply in replies {
+        let _ = reply.send(());
+    }
+}
+
 /// `wait` passed, or `cancel` asked sooner.
 fn pause(wait: std::time::Duration, cancel: &Cancel) {
     let until = Instant::now() + wait;
@@ -599,10 +614,21 @@ fn pause(wait: std::time::Duration, cancel: &Cancel) {
     }
 }
 
-/// Where a root's index is kept: a folder named by its path's hash.
+/// Where a root's index is kept: a folder named by its path's hash, of
+/// its bytes as the system names it (on Windows, its WTF-8: std's own
+/// encoding is not promised, and a change of it would rename every
+/// index).
 pub fn index_dir(dirs: &Dirs, root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let bytes = {
+        let mut bytes = Vec::new();
+        skwird_crawl::wtf8::push(root, &mut bytes);
+        bytes
+    };
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(root.as_os_str()).to_vec();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in root.as_os_str().as_encoded_bytes() {
+    for b in bytes {
         hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
     }
     dirs.cache.join(format!("index-{hash:016x}"))
@@ -687,9 +713,9 @@ pub fn writer(
     group: Option<Arc<Group>>,
 ) {
     let opts = Options {
-        // Each folder watched as it is read on Linux; on Windows, each root
-        // is heard whole, and no folder is watched alone.
-        watcher: watcher.clone().filter(|_| cfg!(target_os = "linux")),
+        // Each folder watched as it is read, where roots are not heard
+        // whole (Linux); where they are, no folder is watched alone.
+        watcher: watcher.clone().filter(|_| !HEARD_WHOLE),
         threads: config.threads,
         // The system service answers each asker by each folder's ACL too.
         acls: config.system,
@@ -770,7 +796,6 @@ pub fn writer(
             registered(&config.dirs, crate::volumes::FILE)
         }),
         volume_roots: HashMap::new(),
-        let_go: Vec::new(),
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
         done: Done {
@@ -783,6 +808,7 @@ pub fn writer(
         parked: Vec::new(),
         stopping: false,
         registered: 0,
+        openings: 0,
         shared_arc: Arc::clone(shared),
         sender,
     };
@@ -791,6 +817,7 @@ pub fn writer(
     for (i, path) in config.roots.iter().enumerate() {
         w.open_later(i, path.clone(), since, ex.clone());
     }
+    w.forgotten_removed();
     w.volumes_followed();
     w.apply_scopes();
     turns(&mut w, commands);
@@ -912,6 +939,15 @@ fn from_table(
         start.elapsed(),
         table.len()
     ));
+    // A record it could not read is in no folder it lists, and the journal
+    // will not say it again (rule 1).
+    if !table.unread.is_empty() {
+        log(&format!(
+            "root {i}: {} records of its volume's file table cannot be read, so its folders are walked",
+            table.unread.len()
+        ));
+        return crawl_and_build(root, opts, cancel, limits);
+    }
     let reader = skwird_crawl::mft::TableReader { table: &table };
     crawl_and_build_by(root, opts, cancel, limits, &|root, rel, id, opts| {
         reader.read(root, rel, id, opts)
@@ -961,9 +997,6 @@ struct Writing<'a> {
     volumes: crate::volumes::State,
     /// The kept volumes that are roots, by identity.
     volume_roots: HashMap<String, VolumeRoot>,
-    /// The reads of the kept volumes let go of since a `volumes` was
-    /// asked, to end before it is answered.
-    let_go: Vec<Arc<crate::volumes::Reading>>,
     /// Syncs whose cookie was heard, to be served once what was heard is
     /// found ([`Writing::serve_heard`]): a client's ask, not charged.
     served: Vec<Waiting>,
@@ -990,6 +1023,9 @@ struct Writing<'a> {
     /// How often clients' registrations changed: a root opened meanwhile
     /// is held to them again.
     registered: u64,
+    /// How many openings and checks of roots on threads of their own were
+    /// begun: each's [`Opening::generation`].
+    openings: u64,
     /// For the threads that open roots: the shared state, and where they
     /// send what they opened.
     shared_arc: Arc<Shared>,
@@ -1021,6 +1057,11 @@ struct Journals {
     /// asked (`crate::service::hold_volume`).
     #[cfg(windows)]
     held: HashMap<usize, crate::service::Held>,
+    /// The registrations of the kept volumes whose eject was asked, by
+    /// identity, kept while their release lasts (a user's engine): one
+    /// refused is told there.
+    #[cfg(windows)]
+    ejecting: HashMap<String, skwird_crawl::RemovalHeard>,
 }
 
 /// A position in a root's history: its journal's on Windows, its
@@ -1092,6 +1133,20 @@ struct Opening {
     overflowed: bool,
     /// The writer's count of registrations changed when it began.
     registered: u64,
+    /// Which opening of the writer's it is: a root let go of and found
+    /// again is the same root, and the late `Opened` of what was let go of
+    /// is not this one's.
+    generation: u64,
+    /// A kept volume's check, not its opening ([`Writing::check_later`]),
+    /// begun at `since`.
+    check: Option<Check>,
+}
+
+/// A kept volume's check on a thread of its own: since when its tree was
+/// watched again first, if it was, and the syncs it serves.
+struct Check {
+    rewatched: Option<Time>,
+    replies: Vec<Sender<()>>,
 }
 
 /// An event held while roots are opening, with its source's generation.
@@ -1112,10 +1167,11 @@ impl Writing<'_> {
             Command::Stop => return false,
             Command::Opened {
                 root,
+                generation,
                 keeper,
                 built,
                 current,
-            } => self.opened(root, keeper, built, current),
+            } => self.opened(root, generation, keeper, built, current),
             // A root being opened is synced once it is.
             Command::Sync { root, rel, reply } if self.opening.contains_key(&root) => {
                 self.parked.push(Command::Sync { root, rel, reply });
@@ -1139,8 +1195,15 @@ impl Writing<'_> {
                     }
                 }
                 // A line added to a user's file holds from the next sync,
-                // served by the barrier or by the check (DESIGN 5).
-                self.hold_to_exclusions();
+                // served by the barrier or by the check (DESIGN 5). A line
+                // taken out, by the check of each root it gives folders back
+                // to, as a registration taken back is: no barrier proves
+                // what no one read, and what is heard there is not taken.
+                let (readmitting, _) = self.hold_to_exclusions();
+                live &= !readmitting.contains(&root);
+                for i in readmitting.into_iter().filter(|&i| i != root) {
+                    self.check_root(i);
+                }
                 // Live, a barrier serves: a cookie heard in its turn says
                 // every change before it was heard (DESIGN 2). Otherwise,
                 // the check.
@@ -1228,6 +1291,8 @@ impl Writing<'_> {
             Command::Mounts => self.mounts_changed(),
             #[cfg(windows)]
             Command::LetGo { root, reply } => self.let_go_of_volume(root, &reply),
+            #[cfg(windows)]
+            Command::EjectRefused { id } => self.eject_refused(&id),
         }
         true
     }
@@ -1864,71 +1929,78 @@ impl Writing<'_> {
         }
     }
 
-    /// Root `i` checked. On Windows, where its watch ended, its tree is
-    /// watched again first, and heard whole once the check proves it
-    /// current: a root on a drive taken away and given back, or whose
-    /// watch failed, is live again, not checked until the engine starts
-    /// again. A watch whose check fails is let go of, to be tried again.
-    /// A root heard whole and not live yet (its replay cut short, its
-    /// check at opening failed) is live from the check's start; and what
-    /// its journal says from then on proves again (DESIGN 2).
+    /// Root `i` checked ([`Writing::check_root_for`]).
     fn check_root(&mut self, i: usize) {
+        self.check_root_for(i, Vec::new());
+    }
+
+    /// Root `i` checked, and the syncs `replies` answered once it is. On
+    /// Windows and macOS, where its watch ended, its tree is watched again
+    /// first ([`Writing::checked`]). A kept volume's is checked on a thread
+    /// of its own ([`Writing::check_later`]), the syncs answered once it
+    /// comes back: a stat of it can block on its disk, and a release cancels
+    /// it.
+    fn check_root_for(&mut self, i: usize, replies: Vec<Sender<()>>) {
         #[cfg(any(windows, target_os = "macos"))]
-        let since = self.rewatch(i);
-        #[cfg(any(windows, target_os = "macos"))]
-        let checked_from = Time::now();
-        let Some(keeper) = self.keepers[i].as_mut() else {
+        let rewatched = self.rewatch(i);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let rewatched: Option<Time> = None;
+        let from = Time::now();
+        if self.volume_roots.values().any(|v| v.root == i) {
+            self.check_later(i, rewatched, from, replies);
             return;
-        };
-        let current = refresh(keeper, i, self.config.system, self.shared, &self.cancel);
-        #[cfg(windows)]
-        if let Some(since) = since {
-            if current {
-                keeper.heard_whole(since);
-                self.journals.unproven.remove(&i);
-                self.publish(i);
-                log(&format!("root {i}: watched again, live"));
-            } else {
-                if let Some(w) = &self.watcher {
-                    w.unwatch_root(i);
-                }
-                self.marked[i] = None;
-            }
-        } else if current {
-            self.journals.unproven.remove(&i);
-            let heard = self.marked.get(i).copied().flatten().is_some();
-            if heard && keeper.live().is_empty() && !self.journals.replaying.contains_key(&i) {
-                keeper.heard_whole(checked_from);
-                self.publish(i);
-                log(&format!("root {i}: checked, live"));
-            }
         }
-        // As on Windows: watched again where its watch ended, and live once
-        // a check proves it current; what its history says proves again.
-        #[cfg(target_os = "macos")]
-        if let Some(since) = since {
-            if current {
-                keeper.heard_whole(since);
-                self.journals.unproven.remove(&i);
-                self.publish(i);
-                log(&format!("root {i}: watched again, live"));
-            } else {
-                if let Some(w) = &self.watcher {
-                    w.unwatch_root(i);
+        if let Some(keeper) = self.keepers[i].as_mut() {
+            let current = refresh(keeper, i, self.config.system, self.shared, &self.cancel);
+            self.checked(i, rewatched, from, current);
+        }
+        answered(replies);
+    }
+
+    /// What a check of root `i`, begun at `from`, proved: `current` or not.
+    /// On Windows and macOS, its tree watched again from `rewatched`, where
+    /// its watch had ended, is heard whole once the check proves it current:
+    /// a root on a drive taken away and given back, or whose watch failed,
+    /// is live again, not checked until the engine starts again; a watch
+    /// whose check fails is let go of, to be tried again. A root heard whole
+    /// and not live yet (its replay cut short, its check at opening failed)
+    /// is live from `from`; and what its history says from then on proves
+    /// again (DESIGN 2). On Linux, nothing more: a user's engine's roots are
+    /// live by their scopes.
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        allow(clippy::unused_self) // Linux's has nothing more to do.
+    )]
+    fn checked(&mut self, i: usize, rewatched: Option<Time>, from: Time, current: bool) {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let Some(keeper) = self.keepers[i].as_mut() else {
+                return;
+            };
+            if let Some(since) = rewatched {
+                if current {
+                    keeper.heard_whole(since);
+                    self.journals.unproven.remove(&i);
+                    self.publish(i);
+                    log(&format!("root {i}: watched again, live"));
+                } else {
+                    if let Some(w) = &self.watcher {
+                        w.unwatch_root(i);
+                    }
+                    self.marked[i] = None;
                 }
-                self.marked[i] = None;
-            }
-        } else if current {
-            self.journals.unproven.remove(&i);
-            let heard = self.marked.get(i).copied().flatten().is_some();
-            if heard && keeper.live().is_empty() && !self.journals.replaying.contains_key(&i) {
-                keeper.heard_whole(checked_from);
-                self.publish(i);
-                log(&format!("root {i}: checked, live"));
+            } else if current {
+                self.journals.unproven.remove(&i);
+                let heard = self.marked.get(i).copied().flatten().is_some();
+                if heard && keeper.live().is_empty() && !self.journals.replaying.contains_key(&i) {
+                    keeper.heard_whole(from);
+                    self.publish(i);
+                    log(&format!("root {i}: checked, live"));
+                }
             }
         }
         #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = current;
+        let _ = (i, rewatched, from, current);
     }
 
     /// Root `scope`'s replay from its position kept is done (Windows, macOS):
@@ -2006,6 +2078,11 @@ impl Writing<'_> {
             self.volumes
                 .released
                 .insert(id.clone(), Instant::now() + crate::volumes::RELEASED_FOR);
+            // Its registration kept while it is released: an eject refused
+            // is told there, and takes it back at once.
+            if let Some(held) = self.volume_roots.get_mut(&id).and_then(|v| v.held.take()) {
+                self.journals.ejecting.insert(id.clone(), held);
+            }
             self.let_go_of_kept(&id);
             let reply = reply.clone();
             std::thread::spawn(move || {
@@ -2018,12 +2095,27 @@ impl Writing<'_> {
         let _ = reply.send(());
     }
 
+    /// The eject of the kept volume `id` refused (Windows): its release
+    /// ended, and it is followed again, a root at once.
+    #[cfg(windows)]
+    fn eject_refused(&mut self, id: &str) {
+        if let Some(held) = self.journals.ejecting.remove(id) {
+            std::thread::spawn(move || drop(held));
+        }
+        if self.volumes.released.remove(id).is_some() {
+            log("a kept volume's eject was refused: it is followed again");
+            self.volumes_followed();
+        }
+    }
+
     /// A kept volume's removal heard as it is asked (Windows): the writer
     /// asked to let go of root `i` (`Command::LetGo`), and waited for, 10 s
-    /// at most, before the removal goes on.
+    /// at most, before the removal goes on; the kept volume `id` taken
+    /// back if it is refused.
     #[cfg(windows)]
-    fn removal_heard(&self, i: usize, at: &Path) -> Option<skwird_crawl::RemovalHeard> {
+    fn removal_heard(&self, i: usize, id: &str, at: &Path) -> Option<skwird_crawl::RemovalHeard> {
         let sender = self.sender.clone();
+        let refused = (self.sender.clone(), id.to_owned());
         let heard = skwird_crawl::RemovalHeard::new(
             at,
             Box::new(move || {
@@ -2031,6 +2123,10 @@ impl Writing<'_> {
                 if sender.send(Command::LetGo { root: i, reply }).is_ok() {
                     let _ = answer.recv_timeout(std::time::Duration::from_secs(10));
                 }
+            }),
+            Box::new(move || {
+                let (sender, id) = &refused;
+                let _ = sender.send(Command::EjectRefused { id: id.clone() });
             }),
         );
         match heard {
@@ -2074,12 +2170,37 @@ impl Writing<'_> {
             return;
         }
         let now = Instant::now();
-        self.volumes.seen = skwird_crawl::removable::mounted().unwrap_or_default();
+        // One listing that fails says nothing of what is mounted: what was
+        // seen last stands, or every kept volume would be let go of.
+        match skwird_crawl::removable::mounted() {
+            Ok(seen) => self.volumes.seen = seen,
+            Err(e) => log(&format!(
+                "the volumes mounted cannot be listed, so as last seen: {e}"
+            )),
+        }
         // A release ends as its volume is seen unmounted.
         let seen = &self.volumes.seen;
         self.volumes.released.retain(|id, until| {
             *until > now && seen.iter().any(|s| s.id.as_deref() == Some(id.as_str()))
         });
+        // An eject's registration ends with its release, off the writer's
+        // turn.
+        #[cfg(windows)]
+        {
+            let released = &self.volumes.released;
+            let ended: Vec<String> = self
+                .journals
+                .ejecting
+                .keys()
+                .filter(|id| !released.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in ended {
+                if let Some(held) = self.journals.ejecting.remove(&id) {
+                    std::thread::spawn(move || drop(held));
+                }
+            }
+        }
         let rooted: HashMap<String, PathBuf> = self
             .volume_roots
             .iter()
@@ -2118,6 +2239,8 @@ impl Writing<'_> {
                     self.keepers.push(None);
                     self.marked.push(None);
                 }
+                #[cfg(windows)]
+                let held = self.removal_heard(i, &id, &at);
                 self.volume_roots.insert(
                     id,
                     VolumeRoot {
@@ -2126,7 +2249,7 @@ impl Writing<'_> {
                         cancel: Cancel::default(),
                         reading: Arc::default(),
                         #[cfg(windows)]
-                        held: self.removal_heard(i, &at),
+                        held,
                     },
                 );
                 log(&format!(
@@ -2156,7 +2279,13 @@ impl Writing<'_> {
         };
         let i = v.root;
         v.cancel.cancel();
-        self.let_go.push(Arc::clone(&v.reading));
+        // Those whose reads ended are waited for by none.
+        self.volumes
+            .let_go
+            .retain(|(_, r)| !r.ended_within(std::time::Duration::ZERO));
+        self.volumes
+            .let_go
+            .push((id.to_owned(), Arc::clone(&v.reading)));
         #[cfg(windows)]
         if let Some(held) = v.held {
             std::thread::spawn(move || drop(held));
@@ -2171,13 +2300,52 @@ impl Writing<'_> {
         self.keepers[i] = None;
         self.marked[i] = None;
         self.shared.drop_root(i);
-        // Being opened, it is let go of as it comes back; its syncs are
-        // answered now, as of a root that is none.
-        self.opening.remove(&i);
-        self.unpark(i);
+        // Being opened or checked, it is let go of as it comes back; its
+        // syncs are answered now, as of a root that is none.
+        self.opening_given_up(i);
         #[cfg(target_os = "linux")]
         self.apply_scopes();
         log(&format!("root {i}: a kept volume, a root no more"));
+    }
+
+    /// Root `i`'s opening or check given up, the root let go of: what its
+    /// thread gives back is not taken ([`Writing::opened`]), and its syncs
+    /// are answered now, as of a root that is none.
+    fn opening_given_up(&mut self, i: usize) {
+        if let Some(Opening {
+            check: Some(check), ..
+        }) = self.opening.remove(&i)
+        {
+            answered(check.replies);
+        }
+        self.unpark(i);
+    }
+
+    /// The indexes of volumes no client keeps removed, each once no read of
+    /// it runs: a read of one forgotten may save it after it is forgotten.
+    /// Derived from what clients keep, at each start too, so that one whose
+    /// removal a stop or a kill cut short, or forgotten while no engine ran,
+    /// is removed at the next (AGENTS.md, "What follows from a list is
+    /// derived from it again").
+    fn forgotten_removed(&mut self) {
+        let dirs = &self.config.dirs;
+        let index = |id: &str| crate::volumes::index_dir(dirs, id);
+        self.volumes
+            .forgetting
+            .retain(|(_, reading)| !reading.ended_within(std::time::Duration::ZERO));
+        let kept: Vec<PathBuf> = (self.volumes.kept.iter().map(|k| index(&k.id)))
+            .chain(self.volume_roots.keys().map(|id| index(id)))
+            .chain(self.volumes.forgetting.iter().map(|(id, _)| index(id)))
+            .collect();
+        let Ok(entries) = std::fs::read_dir(&dirs.cache) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if e.file_name().to_string_lossy().starts_with("volume-") && !kept.contains(&path) {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
     }
 
     /// What reads every kept volume cancelled: the engine is stopping.
@@ -2206,20 +2374,30 @@ impl Writing<'_> {
         if crate::volumes::changed(&mut self.volumes.kept, client, keep, forget) {
             save_registered(&self.config.dirs, crate::volumes::FILE, &self.volumes.kept);
         }
-        for id in forget {
-            if !crate::volumes::is_kept(&self.volumes.kept, id) {
-                self.let_go_of_kept(id);
-                let _ = std::fs::remove_dir_all(crate::volumes::index_dir(&self.config.dirs, id));
-            }
+        // Its index is removed once no read of it runs: one may save it.
+        let forgotten: Vec<&String> = forget
+            .iter()
+            .filter(|id| !crate::volumes::is_kept(&self.volumes.kept, id))
+            .collect();
+        for id in &forgotten {
+            self.let_go_of_kept(id);
         }
         let until = Instant::now() + crate::volumes::RELEASED_FOR;
+        // `release_at` is resolved as the serving thread had it
+        // (`skwird_crawl::canonical`), mount points as the system says them.
         let below = |at: &Path| release_at.iter().any(|p| at.starts_with(p));
+        // A twin is read by none: releasing its mount point lets nothing go
+        // of, and the root of its identity, mounted elsewhere, stays one.
+        let twin = |id: &str, at: &Path| {
+            let plan = &self.volumes.plan;
+            plan.twins.iter().any(|(t, p)| t == id && p == at)
+        };
         let at_points: Vec<String> = self
             .volumes
             .seen
             .iter()
             .filter(|s| below(&s.point))
-            .filter_map(|s| s.id.clone())
+            .filter_map(|s| s.id.clone().filter(|id| !twin(id, &s.point)))
             .chain(
                 self.volume_roots
                     .iter()
@@ -2233,6 +2411,23 @@ impl Writing<'_> {
             }
         }
         self.volumes_followed();
+        // The reads this answer waits for: of what it released or forgot.
+        // What was let go of otherwise (unmounted, removed) is none of its.
+        let ours = |id: &str| {
+            let mut asked = release.iter().chain(&at_points).chain(forget);
+            asked.any(|a| a == id)
+        };
+        let reading: Vec<(String, Arc<crate::volumes::Reading>)> =
+            std::mem::take(&mut self.volumes.let_go)
+                .into_iter()
+                .filter(|(id, _)| ours(id))
+                .collect();
+        for (id, r) in &reading {
+            if forgotten.contains(&id) {
+                self.volumes.forgetting.push((id.clone(), Arc::clone(r)));
+            }
+        }
+        self.forgotten_removed();
         Ok(Released {
             volumes: crate::volumes::answer(
                 &self.volumes.kept,
@@ -2242,7 +2437,7 @@ impl Writing<'_> {
                 &self.volumes.released,
                 Instant::now(),
             ),
-            reading: std::mem::take(&mut self.let_go),
+            reading: reading.into_iter().map(|(_, r)| r).collect(),
         })
     }
 
@@ -2633,15 +2828,24 @@ impl Writing<'_> {
     }
 
     /// A sync served by the check: what was heard applied first, then
-    /// every folder of the root compared.
+    /// every folder of the root compared. A root being opened or checked
+    /// meanwhile (a barrier given up late) is synced once it is, as a sync
+    /// asked of it then.
     fn check_now(&mut self, root: usize, replies: Vec<Sender<()>>) {
+        if self.opening.contains_key(&root) {
+            for reply in replies {
+                self.parked.push(Command::Sync {
+                    root,
+                    rel: PathBuf::new(),
+                    reply,
+                });
+            }
+            return;
+        }
         let heard = self.gather.take(root);
         self.apply_heard(root, &heard);
-        self.check_root(root);
+        self.check_root_for(root, replies);
         self.gather.checked(Instant::now());
-        for reply in replies {
-            let _ = reply.send(());
-        }
     }
 }
 
@@ -2817,12 +3021,16 @@ impl Writing<'_> {
             Some((dir, cancel, read)) => (dir, Some(cancel), Some(read)),
             None => (index_dir(&self.config.dirs, &path), None, None),
         };
+        self.openings += 1;
+        let generation = self.openings;
         self.opening.insert(
             i,
             Opening {
                 since,
                 overflowed: false,
                 registered: self.registered,
+                generation,
+                check: None,
             },
         );
         let (config, shared) = (self.config.clone(), Arc::clone(&self.shared_arc));
@@ -2843,14 +3051,17 @@ impl Writing<'_> {
         let resumed = false;
         crate::serve::named("skwird-open", move || {
             // A read of a kept volume, begun before this thread was made,
-            // ended as it returns.
-            let _read = read;
+            // ended before what it read is sent: the writer, taking it in,
+            // knows it ended (`Writing::forgotten_removed`).
+            let read = read;
             if paced {
                 pause(crate::volumes::PAUSE, &cancel);
                 // Released meanwhile: nothing of it is opened.
                 if cancel.is_cancelled() {
+                    drop(read);
                     let _ = sender.send(Command::Opened {
                         root: i,
+                        generation,
                         keeper: None,
                         built: false,
                         current: false,
@@ -2877,10 +3088,70 @@ impl Writing<'_> {
                     Err(e) => log(&format!("root {i} cannot be checked, so not live: {e}")),
                 }
             }
+            drop(read);
             let _ = sender.send(Command::Opened {
                 root: i,
+                generation,
                 keeper: keeper.map(Box::new),
                 built,
+                current,
+            });
+        });
+    }
+
+    /// Kept volume root `i` checked on a thread of its own, with its
+    /// volume's cancel and a read of it, as it is opened (AGENTS.md,
+    /// "Blocking"): a release cancels the check and waits for it a while,
+    /// never for the writer, which answers meanwhile. Its keeper is the
+    /// thread's until it comes back as [`Command::Opened`]: what is heard of
+    /// it meanwhile is held, its syncs wait, and `replies` are answered
+    /// then. Begun at `from`, its tree watched again first from `rewatched`.
+    fn check_later(
+        &mut self,
+        i: usize,
+        rewatched: Option<Time>,
+        from: Time,
+        replies: Vec<Sender<()>>,
+    ) {
+        let Some((cancel, reading)) = self
+            .volume_roots
+            .values()
+            .find(|v| v.root == i)
+            .map(|v| (v.cancel.clone(), Arc::clone(&v.reading)))
+        else {
+            answered(replies);
+            return;
+        };
+        let Some(mut keeper) = self.keepers[i].take() else {
+            answered(replies);
+            return;
+        };
+        let read = reading.begin();
+        self.openings += 1;
+        let generation = self.openings;
+        self.opening.insert(
+            i,
+            Opening {
+                since: from,
+                overflowed: false,
+                registered: self.registered,
+                generation,
+                check: Some(Check { rewatched, replies }),
+            },
+        );
+        let (system, shared, sender) = (
+            self.config.system,
+            Arc::clone(&self.shared_arc),
+            self.sender.clone(),
+        );
+        crate::serve::named("skwird-check", move || {
+            let current = refresh(&mut keeper, i, system, &shared, &cancel);
+            drop(read);
+            let _ = sender.send(Command::Opened {
+                root: i,
+                generation,
+                keeper: Some(Box::new(keeper)),
+                built: false,
                 current,
             });
         });
@@ -2892,12 +3163,34 @@ impl Writing<'_> {
     /// made meanwhile holds for it too), and the syncs that waited for it
     /// answered. Where what was held for it overflowed, it is checked
     /// before it is live, as after events dropped. One let go of meanwhile
-    /// is let go of.
-    fn opened(&mut self, root: usize, keeper: Option<Box<Keeper>>, built: bool, current: bool) {
+    /// is let go of, and so is what a thread of an opening let go of gives
+    /// back late (`generation`), the same root found again meanwhile. A
+    /// kept volume's check ([`Writing::check_later`]) is taken in so too,
+    /// as [`Writing::check_root`] takes in its own, and its syncs answered.
+    fn opened(
+        &mut self,
+        root: usize,
+        generation: u64,
+        keeper: Option<Box<Keeper>>,
+        built: bool,
+        current: bool,
+    ) {
+        // Its thread's read ended: an index forgotten may be removed now.
+        if !self.volumes.forgetting.is_empty() {
+            self.forgotten_removed();
+        }
+        if self
+            .opening
+            .get(&root)
+            .is_none_or(|o| o.generation != generation)
+        {
+            return;
+        }
         let Some(opening) = self.opening.remove(&root) else {
             return;
         };
         if !self.shared.is_alive(root) {
+            answered(opening.check.map(|c| c.replies).unwrap_or_default());
             return;
         }
         self.keepers[root] = keeper.map(|k| *k);
@@ -2906,31 +3199,40 @@ impl Writing<'_> {
         if built {
             crate::memory::give_back();
         }
-        let marked = self.marked.get(root).copied().flatten().is_some();
-        if let Some(keeper) = self.keepers[root].as_mut() {
-            if current && marked {
-                keeper.heard_whole(opening.since);
-            }
-            // Built or checked, what its journal says proves from now on; not
-            // resumed, the position its index kept holds no more.
-            #[cfg(any(windows, target_os = "macos"))]
-            {
-                if current {
-                    self.journals.unproven.remove(&root);
+        let replies = if let Some(check) = opening.check {
+            self.checked(root, check.rewatched, opening.since, current);
+            check.replies
+        } else {
+            let marked = self.marked.get(root).copied().flatten().is_some();
+            if let Some(keeper) = self.keepers[root].as_mut() {
+                if current && marked {
+                    keeper.heard_whole(opening.since);
                 }
-                if !self.journals.replaying.contains_key(&root) {
-                    keeper.set_position(None);
+                // Built or checked, what its journal says proves from now on;
+                // not resumed, the position its index kept holds no more.
+                #[cfg(any(windows, target_os = "macos"))]
+                {
+                    if current {
+                        self.journals.unproven.remove(&root);
+                    }
+                    if !self.journals.replaying.contains_key(&root) {
+                        keeper.set_position(None);
+                    }
                 }
             }
-            if opening.overflowed {
-                log(&format!(
-                    "root {root}: events dropped while it opened: not live until checked"
-                ));
-                keeper.overflowed();
-                self.gather.overflowed(Instant::now());
-            }
+            Vec::new()
+        };
+        if opening.overflowed
+            && let Some(keeper) = self.keepers[root].as_mut()
+        {
+            log(&format!(
+                "root {root}: events dropped while it opened: not live until checked"
+            ));
+            keeper.overflowed();
+            self.gather.overflowed(Instant::now());
         }
         self.publish(root);
+        answered(replies);
         self.replay_held();
         self.serve_heard();
         if self.registered != opening.registered {
@@ -3045,8 +3347,7 @@ impl Writing<'_> {
                 self.shared.drop_root(i);
                 // Being opened, it is let go of as it comes back; its syncs
                 // are answered now, as of a root that is none.
-                self.opening.remove(&i);
-                self.unpark(i);
+                self.opening_given_up(i);
                 log(&format!("root {i}: no longer mounted, let go of"));
             }
         }

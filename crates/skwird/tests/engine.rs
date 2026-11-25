@@ -1242,3 +1242,119 @@ fn a_name_is_found_by_a_term_in_either_form() {
         );
     }
 }
+
+/// A line taken out of the user's exclusions gives its folder back at a
+/// sync of a live folder too, though the barrier would serve it: no
+/// barrier proves what no one read.
+#[test]
+fn a_folder_given_back_by_the_users_exclusions_is_read_at_a_sync_of_a_live_folder() {
+    let mut env = Env::new("engine-readmitted-live");
+    tree(&env);
+    std::thread::sleep(Duration::from_millis(2200));
+    let home = env.home();
+    let docs = home.join("docs");
+    let file = env.s.join("config/skwird/exclude");
+    let report = named(&home, "report 3.txt");
+    env.s.write(&file, b"~/docs/d03\n");
+    env.engine(30);
+    let mut c = env.client("a test");
+    c.watch(&[&docs], &[]).unwrap();
+    wait_for(5, "live", || is_live(&mut c, &docs));
+    assert!(answered(&mut c, &report).is_empty(), "kept out");
+    env.s.write(&file, b"");
+    c.sync(&docs).unwrap();
+    assert_eq!(answered(&mut c, &report).len(), 1, "read again");
+    assert_eq!(holes_of(&mut c, &home), []);
+}
+
+/// Folders of long names, a path near the longest a system takes.
+fn long_folder(home: &Path) -> PathBuf {
+    let mut at = home.to_path_buf();
+    for i in 0..13 {
+        at.push(format!("{i:02} {}", "f".repeat(240)));
+    }
+    std::fs::create_dir_all(&at).unwrap();
+    at
+}
+
+/// Every answer is a line a client reads (`MAX_LINE`, a mebibyte):
+/// results of long paths come in batches sized by their bytes, not 512
+/// whatever their size; more changes than a line holds are answered too
+/// old, so that the client walks again, never refused at each ask.
+#[test]
+fn every_answer_is_a_line_a_client_reads() {
+    let mut env = Env::new("engine-long-lines");
+    tree(&env);
+    let home = env.home();
+    let deep = long_folder(&home);
+    let made: BTreeSet<PathBuf> = (0..600)
+        .map(|i| {
+            let file = deep.join(format!("{i:03} {}", "n".repeat(200)));
+            std::fs::write(&file, b"").unwrap();
+            file
+        })
+        .collect();
+    env.engine(30);
+    let mut c = env.client("a test");
+    let mut batches = 0;
+    let mut found = BTreeSet::new();
+    c.query(&everything(&deep), |batch| {
+        batches += 1;
+        found.extend(batch.iter().map(|e| e.path.to_path()));
+        true
+    })
+    .unwrap();
+    assert_eq!(found, made, "every result, in lines a client reads");
+    assert!(batches > 2, "batches sized by their bytes: {batches}");
+    let start = c.changes(&home, "").unwrap().expect("a token from now");
+    let many = home.join("many");
+    std::fs::create_dir(&many).unwrap();
+    for i in 0..6000 {
+        std::fs::write(many.join(format!("{i:04} {}", "m".repeat(200))), b"").unwrap();
+    }
+    c.sync(&home).unwrap();
+    assert!(
+        c.changes(&home, &start.token).unwrap().is_none(),
+        "too many changes for a line: too old"
+    );
+    let next = c.changes(&home, "").unwrap().expect("a token from now");
+    std::fs::write(many.join("one more"), b"").unwrap();
+    c.sync(&home).unwrap();
+    let after = c
+        .changes(&home, &next.token)
+        .unwrap()
+        .expect("a few: not too old");
+    assert!(
+        after
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Added(e) if e.path.to_path() == many.join("one more"))),
+        "{:?}",
+        after.events
+    );
+}
+
+/// Totals whose extensions are more than a line holds are an error that
+/// says so, not a line the client refuses: `by_extension` names every one,
+/// so that it sums to the files' size.
+#[test]
+fn totals_longer_than_a_line_say_so() {
+    let mut env = Env::new("engine-totals-long");
+    tree(&env);
+    let home = env.home();
+    let mail = home.join("mail");
+    std::fs::create_dir(&mail).unwrap();
+    for i in 0..20_000 {
+        std::fs::write(mail.join(format!("{i}.{}{i}", "x".repeat(40))), b"").unwrap();
+    }
+    env.engine(30);
+    let mut c = env.client("a test");
+    let said = c.totals(&home, None, |_| true);
+    let Err(skwird_client::Error::Engine(failure)) = said else {
+        panic!("not an error of the engine's: {said:?}");
+    };
+    assert!(failure.message.contains("extensions"), "{failure:?}");
+    // A folder of few is answered as ever.
+    let docs = c.totals(&home.join("docs"), None, |_| true).unwrap();
+    assert_eq!(docs.totals.files, 40);
+}

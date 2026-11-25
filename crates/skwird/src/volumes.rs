@@ -117,6 +117,13 @@ pub struct State {
     pub released: HashMap<String, Instant>,
     /// What they ask of the roots, as last followed.
     pub plan: Plan,
+    /// The reads of the kept volumes let go of since a `volumes` was
+    /// asked, by identity: those it releases or forgets end before it is
+    /// answered.
+    pub let_go: Vec<(String, Arc<Reading>)>,
+    /// The reads of the volumes forgotten, by identity: the index of one is
+    /// removed once they end, as a read may save it.
+    pub forgetting: Vec<(String, Arc<Reading>)>,
 }
 
 impl State {

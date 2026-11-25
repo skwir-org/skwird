@@ -23,8 +23,59 @@ use crate::dirs::{check_socket_path, make_private};
 use crate::engine::{Command, Config, Published, Shared, log, writer};
 use crate::transport::{Listener, Stream};
 
-/// Results sent at a time.
+/// Results sent at a time, at most.
 pub(crate) const BATCH: usize = 512;
+
+/// The most bytes of JSON an answer is written in: a line a client reads
+/// ([`wire::MAX_LINE`]), less room for what frames it (the request's id,
+/// the answer's name).
+pub(crate) const LINE_ROOM: usize = wire::MAX_LINE - 4096;
+
+/// How many bytes `value` takes as JSON: counted as it is written, kept
+/// nowhere.
+pub(crate) fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Nothing a count is written to fails, nor what the wire's types hold.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
+/// `items` in batches: at most [`BATCH`] each, and at most [`LINE_ROOM`]
+/// bytes of JSON with the commas between, so that no batch is a line
+/// longer than a client reads, as 512 long paths, or children of many
+/// extensions, made one. Each is given with whether it fits: one item past
+/// [`LINE_ROOM`] alone is a batch of its own that does not.
+pub(crate) fn batches<T: serde::Serialize>(items: &[T]) -> impl Iterator<Item = (&[T], bool)> {
+    let mut rest = items;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let mut bytes = 0;
+        let mut n = 0;
+        while n < rest.len().min(BATCH) {
+            let more = json_len(&rest[n]) + 1;
+            if n > 0 && bytes + more > LINE_ROOM {
+                break;
+            }
+            bytes += more;
+            n += 1;
+        }
+        let (batch, after) = rest.split_at(n);
+        rest = after;
+        Some((batch, bytes <= LINE_ROOM))
+    })
+}
 
 /// At the system service, which answers any local user (DESIGN 4): the
 /// most results a query gives, and the most queries a user runs at once.
@@ -775,13 +826,23 @@ fn volumes(
     if shared.system {
         return failure("not_here", "the system service keeps no removable volume");
     }
+    // Each mount point named resolved as a path compared is (AGENTS.md),
+    // here, where a stat may wait for its disk, not on the writer's turn;
+    // as it is named where it cannot be.
+    let release_at = release_at
+        .iter()
+        .map(|p| {
+            let p = p.to_path();
+            skwird_crawl::canonical(&p).unwrap_or(p)
+        })
+        .collect();
     let (reply, answer) = channel();
     let asked = commands.send(Command::Volumes {
         client: client.to_owned(),
         keep,
         forget,
         release,
-        release_at: release_at.iter().map(WirePath::to_path).collect(),
+        release_at,
         reply,
     });
     match asked.ok().and_then(|()| answer.recv().ok()) {
@@ -1036,7 +1097,7 @@ fn changes(
     // The folders not covered, whose changes no event holds: as the root's
     // coverage names them to this asker now.
     let holes = coverage(shared, root, who).map_or_else(|_| Vec::new(), |c| c.holes);
-    Answer::Changes(wire::Changes {
+    let changes = wire::Changes {
         events,
         token: token.text(),
         complete: wire::Complete {
@@ -1044,7 +1105,15 @@ fn changes(
             attrs: complete.attrs,
         },
         holes,
-    })
+    };
+    // More than a line holds (a checkout's thousands of events): the
+    // client walks again, as from a token older than what is kept, which
+    // costs it a walk; a line it refuses, every time it asks, would leave
+    // it never past that token.
+    if json_len(&changes) > LINE_ROOM {
+        return Answer::TooOld {};
+    }
+    Answer::Changes(changes)
 }
 
 /// Answer a query from the snapshots published now, in batches, then
@@ -1119,11 +1188,17 @@ fn answer_query(
             entries.extend(more);
         }
     }
-    let truncated = entries.len() > limit;
+    let mut truncated = entries.len() > limit;
     entries.truncate(limit);
     let mut sent = 0u64;
-    for batch in entries.chunks(BATCH) {
+    for (batch, fits) in batches(&entries) {
         if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        // An entry longer than a line alone (a path of near a megabyte):
+        // the answer ends before it, said cut short as past its limit.
+        if !fits {
+            truncated = true;
             break;
         }
         if !send(writer, id, Answer::Results(batch.to_vec())) {

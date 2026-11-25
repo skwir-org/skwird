@@ -125,6 +125,11 @@ pub fn remove() -> Result<String, String> {
 }
 
 /// What `schtasks` said, run with `args`; its error where it failed.
+/// Started with std's `Command`, which lets it inherit what this process
+/// holds inheritable (AGENTS.md: a process skwird starts inherits no
+/// handle). Safe here alone: `skwird logon` is a command a user runs, not
+/// an engine; it waits for `schtasks` to end, which holds nothing after,
+/// and reading its output needs the pipes `Command` gives it.
 #[cfg(windows)]
 fn schtasks(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("schtasks")
