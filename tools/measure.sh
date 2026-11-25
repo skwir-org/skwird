@@ -557,6 +557,9 @@ disk() {
 # What is said goes to the report too, the body run in this shell (not a
 # pipeline's subshell), so that the cleanup's trap knows the engines it
 # started.
+# The terminal kept as 3: where the report is saved is said there alone,
+# never in the report, which names no path.
+exec 3>&1
 exec > >(tee "$out") 2>&1
 
 section "machine"
@@ -642,4 +645,4 @@ section "machine"
     echo "load after: $(cut -d' ' -f1-3 /proc/loadavg)"
 
 echo
-echo "Saved in $out"
+echo "Saved in $out" >&3
