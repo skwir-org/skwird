@@ -2747,10 +2747,12 @@ program alone since, as a release builds it.
     two things a root on FAT needs: a root that is a volume's mount point
     opened through it, and the identity and path FAT keeps where it keeps
     no file id of 128 bits, nor a normalized path.
-  - **Not tried:** an eject asked from Windows' taskbar, which a test
-    cannot ask; a volume twice of one identity, on a machine (the plan is
-    tested alone); the reads' lowest priority but Linux's idle class,
-    whose test a thread asks of itself.
+  - **Tried after** (2026-11-25, the user's go): an eject asked as
+    Windows' taskbar asks it, of the volume's device, while the engine
+    watches it (it goes, and the volume is away); the reads' lowest
+    priority on macOS and Windows, as on Linux.
+  - **Not tried:** a volume twice of one identity, on a machine (the plan
+    is tested alone).
   - **skwir's side** waits for this on main: its eject asks
     `release_at` of a running engine that says `volumes`, and it asks its
     user once a volume whether to keep it.

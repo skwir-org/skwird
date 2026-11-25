@@ -2130,8 +2130,14 @@ ADR-053, 074, 075):
     virtual disk mounted at a folder: seen, kept, answered and not
     lockable while watched, released by its mount point and lockable
     (`FSCTL_LOCK_VOLUME`, which fails where any other handle is open),
-    detached, attached again, forgotten. Not tried there: an eject from
-    the taskbar, which a test cannot ask.
+    detached, attached again, forgotten; and, watched again, its removal
+    asked as the taskbar's "Safely remove" asks it, of its volume's device
+    (`CM_Query_And_Remove_SubTreeW`): it went, not vetoed, and the volume
+    was away after. A path a volume is listed at is taken only where it
+    resolves to that volume, a guard. The reads' lowest priority is tried
+    on each system: Linux's idle class, which a thread made after
+    inherits; macOS' throttled policy and Windows' background mode, each
+    thread's own.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do
