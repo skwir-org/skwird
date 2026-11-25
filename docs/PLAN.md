@@ -2775,11 +2775,21 @@ for a reason of its own:
   of an answer, and `excluded`. The deeper change: `wire::write` refusing
   a line past `MAX_LINE`, as `read` does, each answer giving its own
   fallback.
-- **Only a kept volume's check runs off the writer.** Every other root's
-  check still runs on it (AGENTS.md, "Blocking", holds for openings and
-  kept volumes): a system service's root on a sleeping disk holds every
-  sync while its check stats. Each root given a cancel and a read of its
-  own, as a kept volume has, would make one path of the two.
+- **Every root's check runs on the writer, a kept volume's too.** The
+  first round moved a kept volume's alone to a thread of its own; the
+  second found what its keeper, out meanwhile, missed: a watch that ended
+  dropped, the root back live with none; a barrier's sync answered with
+  what was heard before it held; the thread's snapshot published over a
+  slot let go of and taken again; each sync parked during it a check of
+  its own. It was undone: a release waits for a check its disk holds, as
+  before 0.2, and a root on a sleeping disk holds every sync while its
+  check stats (AGENTS.md, "Blocking", holds for openings). The sound form
+  is one path for every root: each with a cancel and a read of its own,
+  its keeper out only where what it misses is held for it (a watch's
+  end, a sync's barrier, the slot's generation).
+- **More of a kept volume is read on the writer:** what was heard below
+  it, its mount table again, its watch made again on Windows (the
+  parent's folder opened too).
 - **Folders readmitted by the exclusions** are read by each caller that
   changes them (a change of the exclusions, a sync): the keeper lowering
   the proof of the scope that holds them would leave no caller to
@@ -2815,7 +2825,39 @@ for a reason of its own:
   (a file held open on the volume, the root back within
   `RELEASED_FOR`); a kept volume released at a twin's mount point, and
   forgotten during its first crawl, in the root tests' machine; FUSE
-  told on macOS and Windows by its volume's name alone.
+  told on macOS and Windows by its volume's name alone; the system
+  service's unit on a long-term kernel (6.1), whose btrfs may open a
+  device to write while mounting its top level, which the unit refuses
+  (`DeviceAllow=block-* r`): its root is then checked, never live.
+- **Found by the second round, and left:**
+  - On Windows, a root whose parent cannot be opened, or whose place
+    cannot be told (`Place` of none), is not lost when it is renamed:
+    the parent's watch alone hears it. Saying such a root lost would
+    leave a FAT drive's root, which no one renames, never live: a
+    choice to make. The place is taken after the root's open, a rename
+    between them unheard.
+  - The system service's unit lets it read every block device, where
+    `PrivateDevices` gave none, for the top level of a btrfs (swap and
+    hibernation images among them, with `CAP_DAC_READ_SEARCH`). A
+    `DeviceAllow` of the devices holding the roots' filesystems alone
+    would give it what it needs.
+  - On macOS, a full queue of connections refuses a connect at once, as
+    a dead socket does: a client then starts an engine, which waits for
+    the lock (nothing watches twice).
+  - The system's mounts are told by their mount points (`/`, `/boot`,
+    `/home`...): a system booted from a stick or an SD card offers its
+    other mounts (`/boot/firmware`, a subvolume at `/srv`) as removable
+    volumes, under its filesystem's identity. A btrfs given a temporary
+    identity at each mount (Linux 6.7's temp-fsid, for a clone) has none
+    that lasts.
+  - A `volumes` request ends the waits of every volume let go of since
+    the last: one unmounted meanwhile, its read still running, may have
+    its index removed while the read saves it again.
+  - A refresh or an install cut short publishes no proof again: a scope
+    whose watch failed with it stays published live until the next
+    publish. On macOS, the mounts found by a listing are forgotten at
+    each check, a mount the table spells otherwise than the root's path
+    found again by its next listing alone.
 
 ## Later
 
