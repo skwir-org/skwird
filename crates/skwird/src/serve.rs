@@ -280,13 +280,17 @@ pub fn serve(config: &Config) -> Result<(), String> {
             live.leave();
         });
     }
-    let _ = commands.send(Command::Stop);
-    let _ = writing.join();
-    // A socket the service manager passed stays its own, to start the
-    // next engine. A pipe is no file.
+    // Going: no client is taken from here, so none waits on an engine that
+    // will not answer it while the writer ends (a root still opening, a
+    // save). One that comes meanwhile finds none, and starts the next,
+    // which waits for the lock; a socket the service manager passed stays
+    // its own, queueing it for the next engine. A pipe is no file.
+    drop(listener);
     if bound && cfg!(unix) {
         let _ = std::fs::remove_file(&socket);
     }
+    let _ = commands.send(Command::Stop);
+    let _ = writing.join();
     log("idle: gone");
     drop(lock);
     Ok(())

@@ -522,10 +522,11 @@ impl Client {
             return Err(Error::NoEngine("none answers".into()));
         };
         let socket = find.started()?;
-        // One engine per scope (rule 4): an engine that listens where one
-        // started would, and failed (silent, gone in the middle of its
-        // hello, refusing), is not started again, nor waited for.
-        if let Some((_, e)) = failed.into_iter().find(|(s, _)| **s == socket) {
+        // One engine per scope (rule 4): where an engine listens and failed
+        // (silent, gone in the middle of its hello, refusing), the system
+        // service's or where one started would, none is started beside it,
+        // nor waited for. An engine going away listens no more.
+        if let Some((_, e)) = failed.into_iter().next() {
             return Err(Error::NoEngine(format!("one runs, and failed: {e}")));
         }
         // No engine started for a search given up on.
