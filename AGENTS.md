@@ -62,7 +62,10 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   alone. One exception: on Windows, a root's folder is held open while
   it is watched (`ReadDirectoryChangesW` needs its handle), and its
   parent's, where the root's own rename is told. Each is opened to
-  share reading, writing and deletion, so it stops no rename or removal.
+  share reading, writing and deletion, so it stops no rename or removal
+  of its own folder. Windows refuses all the same to rename a folder
+  above one held open ("Access is denied"): a watched root's parents
+  stay where they are while it is watched.
 - **A share counts all the work it bounds,** and stays under its
   budget, leaving room for what cannot wait. The writer's work for what
   is heard (finding, applying, saving) is timed by its own thread's

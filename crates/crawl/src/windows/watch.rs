@@ -15,8 +15,11 @@
 //!   folder is no longer where it was ([`Place`]): renamed or moved, its
 //!   handle still tells what changes below it, but its path leads to none
 //!   of it. Its own rename is told in its parent alone, whose folders'
-//!   names are heard too; a folder above renamed, at the next change below
-//!   it.
+//!   names are heard too. A folder above it is not renamed while it is
+//!   watched: Windows refuses to rename a folder below which one is held
+//!   open. Its path changed otherwise (a junction above it pointed
+//!   elsewhere, its volume mounted elsewhere) is found at the next change
+//!   below it.
 //! - A name may be told by its short form (`LONGFO~1`), the index knowing
 //!   its long one alone: each that may be one is found, and said by its
 //!   long name ([`long_names`]).
@@ -654,7 +657,7 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
         queue.push(said.into_iter().map(|h| match h {
             Heard::Entry { scope, rel } => Heard::Entry {
                 scope,
-                rel: long_names(&l.path, &rel),
+                rel: long_names(&l.path, rel),
             },
             other => other,
         }));
@@ -672,7 +675,11 @@ fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &
 /// would be found nowhere, a file heard so not read again. A name that
 /// cannot be found (gone since) ends the path there: its folder is read
 /// again, the name gone from it, and what was below it with it.
-fn long_names(root: &Path, rel: &Path) -> PathBuf {
+fn long_names(root: &Path, rel: PathBuf) -> PathBuf {
+    // As nearly every path heard is: given on as it is, nothing made.
+    if !rel.as_os_str().encode_wide().any(|u| u == u16::from(b'~')) {
+        return rel;
+    }
     let mut out = PathBuf::new();
     for part in rel.components() {
         let std::path::Component::Normal(name) = part else {
@@ -846,22 +853,26 @@ mod tests {
             return;
         }
         assert_eq!(
-            long_names(&root, &rel),
+            long_names(&root, rel.clone()),
             Path::new(r"a long folder name\a long file name.txt"),
             "{rel:?}"
         );
         let folder = rel.parent().unwrap().to_path_buf();
         assert_eq!(
-            long_names(&root, &folder.join("gone.txt")),
+            long_names(&root, folder.join("gone.txt")),
             Path::new(r"a long folder name\gone.txt")
         );
         assert_eq!(
-            long_names(&root, Path::new(r"GONE~1\below\it.txt")),
+            long_names(&root, PathBuf::from(r"GONE~1\below\it.txt")),
             Path::new(r"GONE~1")
         );
         assert_eq!(
-            long_names(&root, Path::new("keep~1.txt")),
+            long_names(&root, PathBuf::from("keep~1.txt")),
             Path::new("keep~1.txt")
+        );
+        assert_eq!(
+            long_names(&root, PathBuf::from(r"no tilde\gone.txt")),
+            Path::new(r"no tilde\gone.txt")
         );
     }
 }
@@ -951,8 +962,8 @@ mod watched {
 
     /// A root whose folder is renamed says its watch ended: its path leads
     /// to nothing heard, though every change below the folder is still
-    /// told. So is one whose parent is renamed, at the next change below
-    /// it.
+    /// told. A folder above it is not renamed while it is watched: Windows
+    /// refuses to rename a folder below which one is held open.
     #[test]
     fn a_root_renamed_says_its_watch_ended() {
         let s = Scratch::new("watch-renamed");
@@ -962,17 +973,20 @@ mod watched {
         w.watch_root(2, &s.join(r"above\root")).unwrap();
         w.watch_root(3, &s.join(r"top\root")).unwrap();
         std::fs::rename(s.join(r"above\root"), s.join(r"above\moved")).unwrap();
-        std::fs::rename(s.join("top"), s.join("top moved")).unwrap();
         // Wine tells a handle's path as it was opened, whatever renamed its
-        // folder since: the end is proven on Windows alone.
+        // folder since, and renames a folder above one held open: proven on
+        // Windows alone.
         if skwird_testkit::under_wine() {
             eprintln!("not proven under Wine: a renamed root's watch ends");
             return;
         }
-        s.file(r"top moved\root\made.txt");
-        heard_until(&w, |all| {
-            all.contains(&Heard::Lost { scope: 2 }) && all.contains(&Heard::Lost { scope: 3 })
-        });
+        let above = std::fs::rename(s.join("top"), s.join("top moved"));
+        assert_eq!(
+            above.map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::PermissionDenied),
+            "a folder above a watched root renamed"
+        );
+        heard_until(&w, |all| all.contains(&Heard::Lost { scope: 2 }));
     }
 }
 

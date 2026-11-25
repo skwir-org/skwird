@@ -245,7 +245,7 @@ impl Follower {
         whole: bool,
         scope: usize,
         root: &Path,
-    ) -> (Vec<Heard>, bool) {
+    ) -> Vec<Heard> {
         let mut folders: HashMap<u128, Option<PathBuf>> = HashMap::new();
         let mut said = HashSet::new();
         let mut out = Vec::new();
@@ -281,10 +281,11 @@ impl Follower {
         if doubt {
             out.push(Heard::Overflow { scope });
         }
+        // Last, where the follower looks for it.
         if moved {
             out.push(Heard::Lost { scope });
         }
-        (out, moved)
+        out
     }
 }
 
@@ -366,8 +367,8 @@ pub(super) fn run(
         } else {
             let bytes = &crate::windows::bytemuck(&f.buffer)[..moved as usize];
             let (records, whole) = journal::records_whole(bytes);
-            let (mut said, lost) = f.heard(&records, whole, scope, root);
-            if lost {
+            let mut said = f.heard(&records, whole, scope, root);
+            if said.last() == Some(&Heard::Lost { scope }) {
                 queue.push(said);
                 return;
             }
