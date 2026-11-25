@@ -99,33 +99,14 @@ pub fn firmlinked(table: &Table) -> Vec<PathBuf> {
     roots
 }
 
-/// Whether a mount's filesystem is on a removable volume: a disk the
-/// kernel says is removable, or one on a USB bus.
+/// Whether a mount's filesystem is on a removable volume, as a user's
+/// engine tells one it may keep (`skwird_crawl::removable`): one
+/// definition, so that a volume the system service leaves out is one a
+/// user's engine sees. Its own copy missed an encrypted volume's chain of
+/// devices and the SD card's bus, and indexed both as system roots.
 #[cfg(target_os = "linux")]
 pub fn removable(mount: &Mount) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::fs::MetadataExt;
-    // A btrfs's device in the table is its own anonymous one: the disk is
-    // the source's.
-    let (major, minor) = if mount.dev.0 == 0 {
-        let Ok(meta) = std::fs::metadata(&mount.source) else {
-            return false;
-        };
-        if !meta.file_type().is_block_device() {
-            return false;
-        }
-        let rdev = meta.rdev();
-        (rustix::fs::major(rdev), rustix::fs::minor(rdev))
-    } else {
-        mount.dev
-    };
-    let Ok(device) = std::fs::canonicalize(format!("/sys/dev/block/{major}:{minor}")) else {
-        return false;
-    };
-    let says = |dir: &std::path::Path| {
-        std::fs::read_to_string(dir.join("removable")).is_ok_and(|s| s.trim() == "1")
-    };
-    device.to_string_lossy().contains("/usb") || says(&device) || device.parent().is_some_and(says)
+    skwird_crawl::removable::is_removable(mount)
 }
 
 #[cfg(not(target_os = "linux"))]

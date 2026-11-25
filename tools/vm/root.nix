@@ -60,7 +60,7 @@ in
       import os
       machine.wait_for_unit("multi-user.target")
       # A USB stick of 64 MiB, plugged in as a user plugs one in: removable,
-      # on the USB bus, the machine's one SCSI disk (/dev/sda).
+      # on the USB bus, the machine's first SCSI disk (/dev/sda).
       stick = os.path.join(os.environ.get("TMPDIR", "/tmp"), "stick.img")
       with open(stick, "wb") as f:
           f.truncate(64 << 20)

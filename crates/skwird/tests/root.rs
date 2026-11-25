@@ -1042,10 +1042,10 @@ fn a_kept_stick_is_a_root_while_it_is_mounted() {
     run("umount", &[at.0.as_os_str()]);
 }
 
-/// A btrfs on a USB stick, as the user's drives hold it: its mounts have
-/// numbers of their own (major 0), never their device's, and it is seen
-/// by its source's device, its btrfs UUID its identity; kept, its names
-/// are answered.
+/// A btrfs on a USB stick: its mounts have numbers of their own (major
+/// 0), never their device's, and it is seen by its source's device, its
+/// identity and its label its filesystem's own; kept, its names are
+/// answered.
 #[test]
 fn a_btrfs_stick_is_seen_by_its_device() {
     let Some(m) = machine() else { return };
