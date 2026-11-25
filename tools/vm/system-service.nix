@@ -19,8 +19,11 @@ pkgs.testers.runNixOSTest {
       enable = true;
       system = true;
     };
-    # /dev/vdb, mounted while the service runs.
-    virtualisation.emptyDiskImages = [256];
+    # /dev/vdb and /dev/vdc, mounted while the service runs: an ext4, and
+    # a btrfs through a subvolume, as Fedora's homes are.
+    virtualisation.emptyDiskImages = [256 256];
+    boot.supportedFilesystems = ["btrfs"];
+    environment.systemPackages = [pkgs.btrfs-progs];
     users.groups.team.gid = 2000;
     users.users = {
       someone = {
@@ -132,5 +135,30 @@ pkgs.testers.runNixOSTest {
             "test -z \"$(SKWIRD_NO_START=1 skwird find 'mounted later' --in /srv)\"",
             timeout=30,
         )
+
+    with subtest("a btrfs mounted through a subvolume is marked through its top level, and live"):
+        # The mark through a subvolume is refused (EXDEV): the service
+        # mounts the filesystem's top level for it, which needs its block
+        # device, under the unit's own device policy.
+        # Its subvolume made in a mount namespace of its own, out of the
+        # service's sight: a top level mounted where it sees it would be a
+        # root, read as it is unmounted.
+        machine.succeed(
+            "mkfs.btrfs -q /dev/vdc",
+            "mkdir -p /mnt/top /srv/sub",
+            "unshare -m sh -c 'mount /dev/vdc /mnt/top && btrfs -q subvolume create /mnt/top/home'",
+            "mount -o subvol=home /dev/vdc /srv/sub",
+            "echo x > '/srv/sub/on a subvolume.txt'",
+        )
+        machine.wait_until_succeeds(
+            "SKWIRD_NO_START=1 skwird coverage /srv/sub | grep -q '^names: live since '",
+            timeout=60,
+        )
+        machine.succeed("echo y > '/srv/sub/made once live.txt'")
+        machine.wait_until_succeeds(
+            "SKWIRD_NO_START=1 skwird find 'made once live' --in /srv/sub | grep -q 'made once live.txt'",
+            timeout=30,
+        )
+        machine.succeed("umount /srv/sub")
   '';
 }

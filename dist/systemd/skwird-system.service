@@ -43,7 +43,11 @@ ProtectHome=read-only
 PrivateTmp=yes
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
-PrivateDevices=yes
+# Not PrivateDevices: a btrfs subvolume's filesystem is marked through its
+# top level, mounted read-only from its block device, which a private /dev
+# has not. Devices are closed but reading block devices.
+DevicePolicy=closed
+DeviceAllow=block-* r
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
