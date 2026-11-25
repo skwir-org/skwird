@@ -34,6 +34,14 @@ self: {
   );
   ranBySystem = system != null && system.enable && (system.system || system.session);
   units = "${cfg.package}/lib/systemd/user";
+  # The folders Home Manager gives this user, which the engine is told:
+  # a service manager starts it with none of the shell's variables, and a
+  # folder moved (`xdg.configHome`) would hold exclusions it never reads.
+  folders = {
+    XDG_CONFIG_HOME = config.xdg.configHome;
+    XDG_STATE_HOME = config.xdg.stateHome;
+    XDG_CACHE_HOME = config.xdg.cacheHome;
+  };
 in {
   options.services.skwird = {
     enable = lib.mkEnableOption "skwird, an index of file names kept current, for this user";
@@ -93,6 +101,9 @@ in {
         "systemd/user/skwird.socket".source = "${units}/skwird.socket";
         "systemd/user/skwird.service".source = "${units}/skwird.service";
         "systemd/user/sockets.target.wants/skwird.socket".source = "${units}/skwird.socket";
+        "systemd/user/skwird.service.d/home-manager.conf".text =
+          "[Service]\n"
+          + lib.concatStrings (lib.mapAttrsToList (k: v: "Environment=\"${k}=${v}\"\n") folders);
       };
     })
 
@@ -110,6 +121,7 @@ in {
           LowPriorityIO = true;
           Nice = 10;
           StandardErrorPath = "${config.xdg.stateHome}/skwird/engine.log";
+          EnvironmentVariables = folders;
         };
       };
       # launchd opens the log; its folder, the engine's state folder, is

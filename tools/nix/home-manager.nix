@@ -86,6 +86,8 @@ in
     grep -qx 'ExecStart=${package}/bin/skwird serve --forever' $units/skwird.service
     grep -qx 'ListenStream=%t/skwird/socket' $units/sockets.target.wants/skwird.socket
     test ! -e $units/default.target.wants/skwird.service
+    grep -qx 'Environment="XDG_CONFIG_HOME=/home/someone/.config"' $units/skwird.service.d/home-manager.conf
+    grep -qx 'Environment="XDG_STATE_HOME=/home/someone/.local/state"' $units/skwird.service.d/home-manager.conf
     test -x ${package}/bin/skwird
 
     off=${none.home-files}
@@ -100,5 +102,6 @@ in
     ${expect "macOS' agent is skwird logon's" (agent.Label == "org.skwir.skwird")}
     ${expect "macOS' agent serves for the session" (lib.drop 1 agent.ProgramArguments == ["serve" "--forever"])}
     ${expect "macOS' agent logs in the engine's state folder" (agent.StandardErrorPath == "/Users/someone/.local/state/skwird/engine.log")}
+    ${expect "macOS' agent is told the user's folders" (agent.EnvironmentVariables.XDG_CONFIG_HOME == "/Users/someone/.config")}
     touch $out
   ''
