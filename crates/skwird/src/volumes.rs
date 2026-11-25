@@ -124,6 +124,10 @@ pub struct State {
     /// The reads of the volumes forgotten, by identity: the index of one is
     /// removed once they end, as a read may save it.
     pub forgetting: Vec<(String, Arc<Reading>)>,
+    /// The list of what clients keep could not be read at the start (a
+    /// disk's error, a newer engine's): no index is removed as no client's
+    /// until a list is saved again, taken as the clients' then.
+    pub unread: bool,
 }
 
 impl State {

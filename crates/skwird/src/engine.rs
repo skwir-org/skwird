@@ -307,8 +307,7 @@ pub enum Command {
         heard: Vec<fanotify::Heard>,
     },
     /// Root `root` opened on a thread of its own ([`Writing::open_later`]),
-    /// or a kept volume's checked ([`Writing::check_later`]), the
-    /// `generation`th opening the writer began: its keeper, none if it
+    /// the `generation`th opening the writer began: its keeper, none if it
     /// could not be, whether it was built, and whether it was proven
     /// current there (by its crawl, or by the check of an index read back).
     Opened {
@@ -401,10 +400,35 @@ const MOST_REGISTERED: usize = 256;
 
 /// What clients registered, kept across restarts.
 fn registered<T: serde::de::DeserializeOwned>(dirs: &Dirs, file: &str) -> Vec<T> {
-    std::fs::read(dirs.state.join(file))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    read_registered(dirs, file).unwrap_or_default()
+}
+
+/// What clients keep, as their list says: none for the system service,
+/// none, and known unread, where it cannot be read.
+fn kept_volumes(config: &Config) -> crate::volumes::State {
+    let kept = if config.system {
+        Some(Vec::new())
+    } else {
+        read_registered(&config.dirs, crate::volumes::FILE)
+    };
+    if kept.is_none() {
+        log("the kept volumes' list cannot be read: none kept until one is saved");
+    }
+    let mut state = crate::volumes::State::kept(kept.clone().unwrap_or_default());
+    state.unread = kept.is_none();
+    state
+}
+
+/// The list in `file` of the engine's state folder: empty if there is
+/// none, nothing if it cannot be read or understood (a disk's error, a
+/// newer engine's), which is not a list of none: what follows from it
+/// (an index removed) waits for one that can be read.
+fn read_registered<T: serde::de::DeserializeOwned>(dirs: &Dirs, file: &str) -> Option<Vec<T>> {
+    match std::fs::read(dirs.state.join(file)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
 }
 
 /// A folder above a root as the system service judges it, where no root
@@ -789,11 +813,7 @@ pub fn writer(
         cookies,
         next_cookie: 0,
         waiting: Vec::new(),
-        volumes: crate::volumes::State::kept(if config.system {
-            Vec::new()
-        } else {
-            registered(&config.dirs, crate::volumes::FILE)
-        }),
+        volumes: kept_volumes(config),
         volume_roots: HashMap::new(),
         served: Vec::new(),
         for_clients: std::time::Duration::ZERO,
@@ -1136,16 +1156,6 @@ struct Opening {
     /// again is the same root, and the late `Opened` of what was let go of
     /// is not this one's.
     generation: u64,
-    /// A kept volume's check, not its opening ([`Writing::check_later`]),
-    /// begun at `since`.
-    check: Option<Check>,
-}
-
-/// A kept volume's check on a thread of its own: since when its tree was
-/// watched again first, if it was, and the syncs it serves.
-struct Check {
-    rewatched: Option<Time>,
-    replies: Vec<Sender<()>>,
 }
 
 /// An event held while roots are opening, with its source's generation.
@@ -1935,25 +1945,17 @@ impl Writing<'_> {
 
     /// Root `i` checked, and the syncs `replies` answered once it is. On
     /// Windows and macOS, where its watch ended, its tree is watched again
-    /// first ([`Writing::checked`]). A kept volume's is checked on a thread
-    /// of its own ([`Writing::check_later`]), the syncs answered once it
-    /// comes back: a stat of it can block on its disk, and a release cancels
-    /// it.
+    /// first ([`Writing::checked`]). On the writer, a kept volume's too: one
+    /// checked on a thread of its own lost what its keeper missed while it
+    /// was out (a watch ended, a barrier's sync answered, its slot taken
+    /// again), so a release waits for its check (docs/PLAN.md, "The review
+    /// before 0.2").
     fn check_root_for(&mut self, i: usize, replies: Vec<Sender<()>>) {
         #[cfg(any(windows, target_os = "macos"))]
         let rewatched = self.rewatch(i);
         #[cfg(not(any(windows, target_os = "macos")))]
         let rewatched: Option<Time> = None;
         let from = Time::now();
-        let volume = self
-            .volume_roots
-            .values()
-            .find(|v| v.root == i)
-            .map(|v| (v.cancel.clone(), v.reading.begin()));
-        if let Some((cancel, read)) = volume {
-            self.check_later(i, (cancel, read), rewatched, from, replies);
-            return;
-        }
         if let Some(keeper) = self.keepers[i].as_mut() {
             let current = refresh(keeper, i, self.config.system, self.shared, &self.cancel);
             self.checked(i, rewatched, from, current);
@@ -2317,16 +2319,11 @@ impl Writing<'_> {
         log(&format!("root {i}: a kept volume, a root no more"));
     }
 
-    /// Root `i`'s opening or check given up, the root let go of: what its
-    /// thread gives back is not taken ([`Writing::opened`]), and its syncs
-    /// are answered now, as of a root that is none.
+    /// Root `i`'s opening given up, the root let go of: what its thread
+    /// gives back is not taken ([`Writing::opened`]), and its syncs are
+    /// answered now, as of a root that is none.
     fn opening_given_up(&mut self, i: usize) {
-        if let Some(Opening {
-            check: Some(check), ..
-        }) = self.opening.remove(&i)
-        {
-            answered(check.replies);
-        }
+        self.opening.remove(&i);
         self.unpark(i);
     }
 
@@ -2337,6 +2334,9 @@ impl Writing<'_> {
     /// is removed at the next (AGENTS.md, "What follows from a list is
     /// derived from it again").
     fn forgotten_removed(&mut self) {
+        if self.volumes.unread {
+            return;
+        }
         let dirs = &self.config.dirs;
         let index = |id: &str| crate::volumes::index_dir(dirs, id);
         self.volumes
@@ -2386,6 +2386,7 @@ impl Writing<'_> {
         self.volumes.seen = skwird_crawl::removable::mounted()?;
         if crate::volumes::changed(&mut self.volumes.kept, client, keep, forget) {
             save_registered(&self.config.dirs, crate::volumes::FILE, &self.volumes.kept);
+            self.volumes.unread = false;
         }
         // Its index is removed once no read of it runs: one may save it.
         let forgotten: Vec<&String> = forget
@@ -2401,10 +2402,22 @@ impl Writing<'_> {
         let below = |at: &Path| release_at.iter().any(|p| at.starts_with(p));
         // A twin is read by none: releasing its mount point lets nothing go
         // of, and the root of its identity, mounted elsewhere, stays one.
-        let twin = |id: &str, at: &Path| {
-            let plan = &self.volumes.plan;
-            plan.twins.iter().any(|(t, p)| t == id && p == at)
-        };
+        // Told by the plan of what is mounted now, not of the last listing
+        // followed, which may not hold the twin yet.
+        let rooted: HashMap<String, PathBuf> = self
+            .volume_roots
+            .iter()
+            .map(|(id, v)| (id.clone(), v.at.clone()))
+            .collect();
+        let twins = crate::volumes::plan(
+            &self.volumes.kept,
+            &self.volumes.seen,
+            &self.volumes.released,
+            Instant::now(),
+            &rooted,
+        )
+        .twins;
+        let twin = |id: &str, at: &Path| twins.iter().any(|(t, p)| t == id && p == at);
         let at_points: Vec<String> = self
             .volumes
             .seen
@@ -2841,9 +2854,9 @@ impl Writing<'_> {
     }
 
     /// A sync served by the check: what was heard applied first, then
-    /// every folder of the root compared. A root being opened or checked
-    /// meanwhile (a barrier given up late) is synced once it is, as a sync
-    /// asked of it then.
+    /// every folder of the root compared. A root being opened meanwhile (a
+    /// barrier given up late) is synced once it is, as a sync asked of it
+    /// then.
     fn check_now(&mut self, root: usize, replies: Vec<Sender<()>>) {
         if self.opening.contains_key(&root) {
             for reply in replies {
@@ -3040,7 +3053,6 @@ impl Writing<'_> {
                 overflowed: false,
                 registered: self.registered,
                 generation,
-                check: None,
             },
         );
         let (config, shared) = (self.config.clone(), Arc::clone(&self.shared_arc));
@@ -3104,56 +3116,6 @@ impl Writing<'_> {
         });
     }
 
-    /// Kept volume root `i` checked on a thread of its own, with its
-    /// volume's cancel and a read of it, as it is opened (AGENTS.md,
-    /// "Blocking"): a release cancels the check and waits for it a while,
-    /// never for the writer, which answers meanwhile. Its keeper is the
-    /// thread's until it comes back as [`Command::Opened`]: what is heard of
-    /// it meanwhile is held, its syncs wait, and `replies` are answered
-    /// then. Begun at `from`, its tree watched again first from `rewatched`,
-    /// with its volume's cancel and the read of it begun.
-    fn check_later(
-        &mut self,
-        i: usize,
-        (cancel, read): (Cancel, crate::volumes::Read),
-        rewatched: Option<Time>,
-        from: Time,
-        replies: Vec<Sender<()>>,
-    ) {
-        let Some(mut keeper) = self.keepers[i].take() else {
-            answered(replies);
-            return;
-        };
-        self.openings += 1;
-        let generation = self.openings;
-        self.opening.insert(
-            i,
-            Opening {
-                since: from,
-                overflowed: false,
-                registered: self.registered,
-                generation,
-                check: Some(Check { rewatched, replies }),
-            },
-        );
-        let (system, shared, sender) = (
-            self.config.system,
-            Arc::clone(&self.shared_arc),
-            self.sender.clone(),
-        );
-        crate::serve::named("skwird-check", move || {
-            let current = refresh(&mut keeper, i, system, &shared, &cancel);
-            drop(read);
-            let _ = sender.send(Command::Opened {
-                root: i,
-                generation,
-                keeper: Some(Box::new(keeper)),
-                built: false,
-                current,
-            });
-        });
-    }
-
     /// Root `root` opened ([`Writing::open_later`]): its keeper taken in,
     /// heard whole from its mark on where it was proven current, what was
     /// held for it handled, its exclusions derived again (a registration
@@ -3161,9 +3123,7 @@ impl Writing<'_> {
     /// answered. Where what was held for it overflowed, it is checked
     /// before it is live, as after events dropped. One let go of meanwhile
     /// is let go of, and so is what a thread of an opening let go of gives
-    /// back late (`generation`), the same root found again meanwhile. A
-    /// kept volume's check ([`Writing::check_later`]) is taken in so too,
-    /// as [`Writing::check_root`] takes in its own, and its syncs answered.
+    /// back late (`generation`), the same root found again meanwhile.
     fn opened(
         &mut self,
         root: usize,
@@ -3183,7 +3143,7 @@ impl Writing<'_> {
             _ => return,
         };
         if !self.shared.is_alive(root) {
-            answered(opening.check.map(|c| c.replies).unwrap_or_default());
+            self.unpark(root);
             return;
         }
         self.keepers[root] = keeper.map(|k| *k);
@@ -3192,29 +3152,23 @@ impl Writing<'_> {
         if built {
             crate::memory::give_back();
         }
-        let replies = if let Some(check) = opening.check {
-            self.checked(root, check.rewatched, opening.since, current);
-            check.replies
-        } else {
-            let marked = self.marked.get(root).copied().flatten().is_some();
-            if let Some(keeper) = self.keepers[root].as_mut() {
-                if current && marked {
-                    keeper.heard_whole(opening.since);
+        let marked = self.marked.get(root).copied().flatten().is_some();
+        if let Some(keeper) = self.keepers[root].as_mut() {
+            if current && marked {
+                keeper.heard_whole(opening.since);
+            }
+            // Built or checked, what its journal says proves from now on;
+            // not resumed, the position its index kept holds no more.
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                if current {
+                    self.journals.unproven.remove(&root);
                 }
-                // Built or checked, what its journal says proves from now on;
-                // not resumed, the position its index kept holds no more.
-                #[cfg(any(windows, target_os = "macos"))]
-                {
-                    if current {
-                        self.journals.unproven.remove(&root);
-                    }
-                    if !self.journals.replaying.contains_key(&root) {
-                        keeper.set_position(None);
-                    }
+                if !self.journals.replaying.contains_key(&root) {
+                    keeper.set_position(None);
                 }
             }
-            Vec::new()
-        };
+        }
         if opening.overflowed
             && let Some(keeper) = self.keepers[root].as_mut()
         {
@@ -3225,7 +3179,6 @@ impl Writing<'_> {
             self.gather.overflowed(Instant::now());
         }
         self.publish(root);
-        answered(replies);
         self.replay_held();
         self.serve_heard();
         if self.registered != opening.registered {
