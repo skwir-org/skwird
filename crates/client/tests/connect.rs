@@ -18,34 +18,8 @@ use skwird_client::protocol::{
 };
 use skwird_client::{Client, Error, Find};
 
-/// A folder of the test's own under the user's cache, never `/tmp`
-/// (AGENTS.md, "Testing"): removed when dropped, by a test that failed
-/// too.
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new(label: &str) -> Dir {
-        let dir = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .unwrap()
-            .join("skwird-tests")
-            .join(format!("client-connect-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
-    }
-
-    fn join(&self, rel: &str) -> PathBuf {
-        self.0.join(rel)
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+mod common;
+use common::Scratch as Dir;
 
 /// An engine of the test's own at `socket`, for one connection: each
 /// request read is handed to `answer`, which writes what it says.

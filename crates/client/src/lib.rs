@@ -365,14 +365,21 @@ pub struct Client {
     silence: Option<Duration>,
     /// What its [`Stopper`] stops.
     stop: Arc<Stop>,
-    /// Set once the engine said nothing for `silence`: what it says after
-    /// would be read from the middle of a message, so the connection is
-    /// closed.
-    silent: bool,
-    /// Set once a read or a write failed otherwise: it may have stopped in
-    /// the middle of a message (a line cut short, or longer than a line may
-    /// be), so the connection is closed too.
-    broken: bool,
+    /// Set once a read or a write failed: what is read after would be read
+    /// from the middle of a message, so the connection is closed.
+    closed: Option<Closed>,
+}
+
+/// Why a connection was closed.
+#[cfg(any(unix, windows))]
+#[derive(Clone, Copy, Debug)]
+enum Closed {
+    /// The engine said nothing for its silence.
+    Silent,
+    /// A read or a write failed otherwise: it may have stopped in the
+    /// middle of a message (a line cut short, or longer than a line may
+    /// be).
+    Broken,
 }
 
 /// A connection to an engine, which this system does not make (rule 7):
@@ -597,8 +604,7 @@ impl Client {
             },
             silence,
             stop: Arc::clone(stop),
-            silent: false,
-            broken: false,
+            closed: None,
         };
         let id = c.ask(Ask::Hello(protocol::Hello {
             versions: vec![protocol::VERSION],
@@ -652,17 +658,15 @@ impl Client {
     #[cfg(any(unix, windows))]
     fn closed(&self) -> Option<Error> {
         if self.stop.stopped() {
-            Some(Error::Stopped)
-        } else if self.silent {
-            Some(Error::Silent(self.silence.unwrap_or_default()))
-        } else if self.broken {
-            Some(Error::Io(std::io::Error::new(
+            return Some(Error::Stopped);
+        }
+        self.closed.map(|why| match why {
+            Closed::Silent => Error::Silent(self.silence.unwrap_or_default()),
+            Closed::Broken => Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 "the connection was closed: a read or a write on it failed",
-            )))
-        } else {
-            None
-        }
+            )),
+        })
     }
 
     /// What a read or a write that failed means: a stop, the engine's
@@ -678,10 +682,10 @@ impl Client {
         if let (std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut, Some(d)) =
             (e.kind(), self.silence)
         {
-            self.silent = true;
+            self.closed = Some(Closed::Silent);
             return Error::Silent(d);
         }
-        self.broken = true;
+        self.closed = Some(Closed::Broken);
         Error::Io(e)
     }
 
@@ -855,16 +859,12 @@ impl Client {
         release: &[&str],
     ) -> Result<protocol::Volumes, Error> {
         let owned = |ids: &[&str]| ids.iter().map(|&id| id.to_owned()).collect();
-        let id = self.ask(Ask::Volumes {
+        self.ask_volumes(Ask::Volumes {
             keep: owned(keep),
             forget: owned(forget),
             release: owned(release),
             release_at: Vec::new(),
-        })?;
-        match self.answer(id)? {
-            Answer::Volumes(volumes) => Ok(volumes),
-            _ => Err(Error::Unexpected),
-        }
+        })
     }
 
     /// Release every kept volume mounted at or below each of `points`,
@@ -873,12 +873,17 @@ impl Client {
     /// held, or after a few seconds. The volumes this client keeps after,
     /// and those mounted.
     pub fn release_at(&mut self, points: &[&Path]) -> Result<protocol::Volumes, Error> {
-        let id = self.ask(Ask::Volumes {
+        self.ask_volumes(Ask::Volumes {
             keep: Vec::new(),
             forget: Vec::new(),
             release: Vec::new(),
             release_at: points.iter().map(|p| WirePath::of(p)).collect(),
-        })?;
+        })
+    }
+
+    /// `ask`, a [`Ask::Volumes`], asked and its answer awaited.
+    fn ask_volumes(&mut self, ask: Ask) -> Result<protocol::Volumes, Error> {
+        let id = self.ask(ask)?;
         match self.answer(id)? {
             Answer::Volumes(volumes) => Ok(volumes),
             _ => Err(Error::Unexpected),
@@ -1009,42 +1014,50 @@ fn program_on(program: &Path, path: Option<OsString>) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// A folder of a unit test's own, removed when dropped, by a test that
+/// failed too: under the user's cache, never `/tmp` (AGENTS.md,
+/// "Testing"); on Windows, under their local application data. The
+/// integration tests' is `tests/common`'s.
+#[cfg(test)]
+pub(crate) struct Scratch(pub(crate) PathBuf);
+
+#[cfg(test)]
+impl Scratch {
+    pub(crate) fn new(label: &str) -> Scratch {
+        let base = if cfg!(windows) {
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+        } else {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        };
+        let dir = base
+            .unwrap()
+            .join("skwird-tests")
+            .join(format!("client-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    pub(crate) fn join(&self, rel: &str) -> PathBuf {
+        self.0.join(rel)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::path::{Component, Path, PathBuf};
 
-    use super::{absolute, program_on};
-
-    /// A folder of the test's own, removed when dropped: under the user's
-    /// cache, never `/tmp` (AGENTS.md, "Testing"); on Windows, under their
-    /// local application data.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(label: &str) -> Scratch {
-            let base = if cfg!(windows) {
-                std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-            } else {
-                std::env::var_os("XDG_CACHE_HOME")
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            };
-            let dir = base
-                .unwrap()
-                .join("skwird-tests")
-                .join(format!("client-{label}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Scratch(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use super::{Scratch, absolute, program_on};
 
     /// The program a client starts on Windows is found as Windows would
     /// start it, an `.exe` where it has no extension, in the absolute
@@ -1053,7 +1066,7 @@ mod tests {
     #[test]
     fn a_program_is_found_on_the_path_alone() {
         let scratch = Scratch::new("program-on");
-        let (here, bin) = (scratch.0.join("here"), scratch.0.join("bin"));
+        let (here, bin) = (scratch.join("here"), scratch.join("bin"));
         for folder in [&here, &bin] {
             std::fs::create_dir_all(folder).unwrap();
             std::fs::write(folder.join("skwird.exe"), b"").unwrap();

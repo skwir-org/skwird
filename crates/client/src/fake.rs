@@ -320,37 +320,9 @@ impl Fake {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::Scratch as Dir;
     use crate::{Client, Find};
     use skwird_protocol::{Id, Instant, Kind, Match, NameTerm, Proof, Query, Why, WirePath};
-
-    /// A folder of the test's own under the user's cache, never `/tmp`
-    /// (AGENTS.md, "Testing"): removed when dropped, by a test that failed
-    /// too.
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(label: &str) -> Dir {
-            let dir = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-                .unwrap()
-                .join("skwird-tests")
-                .join(format!("{label}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Dir(dir)
-        }
-
-        fn join(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     /// A client asks the fake engine and gets what it was given: the
     /// coverage of the longest root, entries below the root asked.

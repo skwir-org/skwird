@@ -12,23 +12,20 @@ use skwird_client::fake::{Fake, Script};
 use skwird_client::protocol::{Query, WirePath};
 use skwird_client::{Client, Error, Find, Stopper};
 
-/// A folder of the test's own under the user's cache, never `/tmp`
-/// (AGENTS.md, "Testing"), removed when dropped; on Windows, a pipe's
+mod common;
+
+/// A folder of the test's own (`common::Scratch`); on Windows, a pipe's
 /// name of its own.
+#[cfg(unix)]
+struct Dir(common::Scratch);
+
+#[cfg(windows)]
 struct Dir(PathBuf);
 
 impl Dir {
     #[cfg(unix)]
     fn new(label: &str) -> Dir {
-        let dir = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .unwrap()
-            .join("skwird-tests")
-            .join(format!("client-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
+        Dir(common::Scratch::new(label))
     }
 
     #[cfg(windows)]
@@ -36,20 +33,21 @@ impl Dir {
         Dir(format!(r"\\.\pipe\skwird-test-{label}-{}", std::process::id()).into())
     }
 
+    /// Its folder; on Windows, its pipe's name.
+    fn path(&self) -> &Path {
+        #[cfg(unix)]
+        return &self.0.0;
+        #[cfg(windows)]
+        &self.0
+    }
+
     /// Where an engine of the test's answers.
     fn socket(&self) -> PathBuf {
         if cfg!(windows) {
-            self.0.clone()
+            self.path().to_path_buf()
         } else {
-            self.0.join("socket")
+            self.path().join("socket")
         }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -208,10 +206,10 @@ fn a_started_engine_waited_for_is_stopped_at_once() {
         // Ends at once, serving nothing.
         start: Some(PathBuf::from("true")),
         wait: Duration::from_secs(30),
-        runtime: Some(dir.0.clone()),
-        state: Some(dir.0.clone()),
+        runtime: Some(dir.path().to_path_buf()),
+        state: Some(dir.path().to_path_buf()),
         // Where an engine started with that runtime folder would serve.
-        ..find(&dir.0.join("skwird/socket"), None)
+        ..find(&dir.path().join("skwird/socket"), None)
     };
     let stopper = Stopper::new();
     let stopping = stop_soon(&stopper);

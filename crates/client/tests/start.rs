@@ -20,27 +20,12 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// A folder of the test's own under the user's cache, never `/tmp`
-/// (AGENTS.md, "Testing"): removed when dropped, by a test that failed
-/// too.
-struct Dir(PathBuf);
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+mod common;
 
 #[test]
 fn an_engine_started_runs_from_the_root_with_the_folders_given_and_is_reaped() {
-    let scratch = Dir(std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap()
-        .join("skwird-tests")
-        .join(format!("client-start-{}", std::process::id())));
+    let scratch = common::Scratch::new("start");
     let dir = &scratch.0;
-    let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     let program = dir.join("bin/engine");
     std::fs::write(
