@@ -359,10 +359,16 @@ impl Matcher {
                 };
                 forms.iter().any(|form| hay.contains(form.as_str()))
             }
+            // An ASCII name as it is: lowercasing it changes the case of its
+            // ASCII letters alone, which the glob ignores (globset's
+            // `(?-u)(?i)`), and it holds no ς to fold.
             How::Glob {
                 globs,
                 lowered: true,
-            } => globs.is_match(&folded(lowered(name))),
+            } => match std::str::from_utf8(name) {
+                Ok(text) if text.is_ascii() => globs.is_match(text),
+                _ => globs.is_match(&folded(lowered(name))),
+            },
             How::Glob {
                 globs,
                 lowered: false,

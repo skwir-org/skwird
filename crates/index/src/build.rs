@@ -28,8 +28,8 @@ pub fn facts(stat: &FolderStat) -> Facts {
 }
 
 /// The last name of a folder's path below the root, its bytes as the
-/// crawl gives names (`log::path_bytes`).
-fn last_name(crawled: &Crawled) -> std::borrow::Cow<'_, [u8]> {
+/// crawl gives names (`log::path_bytes`). The packer's too.
+pub(crate) fn last_name(crawled: &Crawled) -> std::borrow::Cow<'_, [u8]> {
     crawled
         .rel
         .file_name()
