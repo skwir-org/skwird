@@ -16,6 +16,16 @@ the day it is released.
   engine's folders checked it whole; on macOS, a sync waits at most the
   stream's 50 ms latency, not 0.5 s.
 - **macOS gives back the memory it freed** after a build, as Linux does.
+- **Windows maps its index** as Linux and macOS do: its own memory at
+  rest is 5.6 to 9.5 MB for a million entries on the runner, not 40 to
+  49.
+- **Removable volumes, on request:** a client keeps a volume by its
+  identity once its user said yes (`volumes`); a kept volume is indexed
+  whenever it is mounted, in the engine's cache, nothing written on it,
+  at the system's lowest I/O priority. Released before an eject, by its
+  identity or where it is mounted, it is answered once nothing of it is
+  held. On Linux, macOS and Windows; the system service keeps none. The
+  engine says so in its hello (`volumes`).
 
 ## 0.1.0 (2026-11-24)
 

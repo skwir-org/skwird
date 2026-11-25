@@ -2729,7 +2729,31 @@ program alone since, as a release builds it.
   2026-11-24: the six points it found are in it since (letting go
   before an eject, the engine's spelling of an identity, two volumes of
   one, the pace, block devices alone, nothing written on the volume).
-  DiskArbitration on macOS.
+  DiskArbitration on macOS. Built on 2026-11-25 on the three systems
+  (DESIGN, Protocol, "Removable volumes", as built on each), with what
+  skwir's session asked once it read the first: a release answered once
+  nothing of the volume is held, and a release by mount point
+  (`release_at`), which its eject asks.
+  - **Linux:** removable by sysfs (its flag, or a USB or SD card's bus),
+    named by udev's `by-uuid`; proven in the root tests' machine on a USB
+    stick QEMU emulates, plugged in through its monitor.
+  - **macOS:** removable by `DiskArbitration` (not inside the machine,
+    removable media, or a disk image), named by its volume's UUID;
+    mounts followed by a kqueue. Tried on the runner on a FAT disk image.
+  - **Windows:** removable by its drive or its disk's bus (USB, SD, a
+    virtual disk), named by FAT's serial or the volume's GUID; volumes and
+    a kept volume's removal heard by `CM_Register_Notification`. Tried on
+    the runner on a FAT32 virtual disk mounted at a folder, which found
+    two things a root on FAT needs: a root that is a volume's mount point
+    opened through it, and the identity and path FAT keeps where it keeps
+    no file id of 128 bits, nor a normalized path.
+  - **Not tried:** an eject asked from Windows' taskbar, which a test
+    cannot ask; a volume twice of one identity, on a machine (the plan is
+    tested alone); the reads' lowest priority but Linux's idle class,
+    whose test a thread asks of itself.
+  - **skwir's side** waits for this on main: its eject asks
+    `release_at` of a running engine that says `volumes`, and it asks its
+    user once a volume whether to keep it.
 
 ## Later
 
