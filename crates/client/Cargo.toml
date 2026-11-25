@@ -13,13 +13,20 @@ description = "skwird's client: finds or starts an engine, and asks it; and a fa
 [dependencies]
 skwird-protocol = { path = "../protocol", version = "0.1.0" }
 
-# Its pipes on Windows (phase 4): a version skwir's lockfile already
-# holds.
+# A connect that does not wait on Linux, which holds one while the
+# engine's queue is full (`connect_to`): a version skwir's lockfile
+# already holds. `fs` besides `net`: rustix 1.1.5 builds `net` alone on
+# Linux only with it (1.1.6 does without).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["fs", "net"] }
+
 # The user's own temporary folder on macOS (`confstr`), where its engine's
 # socket is: a version skwir's lockfile already holds.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
 
+# Its pipes on Windows (phase 4): a version skwir's lockfile already
+# holds.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",

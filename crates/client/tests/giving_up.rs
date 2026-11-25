@@ -210,7 +210,8 @@ fn a_started_engine_waited_for_is_stopped_at_once() {
         wait: Duration::from_secs(30),
         runtime: Some(dir.0.clone()),
         state: Some(dir.0.clone()),
-        ..find(&dir.socket(), None)
+        // Where an engine started with that runtime folder would serve.
+        ..find(&dir.0.join("skwird/socket"), None)
     };
     let stopper = Stopper::new();
     let stopping = stop_soon(&stopper);
