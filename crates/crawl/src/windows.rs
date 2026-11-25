@@ -56,9 +56,9 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileBasicInfo, FileIdInfo,
-    GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_NAME_OPENED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileBasicInfo,
+    FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
     GetVolumeInformationByHandleW, OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
@@ -818,14 +818,18 @@ fn opened_kind(handle: &Handle, attributes: u32) -> Folder {
 
 /// A folder's own facts, through its handle, and its attributes.
 fn stat_of(handle: &Handle) -> std::io::Result<(FolderStat, u32)> {
-    let id: FILE_ID_INFO = info(handle, FileIdInfo)?;
+    // FAT and exFAT keep no file id of 128 bits (`FileIdInfo` is refused
+    // there, as a kept removable volume found on the runner): the index of
+    // 64 bits and the volume's serial its handle gives, for every folder of
+    // such a volume alike.
+    let (volume, ino) = match info::<FILE_ID_INFO>(handle, FileIdInfo) {
+        Ok(id) => (id.VolumeSerialNumber, low_bits(&id.FileId.Identifier)),
+        Err(_) => index_of(handle)?,
+    };
     let basic: FILE_BASIC_INFO = info(handle, FileBasicInfo)?;
     let stat = FolderStat {
-        id: FileId {
-            dev: id.VolumeSerialNumber,
-            ino: low_bits(&id.FileId.Identifier),
-        },
-        mount: id.VolumeSerialNumber,
+        id: FileId { dev: volume, ino },
+        mount: volume,
         ctime: time(basic.ChangeTime),
         mtime: time(basic.LastWriteTime),
         // No owner, group or mode bits on Windows: its security
@@ -835,6 +839,24 @@ fn stat_of(handle: &Handle) -> std::io::Result<(FolderStat, u32)> {
         mode: 0,
     };
     Ok((stat, basic.FileAttributes))
+}
+
+/// The volume's serial and the file's index, as `GetFileInformationByHandle`
+/// gives them, where no file id of 128 bits is kept.
+fn index_of(handle: &Handle) -> std::io::Result<(u64, u64)> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // SAFETY: an all-zero structure is a valid one, for the call to fill.
+    let mut by: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a handle of ours, and the structure, written for the call.
+    if unsafe { GetFileInformationByHandle(handle.0, &raw mut by) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        u64::from(by.dwVolumeSerialNumber),
+        (u64::from(by.nFileIndexHigh) << 32) | u64::from(by.nFileIndexLow),
+    ))
 }
 
 /// The 64 bits of a 128-bit file id that NTFS gives (its file reference).
@@ -860,6 +882,13 @@ pub(crate) fn time(filetime: i64) -> Time {
 /// The path of what `handle` opened within its volume, links resolved:
 /// what it is, whatever name opened it.
 fn final_path(handle: &Handle) -> Option<Vec<u16>> {
+    // FAT refuses the normalized name (`ERROR_INVALID_PARAMETER`), as a
+    // kept removable volume's root found on the runner: the name it was
+    // opened by, which a FAT volume's root keeps alike.
+    final_path_as(handle, FILE_NAME_NORMALIZED).or_else(|| final_path_as(handle, FILE_NAME_OPENED))
+}
+
+fn final_path_as(handle: &Handle, how: u32) -> Option<Vec<u16>> {
     let mut buffer = vec![0u16; 512];
     loop {
         // SAFETY: the buffer and its length in units; the count returned
@@ -869,7 +898,7 @@ fn final_path(handle: &Handle) -> Option<Vec<u16>> {
                 handle.0,
                 buffer.as_mut_ptr(),
                 u32::try_from(buffer.len()).unwrap_or(u32::MAX),
-                FILE_NAME_NORMALIZED | VOLUME_NAME_NONE,
+                how | VOLUME_NAME_NONE,
             )
         } as usize;
         if written == 0 {
