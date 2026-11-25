@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -235,21 +235,44 @@ pub fn answer<S: BuildHasher>(
 /// Where a kept volume's index is: in the engine's cache, named by its
 /// identity's hash, never on the volume.
 pub fn index_dir(dirs: &Dirs, id: &str) -> PathBuf {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in id.as_bytes() {
-        hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
-    }
+    let hash = crate::engine::fnv1a(id.as_bytes());
     dirs.cache.join(format!("volume-{hash:016x}"))
-}
-
-/// Whether `path` is where a volume of `seen` is mounted.
-pub fn is_mounted_at(seen: &[Removable], path: &Path) -> bool {
-    seen.iter().any(|s| s.point == path)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    /// The cache's folders keep the names they had: a change of the hash,
+    /// or of a path's bytes, would leave every index behind, built again.
+    #[test]
+    fn the_cache_folders_keep_their_names() {
+        let at = |p: &str| PathBuf::from(p);
+        let dirs = Dirs {
+            home: at("home"),
+            runtime: at("run"),
+            cache: at("cache"),
+            config: at("config"),
+            state: at("state"),
+            #[cfg(windows)]
+            pipe: None,
+        };
+        assert_eq!(
+            index_dir(&dirs, "1234-ABCD"),
+            dirs.cache.join("volume-a8927c094c06269c")
+        );
+        #[cfg(unix)]
+        let (root, name) = ("/home/someone", "index-74f8cd01d1f3b37a");
+        #[cfg(windows)]
+        let (root, name) = (r"C:\Users\someone", "index-bcbe655683e627d4");
+        assert_eq!(
+            crate::engine::index_dir(&dirs, Path::new(root)),
+            dirs.cache.join(name)
+        );
+        assert_eq!(crate::engine::fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+    }
 
     fn seen(id: Option<&str>, point: &str) -> Removable {
         Removable {

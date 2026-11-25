@@ -615,23 +615,22 @@ fn pause(wait: std::time::Duration, cancel: &Cancel) {
 }
 
 /// Where a root's index is kept: a folder named by its path's hash, of
-/// its bytes as the system names it (on Windows, its WTF-8: std's own
-/// encoding is not promised, and a change of it would rename every
-/// index).
+/// its bytes as the system names it (on Windows, its WTF-8, as the wire
+/// carries it: std's own encoding is not promised, and a change of it
+/// would rename every index).
 pub fn index_dir(dirs: &Dirs, root: &Path) -> PathBuf {
-    #[cfg(windows)]
-    let bytes = {
-        let mut bytes = Vec::new();
-        skwird_crawl::wtf8::push(root, &mut bytes);
-        bytes
-    };
-    #[cfg(unix)]
-    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(root.as_os_str()).to_vec();
+    let hash = fnv1a(&skwird_protocol::WirePath::of(root).0);
+    dirs.cache.join(format!("index-{hash:016x}"))
+}
+
+/// The 64-bit FNV-1a of `bytes`, which names the folders of the engine's
+/// cache: never changed, or every index would be left behind.
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
+    for &b in bytes {
         hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
     }
-    dirs.cache.join(format!("index-{hash:016x}"))
+    hash
 }
 
 /// A line of the engine's log: counts, sizes and times, never a name or a
@@ -1257,7 +1256,7 @@ impl Writing<'_> {
                 release_at,
                 reply,
             } => {
-                let answered = self.volumes_asked(&client, &keep, &forget, (&release, &release_at));
+                let answered = self.volumes_asked(&client, &keep, &forget, &release, &release_at);
                 let _ = reply.send(answered);
             }
             Command::Watch {
@@ -1946,8 +1945,13 @@ impl Writing<'_> {
         #[cfg(not(any(windows, target_os = "macos")))]
         let rewatched: Option<Time> = None;
         let from = Time::now();
-        if self.volume_roots.values().any(|v| v.root == i) {
-            self.check_later(i, rewatched, from, replies);
+        let volume = self
+            .volume_roots
+            .values()
+            .find(|v| v.root == i)
+            .map(|v| (v.cancel.clone(), v.reading.begin()));
+        if let Some((cancel, read)) = volume {
+            self.check_later(i, (cancel, read), rewatched, from, replies);
             return;
         }
         if let Some(keeper) = self.keepers[i].as_mut() {
@@ -2169,7 +2173,6 @@ impl Writing<'_> {
         if self.config.system {
             return;
         }
-        let now = Instant::now();
         // One listing that fails says nothing of what is mounted: what was
         // seen last stands, or every kept volume would be let go of.
         match skwird_crawl::removable::mounted() {
@@ -2178,6 +2181,12 @@ impl Writing<'_> {
                 "the volumes mounted cannot be listed, so as last seen: {e}"
             )),
         }
+        self.follow_seen();
+    }
+
+    /// [`Writing::volumes_followed`] by the volumes as last listed.
+    fn follow_seen(&mut self) {
+        let now = Instant::now();
         // A release ends as its volume is seen unmounted.
         let seen = &self.volumes.seen;
         self.volumes.released.retain(|id, until| {
@@ -2365,12 +2374,16 @@ impl Writing<'_> {
         client: &str,
         keep: &[String],
         forget: &[String],
-        (release, release_at): (&[String], &[PathBuf]),
+        release: &[String],
+        release_at: &[PathBuf],
     ) -> Result<Released, String> {
         if self.config.system {
             return Err("the system service keeps no removable volume".into());
         }
-        skwird_crawl::removable::mounted()?;
+        // Listed once, before anything is changed: a listing that fails
+        // fails the request, and what it releases at a point is what is
+        // mounted there now.
+        self.volumes.seen = skwird_crawl::removable::mounted()?;
         if crate::volumes::changed(&mut self.volumes.kept, client, keep, forget) {
             save_registered(&self.config.dirs, crate::volumes::FILE, &self.volumes.kept);
         }
@@ -2410,7 +2423,7 @@ impl Writing<'_> {
                 self.volumes.released.insert(id.clone(), until);
             }
         }
-        self.volumes_followed();
+        self.follow_seen();
         // The reads this answer waits for: of what it released or forgot.
         // What was let go of otherwise (unmounted, removed) is none of its.
         let ours = |id: &str| {
@@ -3005,22 +3018,19 @@ impl Writing<'_> {
         self.hold_volume(i, &path);
         // A kept volume: its index by its identity, its reading cancelled
         // apart, read at its pace (`crate::volumes`).
-        let volume = self
-            .volume_roots
-            .iter()
-            .find(|(_, v)| v.root == i)
-            .map(|(id, v)| {
-                (
-                    crate::volumes::index_dir(&self.config.dirs, id),
-                    v.cancel.clone(),
-                    v.reading.begin(),
-                )
-            });
-        let paced = volume.is_some();
-        let (dir, own_cancel, read) = match volume {
-            Some((dir, cancel, read)) => (dir, Some(cancel), Some(read)),
-            None => (index_dir(&self.config.dirs, &path), None, None),
+        let (dir, cancel, read) = match self.volume_roots.iter().find(|(_, v)| v.root == i) {
+            Some((id, v)) => (
+                crate::volumes::index_dir(&self.config.dirs, id),
+                v.cancel.clone(),
+                Some(v.reading.begin()),
+            ),
+            None => (
+                index_dir(&self.config.dirs, &path),
+                self.cancel.clone(),
+                None,
+            ),
         };
+        let paced = read.is_some();
         self.openings += 1;
         let generation = self.openings;
         self.opening.insert(
@@ -3034,11 +3044,7 @@ impl Writing<'_> {
             },
         );
         let (config, shared) = (self.config.clone(), Arc::clone(&self.shared_arc));
-        let (mut opts, cancel, sender) = (
-            self.opts.clone(),
-            own_cancel.unwrap_or_else(|| self.cancel.clone()),
-            self.sender.clone(),
-        );
+        let (mut opts, sender) = (self.opts.clone(), self.sender.clone());
         opts.background = paced;
         // Heard whole once marked (the system service): an index read back
         // is checked first. A user's engine hears its scopes alone.
@@ -3049,11 +3055,10 @@ impl Writing<'_> {
         let resumed = self.journals.replaying.contains_key(&i);
         #[cfg(not(any(windows, target_os = "macos")))]
         let resumed = false;
+        // A read of a kept volume, begun before this thread was made, is
+        // ended before what it read is sent: the writer, taking it in, knows
+        // it ended (`Writing::forgotten_removed`).
         crate::serve::named("skwird-open", move || {
-            // A read of a kept volume, begun before this thread was made,
-            // ended before what it read is sent: the writer, taking it in,
-            // knows it ended (`Writing::forgotten_removed`).
-            let read = read;
             if paced {
                 pause(crate::volumes::PAUSE, &cancel);
                 // Released meanwhile: nothing of it is opened.
@@ -3105,28 +3110,20 @@ impl Writing<'_> {
     /// never for the writer, which answers meanwhile. Its keeper is the
     /// thread's until it comes back as [`Command::Opened`]: what is heard of
     /// it meanwhile is held, its syncs wait, and `replies` are answered
-    /// then. Begun at `from`, its tree watched again first from `rewatched`.
+    /// then. Begun at `from`, its tree watched again first from `rewatched`,
+    /// with its volume's cancel and the read of it begun.
     fn check_later(
         &mut self,
         i: usize,
+        (cancel, read): (Cancel, crate::volumes::Read),
         rewatched: Option<Time>,
         from: Time,
         replies: Vec<Sender<()>>,
     ) {
-        let Some((cancel, reading)) = self
-            .volume_roots
-            .values()
-            .find(|v| v.root == i)
-            .map(|v| (v.cancel.clone(), Arc::clone(&v.reading)))
-        else {
-            answered(replies);
-            return;
-        };
         let Some(mut keeper) = self.keepers[i].take() else {
             answered(replies);
             return;
         };
-        let read = reading.begin();
         self.openings += 1;
         let generation = self.openings;
         self.opening.insert(
@@ -3179,15 +3176,11 @@ impl Writing<'_> {
         if !self.volumes.forgetting.is_empty() {
             self.forgotten_removed();
         }
-        if self
-            .opening
-            .get(&root)
-            .is_none_or(|o| o.generation != generation)
-        {
-            return;
-        }
-        let Some(opening) = self.opening.remove(&root) else {
-            return;
+        let opening = match self.opening.entry(root) {
+            std::collections::hash_map::Entry::Occupied(o) if o.get().generation == generation => {
+                o.remove()
+            }
+            _ => return,
         };
         if !self.shared.is_alive(root) {
             answered(opening.check.map(|c| c.replies).unwrap_or_default());

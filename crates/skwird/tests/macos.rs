@@ -619,7 +619,7 @@ fn a_kept_disk_image_is_a_root_while_it_is_attached() {
     attach();
     std::fs::write(at.join(".metadata_never_index"), b"").unwrap();
     std::fs::write(at.join("on the stick.txt"), b"x").unwrap();
-    let at = std::fs::canonicalize(&at).unwrap();
+    let at = skwird_crawl::canonical(&at).unwrap();
     env.engine(60);
     let mut c = env.client();
     assert!(
