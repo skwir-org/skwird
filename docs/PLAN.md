@@ -48,8 +48,8 @@ first release"): Linux's four packages, Windows' and macOS' programs,
 and a Homebrew formula built from its source. 0.2.0 was made on
 2026-11-25, after a review of two rounds (below, "The review before
 0.2"): names in skwir's three forms, removable volumes on request,
-Windows' index mapped, a Home Manager module; its draft is the user's to
-publish.
+Windows' index mapped, a Home Manager module; it was published the same
+day, with skwir 0.7.0.
 
 ## Phase 0: measure (done)
 
@@ -2921,7 +2921,7 @@ for a reason of its own:
   - skwir.org's repositories and their signing, skwir's release tools'
     work, beside skwir's own packages;
   - publishing to the AUR and nixpkgs, each the user's to do or ask (a
-    release's tag, notes and assets are 0.1.0's since 2026-11-24, and
+    release's tag, notes and assets are 0.2.0's since 2026-11-25, and
     Homebrew's formula with them: above, "The first release");
   - winget, once Windows' engine is proven on a Windows machine (phase
     4, paused).

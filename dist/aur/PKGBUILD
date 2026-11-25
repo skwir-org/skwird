@@ -20,7 +20,8 @@ depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 install=skwird.install
 source=("$pkgname-$pkgver.tar.gz::$_repo/archive/v$pkgver.tar.gz")
-# Filled when a release is tagged.
+# The AUR's copy takes the tag's archive's (updpkgsums). Here it stays
+# SKIP: tools/package/aur.sh builds an archive of this tree instead.
 sha256sums=('SKIP')
 
 prepare() {

@@ -54,4 +54,6 @@ the draft.
 - The Homebrew formula (`skwir-org/homebrew-tap`) takes the release's
   source: its URL and checksum.
 - The AUR's PKGBUILD is published, and nixpkgs is asked: the
-  maintainer's to do or ask.
+  maintainer's to do or ask. The AUR's copy takes the checksum of the
+  tag's archive (`updpkgsums`); the repository's keeps `SKIP`, which
+  `tools/package/aur.sh` needs, building an archive of the tree.
