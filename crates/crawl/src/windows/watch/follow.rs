@@ -21,14 +21,18 @@
 //! - **What ends it:** a journal that dropped records past the position
 //!   (`ERROR_JOURNAL_ENTRY_DELETED`) is an overflow, and reading goes on
 //!   from its next record; a journal deleted, or made again, ends the
-//!   watch ([`Heard::Lost`]).
+//!   watch ([`Heard::Lost`]). So does the root's folder no longer where it
+//!   was ([`super::Place`]), asked once a batch renames or removes a
+//!   folder: its records' folders' paths would never be below the root's
+//!   again, and nothing heard.
+//! - **A batch the follower cannot read whole** (a record cut short, of a
+//!   version not known) is an overflow: the position moves past it.
 //!
 //! A volume with no journal is given one ([`JOURNAL_SIZE`]), as Everything
 //! gives one: the journal is the volume's, kept by NTFS whatever reads it.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{OsString, c_void};
-use std::os::windows::ffi::OsStringExt;
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,9 +42,8 @@ use windows_sys::Win32::Foundation::{
     HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
@@ -48,10 +51,15 @@ use windows_sys::Win32::System::IO::{
 use windows_sys::Win32::System::Ioctl::{FSCTL_READ_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0};
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
 
-use super::{Asked, Heard, Queue, event};
+use super::{Asked, Heard, Place, Queue, event, final_dos};
 use crate::windows::journal::{self, Position, Volume};
 use crate::windows::security::open_by_id;
-use crate::windows::{Handle, plain, verbatim};
+use crate::windows::{Handle, verbatim};
+
+/// `USN_REASON_*`: a name removed, a name given, a file deleted.
+const RENAME_OLD_NAME: u32 = 0x0000_1000;
+const RENAME_NEW_NAME: u32 = 0x0000_2000;
+const FILE_DELETE: u32 = 0x0000_0200;
 
 /// The journal a volume is given where it has none: 32 MiB, grown and cut
 /// by 8 MiB, as `fsutil` suggests for a volume of a few hundred thousand
@@ -66,10 +74,17 @@ pub(super) struct Follower {
     reads: Handle,
     /// The root's folder, which folders are opened through by identity.
     hint: Handle,
+    /// Where the root's folder was as it began to be followed.
+    place: Place,
+    /// Whether its volume is NTFS, whose first records are its metadata.
+    ntfs: bool,
     done: Handle,
     ov: Box<OVERLAPPED>,
     input: Box<READ_USN_JOURNAL_DATA_V0>,
     buffer: Vec<u64>,
+    /// Whether a read is asked and not yet done: cancelled, and waited
+    /// for, as the follower is dropped.
+    pending: bool,
     position: Position,
     /// Where the journal was as it started, while what came before it is
     /// replayed from a position kept: none once read past it, or where it
@@ -81,6 +96,21 @@ pub(super) struct Follower {
 // SAFETY: moved once, to the thread that reads, and used by it alone
 // after; the structures and the buffer stay at their places, boxed.
 unsafe impl Send for Follower {}
+
+impl Drop for Follower {
+    fn drop(&mut self) {
+        if self.pending {
+            let mut moved = 0u32;
+            // SAFETY: the pending call's own structure, input and buffer,
+            // alive until its cancel has landed, which the wait for its
+            // result waits for; the handles closed after, with the fields.
+            unsafe {
+                CancelIoEx(self.reads.0, &raw const *self.ov);
+                GetOverlappedResult(self.reads.0, &raw const *self.ov, &raw mut moved, 1);
+            }
+        }
+    }
+}
 
 impl Follower {
     /// Follow the journal of the volume holding the root at `root`, the
@@ -115,15 +145,19 @@ impl Follower {
         if hint == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error());
         }
+        let hint = Handle(hint);
         Ok(Follower {
             volume,
             reads,
-            hint: Handle(hint),
+            place: Place::of(&hint),
+            ntfs: crate::windows::filesystem(&hint) == "NTFS",
+            hint,
             done: event()?,
             // SAFETY: an all-zero structure is a valid one, before its event.
             ov: Box::new(unsafe { std::mem::zeroed() }),
             input: Box::default(),
             buffer: vec![0u64; 8 * 1024],
+            pending: false,
             position: kept.filter(|k| k.holds(&found)).unwrap_or(Position {
                 journal: found.id,
                 next: found.next,
@@ -179,7 +213,8 @@ impl Follower {
             )
         };
         // SAFETY: no argument.
-        ok != 0 || unsafe { GetLastError() } == ERROR_IO_PENDING
+        self.pending = ok != 0 || unsafe { GetLastError() } == ERROR_IO_PENDING;
+        self.pending
     }
 
     /// The path of the folder of identity `id`, opened through the root's
@@ -195,42 +230,33 @@ impl Follower {
             ) => return Ok(None),
             Err(other) => return Err(other),
         };
-        let mut buffer = vec![0u16; 512];
-        loop {
-            // SAFETY: the buffer and its length in units; the count returned
-            // says how much was written, or how much is needed.
-            let written = unsafe {
-                GetFinalPathNameByHandleW(
-                    folder.0,
-                    buffer.as_mut_ptr(),
-                    u32::try_from(buffer.len()).unwrap_or(u32::MAX),
-                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-                )
-            } as usize;
-            if written == 0 {
-                // SAFETY: no argument.
-                return Err(unsafe { GetLastError() });
-            }
-            if written < buffer.len() {
-                buffer.truncate(written);
-                return Ok(Some(plain(Path::new(&OsString::from_wide(&buffer)))));
-            }
-            buffer.resize(written + 1, 0);
-        }
+        final_dos(&folder).map(Some)
     }
 
-    /// What a batch of records says of root `scope` at `root`: each entry
-    /// once, in the order heard; an overflow at the end if a folder could
-    /// not be told.
-    fn heard(&self, records: &[journal::Record], scope: usize, root: &Path) -> Vec<Heard> {
+    /// What a batch of records says of root `scope` at `root`, `whole`
+    /// where every record of it was read: each entry once, in the order
+    /// heard; an overflow at the end if a folder could not be told, or a
+    /// record not read. And whether the root's folder is no longer where
+    /// it was, asked where a folder was renamed or removed: its watch then
+    /// ends, its path leading to nothing heard.
+    fn heard(
+        &self,
+        records: &[journal::Record],
+        whole: bool,
+        scope: usize,
+        root: &Path,
+    ) -> (Vec<Heard>, bool) {
         let mut folders: HashMap<u128, Option<PathBuf>> = HashMap::new();
         let mut said = HashSet::new();
         let mut out = Vec::new();
-        let mut doubt = false;
+        let mut doubt = !whole;
+        let moved = records.iter().any(|r| {
+            r.is_folder() && r.reason & (RENAME_OLD_NAME | RENAME_NEW_NAME | FILE_DELETE) != 0
+        }) && self.place.moved(&self.hint);
         for r in records {
             // The volume's metadata (`$Extend` and the like), below no root:
             // never opened, as a folder of it is no one's to open.
-            if is_metadata(r.parent) {
+            if self.ntfs && is_metadata(r.parent) {
                 continue;
             }
             let folder = if let Some(known) = folders.get(&r.parent) {
@@ -255,13 +281,17 @@ impl Follower {
         if doubt {
             out.push(Heard::Overflow { scope });
         }
-        out
+        if moved {
+            out.push(Heard::Lost { scope });
+        }
+        (out, moved)
     }
 }
 
-/// Whether the file `id` names is the volume's metadata: one of the first
-/// sixteen records but the root folder's (`$MFT`, `$Extend`…), which no
-/// root holds.
+/// Whether the file `id` names is an NTFS volume's metadata: one of the
+/// first sixteen records but the root folder's (`$MFT`, `$Extend`…), which
+/// no root holds. Asked of NTFS's references alone: `ReFS`'s 128-bit ids
+/// follow no such rule.
 fn is_metadata(id: u128) -> bool {
     let number = id & 0x0000_FFFF_FFFF_FFFF;
     number < 16 && number != 5
@@ -305,19 +335,15 @@ pub(super) fn run(
             queue.push(due(&mut held, f.position.next));
             continue;
         }
-        let mut moved = 0u32;
         if woken == WAIT_OBJECT_0 {
-            // SAFETY: the pending call's own structure, alive until its
-            // cancel has landed, which the wait for its result waits for.
-            unsafe {
-                CancelIoEx(f.reads.0, &raw const *f.ov);
-                GetOverlappedResult(f.reads.0, &raw const *f.ov, &raw mut moved, 1);
-            }
+            // The read pending is cancelled as the follower is dropped.
             return;
         }
         reads.fetch_add(1, Ordering::Relaxed);
+        let mut moved = 0u32;
         // SAFETY: the call's own structure, done.
         let ok = unsafe { GetOverlappedResult(f.reads.0, &raw const *f.ov, &raw mut moved, 1) };
+        f.pending = false;
         if ok == 0 {
             // SAFETY: no argument.
             if unsafe { GetLastError() } != ERROR_JOURNAL_ENTRY_DELETED {
@@ -339,7 +365,12 @@ pub(super) fn run(
             queue.push(due(&mut held, f.position.next));
         } else {
             let bytes = &crate::windows::bytemuck(&f.buffer)[..moved as usize];
-            let mut said = f.heard(&journal::records(bytes), scope, root);
+            let (records, whole) = journal::records_whole(bytes);
+            let (mut said, lost) = f.heard(&records, whole, scope, root);
+            if lost {
+                queue.push(said);
+                return;
+            }
             if let Some(next) = journal::next_of(bytes) {
                 f.position.next = next;
             }

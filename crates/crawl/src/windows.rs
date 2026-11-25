@@ -74,11 +74,18 @@ use crate::{
 const DRIVE_REMOTE: u32 = 4;
 /// The reparse tags of what is a link: a symbolic link, a junction or a
 /// volume's mount point (told apart by their target), a link made by
-/// Linux's subsystem, an app's alias.
+/// Linux's subsystem, an app's alias; and any other a name surrogate
+/// ([`NAME_SURROGATE`]).
 pub(crate) const TAG_MOUNT_POINT: u32 = 0xA000_0003;
+#[cfg(test)]
 const TAG_SYMLINK: u32 = 0xA000_000C;
+#[cfg(test)]
 const TAG_LX_SYMLINK: u32 = 0xA000_001D;
 const TAG_APPEXECLINK: u32 = 0x8000_001B;
+/// A reparse tag's bit saying it names another entry, as a link does
+/// (`IsReparseTagNameSurrogate`): a symbolic link, a junction, Linux's
+/// links, a container's links, whatever tag a driver adds.
+const NAME_SURROGATE: u32 = 0x2000_0000;
 /// Asks a reparse point for its data (`winioctl.h`).
 const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
 /// The longest name an open takes, in UTF-16 units, well below the
@@ -1097,8 +1104,9 @@ fn folder_kind(attributes: u32, tag: u32, volume: impl FnOnce() -> bool) -> Fold
         match tag {
             // A junction, or a volume mounted there: its target tells.
             TAG_MOUNT_POINT if volume() => return Folder::NotCovered(Why::Mount),
-            // A link of any kind; Wine gives no tag.
-            0 | TAG_MOUNT_POINT | TAG_SYMLINK | TAG_LX_SYMLINK | TAG_APPEXECLINK => {
+            // A link of any kind, by its tag's bit; an app's alias; Wine
+            // gives no tag.
+            t if t == 0 || t == TAG_APPEXECLINK || t & NAME_SURROGATE != 0 => {
                 return Folder::Link;
             }
             // A filter driver's: what it holds is told as any folder's.
@@ -1469,10 +1477,13 @@ mod tests {
             Folder::Link,
             "a junction"
         );
-        for tag in [0, TAG_SYMLINK, TAG_LX_SYMLINK, TAG_APPEXECLINK] {
+        // A container layer's link (`WCI_LINK`), a name surrogate no list
+        // named; a deduplicated folder's (`DEDUP`), none.
+        for tag in [0, TAG_SYMLINK, TAG_LX_SYMLINK, TAG_APPEXECLINK, 0xA000_0027] {
             // A link stays a link, its target fetched or not.
             assert_eq!(folder_kind(reparse | on_open, tag, never), Folder::Link);
         }
+        assert_eq!(folder_kind(reparse, 0x8000_0013, never), Folder::Entered);
     }
 
     /// A file time is an instant since 1970, 100 ns at a time.

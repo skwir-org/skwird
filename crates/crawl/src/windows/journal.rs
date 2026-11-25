@@ -105,21 +105,27 @@ impl Record {
 /// which [`next_of`] reads): each by its own length, its name by its own
 /// offset. A record cut short, or of a version not known, ends them.
 pub fn records(buffer: &[u8]) -> Vec<Record> {
+    records_whole(buffer).0
+}
+
+/// [`records`], and whether they are all the buffer holds: none cut
+/// short, none of a version not known, nothing left after the last.
+pub fn records_whole(buffer: &[u8]) -> (Vec<Record>, bool) {
     let mut out = Vec::new();
     let mut at = 8;
     while let Some(head) = buffer.get(at..at + 8) {
         let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
         let major = u16::from_le_bytes([head[4], head[5]]);
         let Some(bytes) = buffer.get(at..at + len).filter(|_| len >= 8) else {
-            break;
+            return (out, false);
         };
         let Some(record) = record(bytes, major) else {
-            break;
+            return (out, false);
         };
         out.push(record);
         at += len;
     }
-    out
+    (out, at >= buffer.len())
 }
 
 /// The next position a buffer's first 8 bytes say: the journal's next
@@ -558,6 +564,13 @@ mod tests {
         assert!(read[1].is_folder());
         let cut = &buffer[..buffer.len() - 4];
         assert_eq!(records(cut).len(), 1, "the record cut short is not read");
+        assert!(records_whole(&buffer).1, "read whole");
+        assert!(!records_whole(cut).1, "the record cut short is said");
+        let mut unknown = buffer.clone();
+        unknown.extend(raw(4, 1, 2, 11, 0, false, "v4"));
+        assert_eq!(records_whole(&unknown).0.len(), 2);
+        assert!(!records_whole(&unknown).1, "a version not known is said");
+        assert!(records_whole(&77_i64.to_le_bytes()).1, "no record: whole");
     }
 
     /// A position kept is used only where its journal still holds it.

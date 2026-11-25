@@ -11,7 +11,15 @@
 //!   is an overflow of that root ([`Heard::Overflow`]): nothing heard there
 //!   proves anything until a check.
 //! - A watch that ends (its folder removed, its volume taken away) says so
-//!   ([`Heard::Lost`]): the root is no longer heard.
+//!   ([`Heard::Lost`]): the root is no longer heard. So does a root whose
+//!   folder is no longer where it was ([`Place`]): renamed or moved, its
+//!   handle still tells what changes below it, but its path leads to none
+//!   of it. Its own rename is told in its parent alone, whose folders'
+//!   names are heard too; a folder above renamed, at the next change below
+//!   it.
+//! - A name may be told by its short form (`LONGFO~1`), the index knowing
+//!   its long one alone: each that may be one is found, and said by its
+//!   long name ([`long_names`]).
 //! - A cookie asked of a root ([`Watcher::cookie`]) is said by the root's
 //!   own thread ([`Heard::Cookie`]), in its turn after every change below
 //!   it before it: the sync barrier of every root, with no file made. NTFS
@@ -24,13 +32,14 @@
 //!   server reading the host's inotify: no cookie is asked there
 //!   ([`told_in_turn`]), and a sync checks.
 //!
-//! The root's folder is held open while it is watched, which AGENTS.md's
-//! "Hold nothing of a filesystem between reads" forbids elsewhere: opened
-//! to share reading, writing and deletion, it stops no rename or removal.
+//! The root's folder, and its parent's, are held open while it is watched,
+//! which AGENTS.md's "Hold nothing of a filesystem between reads" forbids
+//! elsewhere: opened to share reading, writing and deletion, they stop no
+//! rename or removal.
 
 use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -207,45 +216,41 @@ impl Watcher {
 
     /// Hear every change below the root `scope` at `path` from now on.
     pub fn watch_root(&self, scope: usize, path: &Path) -> std::io::Result<()> {
-        let name = verbatim(path);
-        // SAFETY: a NUL-terminated name alive for the call, no security
-        // attributes, no template; the handle given is ours to close.
-        let dir = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                FILE_LIST_DIRECTORY,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                std::ptr::null_mut(),
-            )
-        };
-        if dir == INVALID_HANDLE_VALUE {
-            return Err(std::io::Error::last_os_error());
-        }
+        let stop = Arc::new(event()?);
+        let asked = Arc::new(Asked::new()?);
+        let mut root = Reading::open(path, true, CHANGES, 32 * 1024)?;
+        // Its parent's folders' names, where it has a parent: the root's
+        // own folder renamed, moved or removed is told there alone. One
+        // that cannot be heard so is proven where it is at each change
+        // below it.
+        let mut parent = path
+            .parent()
+            .and_then(|p| Reading::open(p, false, FILE_NOTIFY_CHANGE_DIR_NAME, 512).ok());
+        let place = Place::of(&root.dir);
         // The first read asked before this returns: what changes from now
         // on is heard, never lost before the thread first asks. A root
         // heard from now is read after, so that what it holds is either
         // read or heard (AGENTS.md, "Watch, then open, then list").
-        let mut reading = Reading {
-            dir: Handle(dir),
-            done: event()?,
-            // SAFETY: an all-zero structure is a valid one, before its event.
-            ov: Box::new(unsafe { std::mem::zeroed() }),
-            buffer: vec![0u64; 32 * 1024],
-        };
-        if !reading.ask() {
+        if !root.ask() {
             return Err(std::io::Error::last_os_error());
         }
-        let stop = Arc::new(event()?);
-        let asked = Arc::new(Asked::new()?);
+        if parent.as_mut().is_some_and(|p| !p.ask()) {
+            parent = None;
+        }
+        let listening = Listening {
+            root,
+            parent,
+            place,
+            path: path.to_path_buf(),
+        };
         let queue = Arc::clone(&self.queue);
+        // A read pending when this fails is cancelled, and waited for, as
+        // what reads is dropped.
         let thread = {
             let (stop, asked) = (Arc::clone(&stop), Arc::clone(&asked));
             std::thread::Builder::new()
                 .name("skwird-heard".into())
-                .spawn(move || listen(reading, &stop, &asked, scope, &queue))?
+                .spawn(move || listen(listening, &stop, &asked, scope, &queue))?
         };
         let watched = Watched {
             stop,
@@ -278,6 +283,8 @@ impl Watcher {
         path: &Path,
         kept: Option<super::journal::Position>,
     ) -> std::io::Result<bool> {
+        // A read pending when this fails is cancelled, and waited for, as
+        // the follower is dropped.
         let mut follower = follow::Follower::start(path, kept)?;
         if !follower.ask() {
             return Err(std::io::Error::last_os_error());
@@ -410,13 +417,20 @@ const CHANGES: u32 = FILE_NOTIFY_CHANGE_FILE_NAME
     | FILE_NOTIFY_CHANGE_LAST_WRITE
     | FILE_NOTIFY_CHANGE_CREATION;
 
-/// A root's folder being read for changes: the read pending, its
-/// structure and its buffer at places of their own until it is done.
+/// A folder being read for changes, a root's tree or its parent's own
+/// names: the read pending, its structure and its buffer at places of
+/// their own until it is done. Dropped with a read pending, the read is
+/// cancelled and waited for first, so that nothing is written where they
+/// were.
 struct Reading {
     dir: Handle,
     done: Handle,
     ov: Box<OVERLAPPED>,
     buffer: Vec<u64>,
+    /// Its whole tree (a root's), or its own entries alone (a parent's).
+    subtree: bool,
+    changes: u32,
+    pending: bool,
 }
 
 // SAFETY: moved once, to the thread that reads, and used by it alone
@@ -424,6 +438,40 @@ struct Reading {
 unsafe impl Send for Reading {}
 
 impl Reading {
+    /// The folder at `path`, opened to be read for `changes`, its tree's
+    /// or its own, into a buffer of `words` words. Opened to share
+    /// reading, writing and deletion: it stops no rename or removal.
+    fn open(path: &Path, subtree: bool, changes: u32, words: usize) -> std::io::Result<Reading> {
+        let name = verbatim(path);
+        // SAFETY: a NUL-terminated name alive for the call, no security
+        // attributes, no template; the handle given is ours to close.
+        let dir = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                std::ptr::null_mut(),
+            )
+        };
+        if dir == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let dir = Handle(dir);
+        Ok(Reading {
+            dir,
+            done: event()?,
+            // SAFETY: an all-zero structure is a valid one, before its event.
+            ov: Box::new(unsafe { std::mem::zeroed() }),
+            buffer: vec![0u64; words],
+            subtree,
+            changes,
+            pending: false,
+        })
+    }
+
     /// Ask for the next changes: whether the read is pending.
     fn ask(&mut self) -> bool {
         // SAFETY: an all-zero structure is a valid one, given its event.
@@ -432,74 +480,256 @@ impl Reading {
         let len = u32::try_from(self.buffer.len() * 8).unwrap_or(u32::MAX);
         // SAFETY: the buffer, aligned for the records, and its length; it
         // and the structure stay in place until the call is done or its
-        // cancel has landed, which `listen` waits for.
-        unsafe {
+        // cancel has landed, which `result` and the drop wait for.
+        self.pending = unsafe {
             ReadDirectoryChangesW(
                 self.dir.0,
                 self.buffer.as_mut_ptr().cast::<c_void>(),
                 len,
-                1,
-                CHANGES,
+                i32::from(self.subtree),
+                self.changes,
                 std::ptr::null_mut(),
                 &raw mut *self.ov,
                 None,
             ) != 0
+        };
+        self.pending
+    }
+
+    /// The read done, its event set: the bytes it gave, or its error.
+    fn result(&mut self) -> Result<&[u8], u32> {
+        let mut moved = 0u32;
+        // SAFETY: the call's own structure, done.
+        let ok = unsafe { GetOverlappedResult(self.dir.0, &raw const *self.ov, &raw mut moved, 1) };
+        self.pending = false;
+        if ok == 0 {
+            // SAFETY: no argument.
+            return Err(unsafe { GetLastError() });
+        }
+        Ok(&super::bytemuck(&self.buffer)[..moved as usize])
+    }
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        if self.pending {
+            let mut moved = 0u32;
+            // SAFETY: the pending call's own structure, alive until its
+            // cancel has landed, which the wait for its result waits for;
+            // the handle closed after, with the fields.
+            unsafe {
+                CancelIoEx(self.dir.0, &raw const *self.ov);
+                GetOverlappedResult(self.dir.0, &raw const *self.ov, &raw mut moved, 1);
+            }
         }
     }
 }
 
-/// Read what changes below the root `reading` reads, its first read
-/// asked, until `stop` is set, each batch put in `queue`; each cookie
-/// `asked` said once what came before it is.
-fn listen(mut reading: Reading, stop: &Handle, asked: &Asked, scope: usize, queue: &Queue) {
-    let dir = reading.dir.0;
+/// Where a root's folder was as it began to be heard, as its handle
+/// names it. A folder renamed or moved keeps its handle, and every change
+/// below it is still told there, by its path below it; but the root's
+/// path no longer leads to it, nor to anything heard. None where its path
+/// cannot be told (a volume mounted at a folder alone, `VOLUME_NAME_DOS`
+/// has no name for), which proves nothing.
+pub(super) struct Place(Option<PathBuf>);
+
+impl Place {
+    pub(super) fn of(handle: &Handle) -> Place {
+        Place(final_dos(handle).ok())
+    }
+
+    /// Whether the folder `handle` opened is no longer where it was: it,
+    /// or a folder above it, renamed, moved or removed; or its path can no
+    /// longer be told.
+    pub(super) fn moved(&self, handle: &Handle) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|at| final_dos(handle).ok().as_ref() != Some(at))
+    }
+}
+
+/// The path of what `handle` opened, as clients name it (`C:\Users`):
+/// its long names, links resolved, its volume by its letter.
+pub(super) fn final_dos(handle: &Handle) -> Result<PathBuf, u32> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+    let mut buffer = vec![0u16; 512];
+    loop {
+        // SAFETY: the buffer and its length in units; the count returned
+        // says how much was written, or how much is needed.
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                handle.0,
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).unwrap_or(u32::MAX),
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if written == 0 {
+            // SAFETY: no argument.
+            return Err(unsafe { GetLastError() });
+        }
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(super::plain(Path::new(&OsString::from_wide(&buffer))));
+        }
+        buffer.resize(written + 1, 0);
+    }
+}
+
+/// What a root's thread reads: the root's tree, its parent's names where
+/// they can be heard, where the root was as it began, and its path.
+struct Listening {
+    root: Reading,
+    parent: Option<Reading>,
+    place: Place,
+    path: PathBuf,
+}
+
+/// Read what changes below the root `l.root` reads, its first read asked,
+/// until `stop` is set, each batch put in `queue`; each cookie `asked`
+/// said once what came before it is. A root whose folder is no longer
+/// where it was (its parent's names changed, or a change below it read)
+/// is lost: its path leads to nothing heard.
+fn listen(mut l: Listening, stop: &Handle, asked: &Asked, scope: usize, queue: &Queue) {
     loop {
         // The read before the cookies: a wait gives the first of those
         // set, so a change told before a cookie was asked is read first.
-        let waits: [HANDLE; 3] = [stop.0, reading.done.0, asked.event.0];
-        // SAFETY: three events of ours, alive for the wait.
-        let woken = unsafe { WaitForMultipleObjects(3, waits.as_ptr(), 0, INFINITE) };
+        let mut waits: Vec<HANDLE> = vec![stop.0, l.root.done.0, asked.event.0];
+        if let Some(p) = &l.parent {
+            waits.push(p.done.0);
+        }
+        // SAFETY: three or four events of ours, alive for the wait.
+        let woken = unsafe {
+            WaitForMultipleObjects(
+                u32::try_from(waits.len()).unwrap_or(3),
+                waits.as_ptr(),
+                0,
+                INFINITE,
+            )
+        };
+        if woken == WAIT_OBJECT_0 {
+            // What is pending is cancelled as it is dropped.
+            return;
+        }
         if woken == WAIT_OBJECT_0 + 2 {
             // Every change told before this was read: the read pending was
             // given none.
             queue.push(asked.take().into_iter().map(Heard::Cookie));
             continue;
         }
-        let mut moved = 0u32;
-        if woken == WAIT_OBJECT_0 {
-            // SAFETY: the pending call's own structure, alive until its
-            // cancel has landed, which the wait for its result waits for.
-            unsafe {
-                CancelIoEx(dir, &raw const *reading.ov);
-                GetOverlappedResult(dir, &raw const *reading.ov, &raw mut moved, 1);
-            }
-            return;
-        }
-        // SAFETY: the call's own structure, done.
-        let ok = unsafe { GetOverlappedResult(dir, &raw const *reading.ov, &raw mut moved, 1) };
-        if ok == 0 {
-            // SAFETY: no argument.
-            if unsafe { GetLastError() } != ERROR_NOTIFY_ENUM_DIR {
+        if woken == WAIT_OBJECT_0 + 3
+            && let Some(parent) = &mut l.parent
+        {
+            // A folder beside the root made, renamed or removed (or more of
+            // them than the buffer held): the root's own, maybe.
+            let heard = !matches!(parent.result(), Err(e) if e != ERROR_NOTIFY_ENUM_DIR);
+            if l.place.moved(&l.root.dir) {
                 queue.push([Heard::Lost { scope }]);
                 return;
             }
-            queue.push([Heard::Overflow { scope }]);
-        } else if moved == 0 {
-            // More than the buffer held: dropped.
-            queue.push([Heard::Overflow { scope }]);
-        } else {
-            let bytes = &super::bytemuck(&reading.buffer)[..moved as usize];
-            queue.push(records(bytes, scope));
+            // Its parent no longer heard (gone, or its volume): the root's
+            // place is proven at each change below it alone.
+            let kept = heard && parent.ask();
+            if !kept {
+                l.parent = None;
+            }
+            continue;
         }
-        if !reading.ask() {
+        let said = match l.root.result() {
+            // More than the buffer held (nothing given) is dropped: an
+            // overflow, as one the system says.
+            Ok([]) | Err(ERROR_NOTIFY_ENUM_DIR) => vec![Heard::Overflow { scope }],
+            Ok(bytes) => records(bytes, scope),
+            Err(_) => {
+                queue.push([Heard::Lost { scope }]);
+                return;
+            }
+        };
+        if l.place.moved(&l.root.dir) {
+            queue.push([Heard::Lost { scope }]);
+            return;
+        }
+        queue.push(said.into_iter().map(|h| match h {
+            Heard::Entry { scope, rel } => Heard::Entry {
+                scope,
+                rel: long_names(&l.path, &rel),
+            },
+            other => other,
+        }));
+        if !l.root.ask() {
             queue.push([Heard::Lost { scope }]);
             return;
         }
     }
 }
 
+/// `rel`, below the root at `root`, each of its names that may be a short
+/// one (`LONGFO~1`: a tilde, twelve characters at most) said by its long
+/// name. A change may be told by the short name it was made by, and the
+/// index knows its entries by their long names alone: a folder heard so
+/// would be found nowhere, a file heard so not read again. A name that
+/// cannot be found (gone since) ends the path there: its folder is read
+/// again, the name gone from it, and what was below it with it.
+fn long_names(root: &Path, rel: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in rel.components() {
+        let std::path::Component::Normal(name) = part else {
+            out.push(part);
+            continue;
+        };
+        let wide: Vec<u16> = name.encode_wide().collect();
+        if wide.len() > 12 || !wide.contains(&u16::from(b'~')) {
+            out.push(name);
+            continue;
+        }
+        let Some(long) = long_name(&root.join(&out).join(name)) else {
+            out.push(name);
+            return out;
+        };
+        out.push(long);
+    }
+    out
+}
+
+/// The long name of the entry at `path`, found by its name, short or
+/// long: none if nothing is there.
+fn long_name(path: &Path) -> Option<OsString> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, WIN32_FIND_DATAW,
+    };
+    let name = verbatim(path);
+    // SAFETY: an all-zero structure is a valid one, for the call to fill.
+    let mut found: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated name with no wildcard (a name holds none),
+    // the structure written; the search is ours to close.
+    let find = unsafe {
+        FindFirstFileExW(
+            name.as_ptr(),
+            FindExInfoBasic,
+            (&raw mut found).cast::<c_void>(),
+            FindExSearchNameMatch,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if find == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: the search made above, closed once.
+    unsafe { FindClose(find) };
+    let end = found
+        .cFileName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(found.cFileName.len());
+    Some(OsString::from_wide(&found.cFileName[..end]))
+}
+
 /// The changes a buffer of `FILE_NOTIFY_INFORMATION` records says, each
-/// below root `scope`.
+/// below root `scope`. A buffer cut short, or a record past its end, is
+/// an overflow after what was whole: what it held is not known.
 fn records(bytes: &[u8], scope: usize) -> Vec<Heard> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -510,9 +740,11 @@ fn records(bytes: &[u8], scope: usize) -> Vec<Heard> {
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         };
         let (Some(next), Some(len)) = (u32_at(0), u32_at(8)) else {
+            out.push(Heard::Overflow { scope });
             break;
         };
         let Some(name) = bytes.get(at + 12..at + 12 + len as usize) else {
+            out.push(Heard::Overflow { scope });
             break;
         };
         let wide: Vec<u16> = name
@@ -573,9 +805,64 @@ mod tests {
                 entry(r"docs\cookie-8")
             ]
         );
-        // Cut short: what is whole is said, nothing past the buffer read.
+        // Cut short: what is whole is said, nothing past the buffer read,
+        // and the rest is an overflow: what it held is not known.
         let cut = &bytes[..bytes.len() - 6];
-        assert_eq!(records(cut, 3).len(), 2);
+        assert_eq!(
+            records(cut, 3),
+            vec![
+                entry(r"docs\notes.txt"),
+                entry(r"docs\old.txt"),
+                Heard::Overflow { scope: 3 }
+            ]
+        );
+    }
+
+    /// A name heard by its short form (`LONGFO~1`, as a change made
+    /// through a short path may be told) is said by its long one, a folder
+    /// and a file alike; one gone since ends the path, its folder read
+    /// again; a long name with a tilde is its own. Where the volume makes
+    /// no short names, there is nothing to resolve.
+    #[test]
+    fn a_short_name_heard_is_said_by_its_long_one() {
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let s = skwird_testkit::Scratch::new("watch-short");
+        s.file(r"root\a long folder name\a long file name.txt");
+        s.file(r"root\keep~1.txt");
+        let root = s.join("root");
+        let long = root.join(r"a long folder name\a long file name.txt");
+        let wide: Vec<u16> = long.as_os_str().encode_wide().chain([0]).collect();
+        let mut short = vec![0u16; 1024];
+        // SAFETY: a NUL-terminated path; the buffer and its length.
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), 1024) } as usize;
+        assert!(n > 0 && n < 1024, "{}", std::io::Error::last_os_error());
+        // Its last two names: the folder's and the file's, short where the
+        // volume made them so.
+        let short = PathBuf::from(OsString::from_wide(&short[..n]));
+        let names: Vec<_> = short.components().rev().take(2).collect();
+        let rel: PathBuf = names.into_iter().rev().collect();
+        if rel == Path::new(r"a long folder name\a long file name.txt") {
+            eprintln!("not proven here: the volume makes no short names");
+            return;
+        }
+        assert_eq!(
+            long_names(&root, &rel),
+            Path::new(r"a long folder name\a long file name.txt"),
+            "{rel:?}"
+        );
+        let folder = rel.parent().unwrap().to_path_buf();
+        assert_eq!(
+            long_names(&root, &folder.join("gone.txt")),
+            Path::new(r"a long folder name\gone.txt")
+        );
+        assert_eq!(
+            long_names(&root, Path::new(r"GONE~1\below\it.txt")),
+            Path::new(r"GONE~1")
+        );
+        assert_eq!(
+            long_names(&root, Path::new("keep~1.txt")),
+            Path::new("keep~1.txt")
+        );
     }
 }
 
@@ -660,6 +947,32 @@ mod watched {
             return;
         }
         heard_until(&w, |all| all.contains(&Heard::Lost { scope: 2 }));
+    }
+
+    /// A root whose folder is renamed says its watch ended: its path leads
+    /// to nothing heard, though every change below the folder is still
+    /// told. So is one whose parent is renamed, at the next change below
+    /// it.
+    #[test]
+    fn a_root_renamed_says_its_watch_ended() {
+        let s = Scratch::new("watch-renamed");
+        s.file(r"above\root\a\file");
+        s.dir(r"top\root");
+        let w = Arc::new(Watcher::new(1, 0).unwrap());
+        w.watch_root(2, &s.join(r"above\root")).unwrap();
+        w.watch_root(3, &s.join(r"top\root")).unwrap();
+        std::fs::rename(s.join(r"above\root"), s.join(r"above\moved")).unwrap();
+        std::fs::rename(s.join("top"), s.join("top moved")).unwrap();
+        // Wine tells a handle's path as it was opened, whatever renamed its
+        // folder since: the end is proven on Windows alone.
+        if skwird_testkit::under_wine() {
+            eprintln!("not proven under Wine: a renamed root's watch ends");
+            return;
+        }
+        s.file(r"top moved\root\made.txt");
+        heard_until(&w, |all| {
+            all.contains(&Heard::Lost { scope: 2 }) && all.contains(&Heard::Lost { scope: 3 })
+        });
     }
 }
 
