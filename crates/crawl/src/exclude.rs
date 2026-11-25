@@ -86,11 +86,19 @@ pub struct Exclusions {
     folded_names: HashSet<String>,
 }
 
-/// A path as a volume that ignores case compares it: lowercased, and on
-/// macOS composed, as APFS compares a name whatever form it is written in.
+/// A path as a volume that ignores case compares it, or more alike: as
+/// uppercased (NTFS's upcase table, APFS' folding take ſ as s, and a final
+/// ς as σ, which `to_lowercase` alone writes apart) then lowercased, ς as
+/// σ, and on macOS composed, as APFS compares a name whatever form it is
+/// written in. A name it takes as another's, a volume would not (ß as ss),
+/// keeps out one folder more, never one less.
 #[cfg(any(windows, target_os = "macos"))]
 fn fold(path: &std::ffi::OsStr) -> String {
-    let lower = path.to_string_lossy().to_lowercase();
+    let lower = path
+        .to_string_lossy()
+        .to_uppercase()
+        .to_lowercase()
+        .replace('\u{3c2}', "\u{3c3}");
     #[cfg(target_os = "macos")]
     let lower = {
         use unicode_normalization::UnicodeNormalization;
@@ -283,6 +291,19 @@ fn an_exclusion_holds_whatever_the_case_of_the_folder_made_later() {
     assert_eq!(ex.holds(None, &base.join("\u{c9}T\u{c9}")), folds);
     assert!(!ex.holds(None, &base.join("Keyring")));
     assert!(!ex.holds(None, &base.join("other").join("keys")));
+    // A final sigma, a long s: as the volumes take them.
+    let (ex, _) = Exclusions::resolve([
+        base.join("\u{391}\u{3a1}\u{3a7}\u{395}\u{399}\u{39f}\u{3a3}"),
+        base.join("secret"),
+    ]);
+    assert_eq!(
+        ex.holds(
+            None,
+            &base.join("\u{3b1}\u{3c1}\u{3c7}\u{3b5}\u{3b9}\u{3bf}\u{3c3}")
+        ),
+        folds
+    );
+    assert_eq!(ex.holds(None, &base.join("\u{17f}ecret")), folds);
 }
 
 #[cfg(all(test, unix))]
