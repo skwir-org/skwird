@@ -49,7 +49,7 @@ and a Homebrew formula built from its source. 0.2.0 was made on
 2026-11-25, after a review of two rounds (below, "The review before
 0.2"): names in skwir's three forms, removable volumes on request,
 Windows' index mapped, a Home Manager module; it was published the same
-day, with skwir 0.7.0.
+day, with skwir 0.7.0, and skwird's AUR package made with it.
 
 ## Phase 0: measure (done)
 
@@ -2634,7 +2634,9 @@ conditions, which are written where each is decided.
    Written on 2026-11-24, and dated that day, the day it was released.
 7. Once tagged and published: the formula's stable source (its URL and
    checksum), done on 2026-11-24. Left, each the user's to do or ask:
-   the AUR's PKGBUILD published, and nixpkgs asked.
+   the AUR's PKGBUILD published, and nixpkgs asked. The AUR's package
+   was made with 0.2.0, on 2026-11-25, at the user's word; nixpkgs is
+   not asked yet, the user's call for later.
 
 **Measured on the runners** (stand-ins, never step 8 of phases 4 and
 5): `measure.yml`, run by hand on Linux, macOS and Windows, over the
@@ -2920,9 +2922,10 @@ for a reason of its own:
     a machine (the flake's prove it on NixOS);
   - skwir.org's repositories and their signing, skwir's release tools'
     work, beside skwir's own packages;
-  - publishing to the AUR and nixpkgs, each the user's to do or ask (a
-    release's tag, notes and assets are 0.2.0's since 2026-11-25, and
-    Homebrew's formula with them: above, "The first release");
+  - nixpkgs, not asked yet: perhaps later, the user's call (a release's
+    tag, notes and assets are 0.2.0's since 2026-11-25, Homebrew's
+    formula and the AUR's package with them: above, "The first
+    release");
   - winget, once Windows' engine is proven on a Windows machine (phase
     4, paused).
 - CI once there are crates to check on three systems. The development

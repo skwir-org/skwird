@@ -4,7 +4,9 @@
 # pacman's hooks make the system service's user (sysusers) and tell the
 # service manager. Its removal stops the system service and lets go of
 # its index, as theirs does (skwird.install).
-# tools/package/aur.sh builds it from this tree, as from a release.
+# skwird's repository builds it from its own tree, as from a release
+# (tools/package/aur.sh), its checksum SKIP; the AUR's copy holds the
+# tag's archive's (updpkgsums).
 # Maintainer: The skwir authors
 
 pkgname=skwird
@@ -20,8 +22,6 @@ depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 install=skwird.install
 source=("$pkgname-$pkgver.tar.gz::$_repo/archive/v$pkgver.tar.gz")
-# The AUR's copy takes the tag's archive's (updpkgsums). Here it stays
-# SKIP: tools/package/aur.sh builds an archive of this tree instead.
 sha256sums=('SKIP')
 
 prepare() {

@@ -53,7 +53,10 @@ the draft.
 
 - The Homebrew formula (`skwir-org/homebrew-tap`) takes the release's
   source: its URL and checksum.
-- The AUR's PKGBUILD is published, and nixpkgs is asked: the
-  maintainer's to do or ask. The AUR's copy takes the checksum of the
-  tag's archive (`updpkgsums`); the repository's keeps `SKIP`, which
+- The AUR's package (`ssh://aur@aur.archlinux.org/skwird.git`, made
+  with 0.2.0) takes the PKGBUILD and `skwird.install`, the PKGBUILD's
+  checksum filled with the tag's archive's (`updpkgsums`), and a
+  `.SRCINFO` made again (`makepkg --printsrcinfo`), pushed with the
+  maintainer's AUR key. The repository's checksum stays `SKIP`, which
   `tools/package/aur.sh` needs, building an archive of the tree.
+- nixpkgs is not asked yet: the maintainer's call, perhaps later.
