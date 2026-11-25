@@ -277,9 +277,13 @@ fn the_journal_says_the_folder_asked_for_is_gone() {
             .collect()
     };
     let since = k.token().unwrap();
-    s.remove("top/asked");
+    // The old folder moved aside, not removed: ext4 may give a removed
+    // folder's inode to the next one made, and a folder of the same name
+    // and inode is the same folder to the index (a runner failed so).
+    s.rename("top/asked", "top/aside");
     s.dir("top/asked");
     k.refresh(&Cancel::default()).unwrap();
+    s.remove("top/aside");
     let asked = PathBuf::from("top/asked");
     assert_eq!(
         ops(&k, "top/asked/deep", since),
