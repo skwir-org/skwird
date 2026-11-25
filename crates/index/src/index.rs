@@ -199,7 +199,8 @@ impl Index {
     pub fn folder_at(&self, rel: &Path) -> Option<FolderId> {
         let mut folder = self.root()?;
         for part in rel.components() {
-            let name = part.as_os_str().as_encoded_bytes();
+            let name = crate::log::path_bytes(Path::new(part.as_os_str()));
+            let name = &*name;
             let loc = self.tree.loc(folder)?;
             // The columns it reads alone opened: it runs for each event.
             let chunk = self.tree.chunk(loc.chunk);
@@ -376,16 +377,22 @@ impl Index {
             let zone = i / ZONE;
             let zone_end = ((zone + 1) * ZONE).min(items.end);
             let (largest, tmin, tmax, present) = view.zone(zone);
+            // Links answered whatever their size and times
+            // (`unfiltered_links`): a zone holding one is read, whatever
+            // its sizes and times say.
+            let links_kept = filter.query.unfiltered_links
+                && present & filter.kinds & (1 << crate::chunk::kind_code(Kind::Link)) != 0;
             let passed = present & filter.kinds == 0
-                || filter
-                    .query
-                    .size
-                    .as_ref()
-                    .is_some_and(|r| largest < *r.start())
-                || filter
-                    .times
-                    .as_ref()
-                    .is_some_and(|r| tmax < *r.start() || tmin > *r.end());
+                || !links_kept
+                    && (filter
+                        .query
+                        .size
+                        .as_ref()
+                        .is_some_and(|r| largest < *r.start())
+                        || filter
+                            .times
+                            .as_ref()
+                            .is_some_and(|r| tmax < *r.start() || tmin > *r.end()));
             if passed {
                 i = zone_end;
                 continue;

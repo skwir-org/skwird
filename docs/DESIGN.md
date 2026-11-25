@@ -898,11 +898,14 @@ device and an inode do not name one file.
     when the case is asked to count;
   - a glob, as the `globset` crate compiles it (skwir's version, 0.4.22,
     which reads POSIX classes), case-insensitive unless asked, with no
-    separator rule (a name holds none). One whose literal parts hold
-    more than ASCII, with case ignored, is matched on the name
-    lowercased, those parts lowercased first;
-  - since 0.2, in both Unicode forms (question 5): a term is matched
-    composed and decomposed, a glob in its literal parts alone;
+    separator rule (a name holds none). One holding more than ASCII,
+    with case ignored, is matched on the name folded, itself folded
+    first: its literal parts, what its escapes escape, its classes'
+    single members (since 0.2);
+  - since 0.2, in its Unicode forms (question 5): a term is matched as
+    typed, composed and decomposed, a glob in its literal parts alone;
+    where case is ignored, a final sigma (`ς`) is taken as `σ` on both
+    sides, an exact name aside;
   - on the name's lossy UTF-8 form. A name that is not UTF-8 is still
     answered, and travels byte for byte.
 
@@ -1928,8 +1931,12 @@ ADR-053, 074, 075):
     nothing (`since` empty): from now, no event and the token to go on
     from, which a client takes before it walks, first or after "too
     old", so that nothing is lost between (found missing on 2026-11-22:
-    no client could start the journal). At the system service, an event
-    is given only to who may list the folder holding what it names.
+    no client could start the journal). Besides what is below it, the
+    events say what came of the root itself (2026-11-25, the review's
+    find: its removal was told by no event): an entry on the way to it,
+    the root's own or a folder's above it, added or removed. At the
+    system service, an event is given only to who may list the folder
+    holding what it names.
     Each answer says how far its events are every change below the root,
     from the token asked from up to the one given, computed as it
     answers (`complete`, 2026-11-23, skwir's ask, for its tags index to
@@ -2347,6 +2354,26 @@ ADR-053, 074, 075):
    An exact name is matched as it is, never in another form: two names
    that differ in form alone are two names. The engine says
    `names-both-forms` in its hello.
+
+   **Three forms, and the final sigma** (asked by skwir's session on
+   2026-11-25, as skwir matches): a term is matched as typed too, its
+   forms each once, one pattern where the three agree. Some characters
+   both forms change (a CJK compatibility ideograph, U+0958, U+1F71,
+   the Ohm sign, Hebrew presentation forms): a term holding one missed
+   a name holding the very same character. And where case is ignored,
+   `ς` is taken as `σ` after lowercasing, on the term and the name, for
+   substrings and globs: `to_lowercase` makes a sigma final by where it
+   stands, so `ΟΔΟΣ` typed lowered to `οδος`, and `ΟΔΟΣ.txt` to
+   `οδοσ.txt`, and missed. A glob takes the fast path (as typed, on the
+   name as it is) only where it is ASCII whole; with case ignored, one
+   holding more has its escapes' characters and its classes' single
+   members folded too, a range's ends left as typed (globset reads a
+   class beyond ASCII as bytes, and folded ends may cross). An ASCII
+   name is compared with the term's one ASCII form, if it has one: the
+   Kelvin sign, case counting, is `K` composed, and finds `OK.txt`. A
+   name's mask is read where any of the forms could match (the bits all
+   of them hold). Held to skwir's own cases (NM-1, 2 and 4), but those
+   with an escape on Windows, where a backslash is no escape.
 6. **fanotify on btrfs subvolumes:** answered by phase 0, as far as a
    trial goes (decision 3). A mark through the top-level subvolume,
    mounted read-only and detached, heard the changes made in three

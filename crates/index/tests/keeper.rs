@@ -106,6 +106,29 @@ fn an_index_opened_again_replays_its_log() {
     assert_eq!(ours(k.index()), of_walk(s.path()));
 }
 
+/// A batch heard that lets go of a folder (`a/x`, removed), makes one
+/// (`b/n`), then names the one gone: its number is not given to the one
+/// made while the batch runs. It was, and the one made was read in the
+/// gone one's place, logged at a path the index no longer held: the next
+/// start's replay refused the log, and built the index again.
+#[test]
+fn a_folders_number_is_not_given_again_within_a_batch() {
+    let s = Scratch::new("keeper-numbers");
+    s.file("a/x/one.txt");
+    s.dir("b");
+    let (mut k, _) = keeper(&s);
+    let at = |k: &Keeper, p: &str| k.index().folder_at(Path::new(p)).unwrap();
+    let heard = [at(&k, "a"), at(&k, "b"), at(&k, "a/x")];
+    s.remove("a/x");
+    s.file("b/n/two.txt");
+    k.heard(&heard, &Cancel::default()).unwrap();
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+    drop(k);
+    let (k, opened) = keeper(&s);
+    assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+}
+
 /// The journal: what changed below a folder since a token, each with its
 /// identity and kind, a removal with what it was; a token of another
 /// epoch, or from before the log, is too old.
@@ -165,6 +188,100 @@ fn the_journal_says_what_changed_since_a_token() {
         ..next
     };
     assert_eq!(k.changes(Path::new(""), ahead), Err(TooOld));
+}
+
+/// A refresh that fails part way logs what it did before: the journal
+/// says it, and the index opened again holds it. It was left in the index
+/// alone: the journal never told it, nor the next check, which found the
+/// folder as the index held it, and the next start lost it. A check that
+/// gives the root as replaced after a folder changed makes it fail there.
+#[test]
+fn a_refresh_cut_short_logs_what_it_did() {
+    let s = Scratch::new("keeper-cut-short");
+    s.file("a/one.txt");
+    let (mut k, _) = keeper(&s);
+    let since = k.token().unwrap();
+    s.file("a/two.txt");
+    let cut = k.refresh_by(&Cancel::default(), &|root, stored, opts, cancel| {
+        let mut checked = skwird_crawl::check(root, stored, opts, cancel)?;
+        let top = (0..stored.len())
+            .find(|&i| stored.rel(i).as_os_str().is_empty())
+            .unwrap();
+        checked.stale.push((top, skwird_crawl::Stale::Replaced));
+        Ok(checked)
+    });
+    assert!(cut.is_err(), "{cut:?}");
+    let (events, _) = k.changes(Path::new(""), since).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Entry { path, op: Op::Added, .. } if path == Path::new("a/two.txt")
+        )),
+        "{events:?}"
+    );
+    drop(k);
+    let (k, opened) = keeper(&s);
+    assert!(matches!(opened, Opened::Loaded { .. }), "{opened:?}");
+    assert_eq!(ours(k.index()), of_walk(s.path()));
+}
+
+/// The folder asked for removed, or one above it: the journal says so,
+/// from the folder above's record, the change that names the way to it
+/// alone. It once said nothing: no record's path was below the folder.
+#[test]
+fn the_journal_says_the_folder_asked_for_is_gone() {
+    let s = Scratch::new("keeper-journal-gone");
+    s.file("top/asked/deep/one.txt");
+    s.file("top/beside.txt");
+    let (mut k, _) = keeper(&s);
+    let since = k.token().unwrap();
+    s.remove("top/asked");
+    s.remove("top/beside.txt");
+    k.refresh(&Cancel::default()).unwrap();
+    let removed = |asked: &str| -> Vec<PathBuf> {
+        let (events, _) = k.changes(Path::new(asked), since).unwrap();
+        events
+            .into_iter()
+            .map(|e| match e {
+                Event::Entry {
+                    path,
+                    op: Op::Removed,
+                    ..
+                } => path,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(removed("top/asked"), [PathBuf::from("top/asked")]);
+    assert_eq!(
+        removed("top/asked/deep"),
+        [PathBuf::from("top/asked")],
+        "a folder above it removed"
+    );
+    assert!(
+        removed("top/other").is_empty(),
+        "of the folder above's changes, those on the way alone"
+    );
+    // A folder above it no longer read: not covered, from there.
+    s.dir("top/asked");
+    k.refresh(&Cancel::default()).unwrap();
+    let since = k.token().unwrap();
+    let mode = |m| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(s.join("top"), std::fs::Permissions::from_mode(m))
+    };
+    mode(0o000).unwrap();
+    let refreshed = k.refresh(&Cancel::default());
+    mode(0o755).unwrap();
+    refreshed.unwrap();
+    let (events, _) = k.changes(Path::new("top/asked"), since).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::NotCovered { path, why: Why::Denied } if path == Path::new("top")
+        )),
+        "{events:?}"
+    );
 }
 
 /// A save that fails leaves the index as it is, and what is on disk as it

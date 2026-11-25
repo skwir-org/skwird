@@ -18,8 +18,12 @@ use skwird_index::tree::Limits;
 use skwird_index::{Index, NameQuery, Pattern, Query, build};
 use skwird_testkit::{Scratch, reference_walk};
 
-/// What skwir's `NamePat` answers, written as it is.
+/// What skwir's `NamePat` answers, written as it is, for the terms tried
+/// here: none differs in its Unicode forms, nor is a glob with more than
+/// ASCII in it, so the forms are left out (the matcher's own tests hold
+/// them). Where case is ignored, a final sigma is a sigma.
 fn skwir_matches(text: &str, case_sensitive: bool, name: &[u8]) -> bool {
+    let low = |t: &str| t.to_lowercase().replace('ς', "σ");
     let name = String::from_utf8_lossy(name);
     let glob = text
         .contains(['*', '?', '['])
@@ -35,7 +39,7 @@ fn skwir_matches(text: &str, case_sensitive: bool, name: &[u8]) -> bool {
     match glob {
         Some(g) => g.is_match(&*name),
         None if case_sensitive => name.contains(text),
-        None => name.to_lowercase().contains(&text.to_lowercase()),
+        None => low(&name).contains(&low(text)),
     }
 }
 
@@ -307,6 +311,35 @@ fn a_hit_carries_its_entrys_identity_and_attributes() {
         "a link is no folder"
     );
     assert!(index.folder_at(Path::new("Report 2026.PDF")).is_none());
+}
+
+/// Links answered whatever their size and times (`unfiltered_links`): a
+/// zone of a small file and a link alone is read for a size range neither
+/// holds, and the link is answered. Its zone's largest size, the link's
+/// own, once kept it from being read.
+#[test]
+fn a_link_is_answered_unfiltered_whatever_its_zone_holds() {
+    let s = Scratch::new("index-links-unfiltered");
+    s.write("only/small.txt", b"x");
+    std::os::unix::fs::symlink("elsewhere/big.bin", s.join("only/to big")).unwrap();
+    let index = indexed(&s, Limits::default());
+    let query = Query {
+        size: Some(1000..=2000),
+        unfiltered_links: true,
+        ..Query::default()
+    };
+    assert_eq!(
+        answered(&index, Path::new("only"), &query),
+        [PathBuf::from("only/to big")]
+    );
+    let filtered = Query {
+        unfiltered_links: false,
+        ..query
+    };
+    assert_eq!(
+        answered(&index, Path::new("only"), &filtered),
+        [] as [PathBuf; 0]
+    );
 }
 
 /// Saved, then mapped back, it answers alike; its files are its user's

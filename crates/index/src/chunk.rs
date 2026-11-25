@@ -117,8 +117,11 @@ pub(crate) fn state_code(state: State) -> (u64, u64) {
             Why::Excluded => (2, 0),
             Why::Private => (3, 0),
             Why::Denied => (4, 0),
-            Why::Failed(e) => (5, u64::from(e.unsigned_abs())),
-            Why::CutShort(e) => (6, u64::from(e.unsigned_abs())),
+            // The code's own bits: a Windows status is negative as an i32
+            // (`0xC0000185`), a Unix error number positive, and stored as
+            // before.
+            Why::Failed(e) => (5, u64::from(u32::from_ne_bytes(e.to_ne_bytes()))),
+            Why::CutShort(e) => (6, u64::from(u32::from_ne_bytes(e.to_ne_bytes()))),
             Why::Gone => (7, 0),
             Why::Replaced => (8, 0),
             Why::Mount => (9, 0),
@@ -130,7 +133,8 @@ pub(crate) fn state_code(state: State) -> (u64, u64) {
 }
 
 pub(crate) fn state_of(code: u64, errno: u64) -> Option<State> {
-    let errno = i32::try_from(errno).unwrap_or(i32::MAX);
+    // Its 32 bits, as `state_code` keeps them.
+    let errno = u32::try_from(errno).map_or(i32::MAX, |e| i32::from_ne_bytes(e.to_ne_bytes()));
     Some(match code {
         0 => State::Listed { again: false },
         1 => State::Listed { again: true },
@@ -149,7 +153,6 @@ pub(crate) fn state_of(code: u64, errno: u64) -> Option<State> {
     })
 }
 
-/// The bytes of a chunk of `blocks`.
 /// The values of block `b`'s row, its entries ending at `end` over the
 /// chunk: what [`encode`] packs, and [`Chunk::patched`] compares.
 fn block_values(b: &Block, end: u64) -> [(usize, u64); I_NAME] {
@@ -232,6 +235,7 @@ fn zone_values(entries: impl Iterator<Item = (u64, u64, u64)>) -> [(usize, u64);
     ]
 }
 
+/// The bytes of a chunk of `blocks`.
 pub fn encode(blocks: &[Block]) -> Vec<u8> {
     let mut cols: Vec<Vec<u64>> = vec![Vec::new(); COLUMNS];
     let mut end = 0u64;
@@ -921,6 +925,24 @@ mod tests {
                 items: (10..3000).map(|n| file(n, u64::from(n) * 3)).collect(),
             },
         ]
+    }
+
+    /// A failure's number comes back as it was: a Unix error number, a
+    /// Windows status (negative as an i32), and the extremes; a positive
+    /// one encoded as before, so that what is saved reads alike.
+    #[test]
+    fn a_failures_number_comes_back_with_its_sign() {
+        for e in [5, 1_073_741_435, -1_073_741_435, i32::MIN, i32::MAX, 0] {
+            for why in [Why::Failed(e), Why::CutShort(e)] {
+                let (code, errno) = state_code(State::NotCovered(why));
+                assert_eq!(state_of(code, errno), Some(State::NotCovered(why)), "{e}");
+            }
+        }
+        assert_eq!(state_code(State::NotCovered(Why::Failed(13))), (5, 13));
+        // Through a chunk's column too.
+        let mut blocks = sample();
+        blocks[1].state = State::NotCovered(Why::Failed(-1_073_741_435));
+        assert_eq!(Chunk::new(&blocks).decode(), blocks);
     }
 
     #[test]

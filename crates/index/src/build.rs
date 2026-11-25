@@ -27,12 +27,15 @@ pub fn facts(stat: &FolderStat) -> Facts {
     }
 }
 
-/// The last name of a folder's path below the root.
-fn last_name(crawled: &Crawled) -> &[u8] {
+/// The last name of a folder's path below the root, its bytes as the
+/// crawl gives names (`log::path_bytes`).
+fn last_name(crawled: &Crawled) -> std::borrow::Cow<'_, [u8]> {
     crawled
         .rel
         .file_name()
-        .map_or(&[], std::ffi::OsStr::as_encoded_bytes)
+        .map_or(std::borrow::Cow::Borrowed(&[]), |n| {
+            crate::log::path_bytes(std::path::Path::new(n))
+        })
 }
 
 /// Where the top of a crawled subtree goes in the index.
@@ -70,7 +73,7 @@ pub fn blocks_of(
             &mut folders[slot].outcome,
             Outcome::NotCovered(skwird_crawl::Why::Unread),
         );
-        let by_name: HashMap<&[u8], usize> = kids[slot]
+        let by_name: HashMap<std::borrow::Cow<'_, [u8]>, usize> = kids[slot]
             .iter()
             .map(|&c| (last_name(&folders[c]), c))
             .collect();
@@ -107,7 +110,7 @@ pub fn blocks_of(
             (top.parent, top.name)
         } else {
             let parent = f.parent.expect("a folder below the top has a parent");
-            (Some(id_of[parent]), intern(last_name(f)))
+            (Some(id_of[parent]), intern(&last_name(f)))
         };
         blocks.push(Block {
             folder: id_of[slot],

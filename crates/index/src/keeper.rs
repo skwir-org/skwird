@@ -241,7 +241,7 @@ impl Keeper {
             None => crate::build::crawl_and_build(&root, &opts, cancel, limits)?,
         };
         let mut index = built.index;
-        let tells = root.fs_name() != "fuse";
+        let tells = root.times_tell();
         index.set_proof(if tells {
             Proof::Checked(start)
         } else {
@@ -415,8 +415,16 @@ impl Keeper {
         cancel: &Cancel,
         checker: skwird_crawl::Checker<'_>,
     ) -> Result<Refreshed, Error> {
-        let done =
-            update::refresh_by(&mut self.index, &mut self.root, &self.opts, cancel, checker)?;
+        let done = match update::refresh_by(
+            &mut self.index,
+            &mut self.root,
+            &self.opts,
+            cancel,
+            checker,
+        ) {
+            Ok(done) => done,
+            Err(cut) => return Err(self.cut_short(cut)),
+        };
         // The time the index now says it was proven at, exactly.
         let proven = proven_at(self.index.proof());
         self.append(done.records.iter().cloned().chain([Record::Proven(proven)]));
@@ -555,7 +563,10 @@ impl Keeper {
     fn install(&mut self, scope: &Path, cancel: &Cancel) -> Result<Refreshed, Error> {
         let start = Time::now();
         let installed =
-            update::install(&mut self.index, &mut self.root, &self.opts, cancel, scope)?;
+            match update::install(&mut self.index, &mut self.root, &self.opts, cancel, scope) {
+                Ok(installed) => installed,
+                Err(cut) => return Err(self.cut_short(cut)),
+            };
         self.append(installed.records.iter().cloned());
         self.note(&installed.watches);
         let there = self.index.folder_at(scope).is_some();
@@ -655,12 +666,6 @@ impl Keeper {
         looked
     }
 
-    /// The access ACLs of the folders whose mode says they have one, read
-    /// for the system service (`Options::acls`, DESIGN 4): of every folder,
-    /// or of those `only` names ([`Keeper::acl_targets`]). Each is read
-    /// again only once its folder's change time moved, which a change of
-    /// its ACL moves. One that cannot be read is left out: its folder is
-    /// not known then, never answered as its mode alone says.
     /// The security descriptors its folders are judged by, learned once for
     /// each security id it holds (Windows' system service, DESIGN 4): an
     /// index read back learned none, and a folder whose descriptor is not
@@ -684,6 +689,12 @@ impl Keeper {
         }
     }
 
+    /// The access ACLs of the folders whose mode says they have one, read
+    /// for the system service (`Options::acls`, DESIGN 4): of every folder,
+    /// or of those `only` names ([`Keeper::acl_targets`]). Each is read
+    /// again only once its folder's change time moved, which a change of
+    /// its ACL moves. One that cannot be read is left out: its folder is
+    /// not known then, never answered as its mode alone says.
     fn read_acls(&mut self, only: Option<&[FolderId]>) {
         if !self.opts.acls {
             return;
@@ -771,12 +782,22 @@ impl Keeper {
         cancel: &Cancel,
     ) -> Result<Refreshed, Error> {
         let done = update::reread_named(&mut self.index, &self.root, &self.opts, cancel, folders);
-        if let Ok(d) = &done {
-            let looked = self.acl_targets(d);
-            self.read_acls(Some(&looked));
-        }
+        // What was read has its ACLs read, cut short or not: it is in the
+        // index either way.
+        let looked = self.acl_targets(match &done {
+            Ok(done) => done,
+            Err(cut) => &cut.done,
+        });
+        self.read_acls(Some(&looked));
         self.root.let_go();
-        let done = done?;
+        let done = match done {
+            Ok(done) => done,
+            Err(cut) => {
+                let error = self.cut_short(cut);
+                self.publish_live();
+                return Err(error);
+            }
+        };
         self.append(done.records.iter().cloned());
         self.note(&done.watches);
         self.prune();
@@ -838,17 +859,22 @@ impl Keeper {
         if self.opts.watcher.is_none() {
             return;
         }
+        // Descriptors a folder's number no longer holds, let go of once the
+        // whole batch is noted, unless a folder of it claims them: a
+        // folder moved keeps its descriptor (inotify gives the same one
+        // for the same folder), and is noted under its new number maybe
+        // after its old number was given to another folder. Let go of at
+        // once, the moved folder's watch was removed while it was noted as
+        // watched, and nothing made in it was heard.
+        let mut dropped = Vec::new();
         for &(folder, watch) in watches {
             if let Watch::Watched(wd) = watch {
                 // The folder's number held another descriptor: a number
-                // given again. That one's watch goes.
+                // given again, or the folder watched anew.
                 if let Some(old) = self.by_folder.insert(folder, wd)
                     && old != wd
                 {
-                    self.watches.remove(&old);
-                    if let Some(watcher) = &self.opts.watcher {
-                        watcher.unwatch(old);
-                    }
+                    dropped.push(old);
                 }
                 // The descriptor watched another folder: the same folder,
                 // moved and read again under a number of its own.
@@ -868,6 +894,29 @@ impl Keeper {
                 }
             }
         }
+        for old in dropped {
+            let claimed = self
+                .watches
+                .get(&old)
+                .is_some_and(|f| self.by_folder.get(f) == Some(&old));
+            if !claimed {
+                self.watches.remove(&old);
+                if let Some(watcher) = &self.opts.watcher {
+                    watcher.unwatch(old);
+                }
+            }
+        }
+    }
+
+    /// A refresh, an install or a reread cut short: what it did before is
+    /// in the index, so it is logged and its watches noted as any other's,
+    /// or the log would no longer replay to the index, and a folder's
+    /// watch would be held unknown. Gives the error that cut it.
+    fn cut_short(&mut self, cut: update::Cut) -> Error {
+        self.append(cut.done.records.iter().cloned());
+        self.note(&cut.done.watches);
+        self.prune();
+        cut.error
     }
 
     /// Let go of the watches of folders no longer in the index.
@@ -1028,7 +1077,12 @@ impl Keeper {
     }
 
     /// What changed below `below` since `since`, and the token to ask from
-    /// next; too old if the log does not reach back to it.
+    /// next; too old if the log does not reach back to it. What came of
+    /// `below` itself, from the folders above it, too: its folder, or one
+    /// above it, removed or made (an entry of a folder above it, on the
+    /// way to it, removed or added), or not covered. Their records are
+    /// the folders above's, and were once left out: the folder asked for
+    /// removed, no event said so.
     pub fn changes(&self, below: &Path, since: Token) -> Result<(Vec<Event>, Token), TooOld> {
         let log = self.log.as_ref().ok_or(TooOld)?;
         let now = log.token();
@@ -1042,6 +1096,31 @@ impl Keeper {
                 continue;
             };
             if !f.path.starts_with(below) {
+                // A folder above `below`: what came of the folder toward it.
+                let Some(next) = below
+                    .strip_prefix(&f.path)
+                    .ok()
+                    .and_then(|rest| rest.components().next())
+                else {
+                    continue;
+                };
+                if let crate::block::State::NotCovered(why) = f.state {
+                    events.push(Event::NotCovered {
+                        path: f.path.clone(),
+                        why,
+                    });
+                }
+                // Its removal or its making alone: a folder above changed,
+                // its times moved, is no change below it.
+                let next = log::path_bytes(Path::new(next.as_os_str()));
+                let toward = |c: &&log::Change| *c.name == *next && c.op != Op::Changed;
+                for change in f.changes.iter().filter(toward) {
+                    events.push(Event::Entry {
+                        path: f.path.join(crate::index::component(&change.name)),
+                        op: change.op,
+                        entry: change.entry,
+                    });
+                }
                 continue;
             }
             if let crate::block::State::NotCovered(why) = f.state {

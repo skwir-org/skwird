@@ -397,9 +397,6 @@ fn remove_unnamed(dir: &Path, segments: &[u64], ids: &[ChunkId]) {
     }
 }
 
-/// The index saved in `dir`, its files mapped, and what it says of
-/// itself. Every file is checked as it is read; any that does not read
-/// as its layout refuses the whole.
 /// What the last save in `dir` says, its manifest alone read: where its
 /// change history was read up to, before the index is loaded. None where
 /// none is saved, or it does not read.
@@ -407,6 +404,9 @@ pub fn read_mark(dir: &Path) -> Option<Mark> {
     read_manifest(dir).ok().map(|m| m.mark)
 }
 
+/// The index saved in `dir`, its files mapped, and what it says of
+/// itself. Every file is checked as it is read; any that does not read
+/// as its layout refuses the whole.
 pub fn load(dir: &Path, limits: Limits) -> Result<(Index, Mark), LoadError> {
     let manifest = read_manifest(dir)?;
     let segments = manifest

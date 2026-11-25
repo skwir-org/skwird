@@ -136,6 +136,31 @@ fn a_folder_made_filled_and_moved_within_the_subtree_is_applied() {
     assert!(k.live()[0].since.is_some(), "still live");
 }
 
+/// A watched folder holding another, moved from one live subtree to
+/// another, its old parent read first in the batch: the folder within is
+/// still heard. Inotify gives a folder moved the descriptors it had, and
+/// the moved folder was given the number its inner folder had just let
+/// go of: that number's old descriptor, the inner folder's own, was let
+/// go of while the inner folder was noted as watched by it.
+#[test]
+fn a_folder_moved_between_subtrees_keeps_the_watches_within() {
+    let s = Scratch::new("live-between");
+    s.file("p/x/y/one.txt");
+    s.dir("q");
+    let (mut k, w) = watching(&s, &["p", "q"], 100);
+    assert_eq!(w.watching(), 4, "p, p/x, p/x/y and q");
+    s.rename("p/x", "q/x");
+    assert!(!apply(&mut k, &w));
+    let got = paths(k.index());
+    assert!(got.contains(Path::new("q/x/y/one.txt")), "{got:?}");
+    assert!(!got.iter().any(|p| p.starts_with("p/x")), "{got:?}");
+    s.file("q/x/y/after.txt");
+    assert!(!apply(&mut k, &w));
+    let got = paths(k.index());
+    assert!(got.contains(Path::new("q/x/y/after.txt")), "{got:?}");
+    assert!(k.live().iter().all(|l| l.since.is_some()), "still live");
+}
+
 /// A folder moved out of the subtree and back: nothing of it stays under
 /// its old path while it is out, and it is back, read, once returned.
 #[test]
@@ -220,7 +245,7 @@ fn a_folder_removed_lets_go_of_its_watch() {
 
 /// Register `scopes` (below the root) with the keeper and its watcher.
 fn register(k: &mut Keeper, w: &Watcher, s: &Scratch, scopes: &[&str]) {
-    let base = std::fs::canonicalize(s.path()).unwrap();
+    let base = skwird_crawl::canonical(s.path()).unwrap();
     w.set_scopes(scopes.iter().map(|p| base.join(p)).collect());
     let rels: Vec<PathBuf> = scopes.iter().map(PathBuf::from).collect();
     k.set_scopes(&rels, &Cancel::default()).unwrap();

@@ -213,23 +213,24 @@ impl Reader<'_> {
     }
 }
 
-/// A path's bytes: as the system names it on Unix, its WTF-8 on Windows
-/// ([`skwird_crawl::wtf8`]), as the crawl gives names.
+/// A path's bytes, or a name's: as the system names it on Unix, its WTF-8
+/// on Windows ([`skwird_crawl::wtf8`]), as the crawl gives names. Never
+/// Rust's encoded bytes of an `OsStr`, which it does not promise.
 #[cfg(unix)]
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     use std::os::unix::ffi::OsStrExt;
     std::borrow::Cow::Borrowed(path.as_os_str().as_bytes())
 }
 
 #[cfg(windows)]
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     let mut out = Vec::new();
     skwird_crawl::wtf8::push(path, &mut out);
     std::borrow::Cow::Owned(out)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Borrowed(path.as_os_str().as_encoded_bytes())
 }
 

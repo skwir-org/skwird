@@ -264,12 +264,15 @@ fn take_item(bytes: &[u8], at: &mut usize) -> Item {
     }
 }
 
-/// The last name of a folder's path below the root.
-fn last_name(crawled: &Crawled) -> &[u8] {
+/// The last name of a folder's path below the root, its bytes as the
+/// crawl gives names (`log::path_bytes`).
+fn last_name(crawled: &Crawled) -> std::borrow::Cow<'_, [u8]> {
     crawled
         .rel
         .file_name()
-        .map_or(&[], std::ffi::OsStr::as_encoded_bytes)
+        .map_or(std::borrow::Cow::Borrowed(&[]), |n| {
+            crate::log::path_bytes(std::path::Path::new(n))
+        })
 }
 
 impl Packer {
@@ -279,7 +282,7 @@ impl Packer {
         let name = if slot == 0 {
             0
         } else {
-            self.names.intern(last_name(crawled))
+            self.names.intern(&last_name(crawled))
         };
         if self.places.len() <= slot {
             self.places.resize(slot + 1, UNSEEN);

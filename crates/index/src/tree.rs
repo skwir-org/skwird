@@ -71,6 +71,9 @@ pub struct Tree {
     locs: Pages<Option<Loc>>,
     /// Numbers let go of, given again first.
     free: Vec<FolderId>,
+    /// Numbers let go of while they are held ([`Tree::hold_numbers`]),
+    /// given again only once the hold ends.
+    held: Option<Vec<FolderId>>,
     next_chunk: ChunkId,
     limits: Limits,
     /// Its shape ([`Tree::shape`]).
@@ -101,6 +104,7 @@ impl Tree {
             chunks: HashMap::new(),
             locs: Pages::new(None),
             free: Vec::new(),
+            held: None,
             next_chunk: 0,
             limits,
             shape: next_shape(),
@@ -128,6 +132,7 @@ impl Tree {
             chunks: HashMap::with_capacity(chunks.len()),
             locs: Pages::new(None),
             free: Vec::new(),
+            held: None,
             next_chunk: chunks.iter().map(|(id, _)| id + 1).max().unwrap_or(0),
             limits,
             shape: next_shape(),
@@ -191,6 +196,25 @@ impl Tree {
     /// the number it had.
     pub fn shape(&self) -> u64 {
         self.shape
+    }
+
+    /// Hold the numbers let go of from now on until
+    /// [`Tree::release_numbers`]: while held, a number asked about a
+    /// folder never names another one, made meanwhile, that was given it.
+    /// False where they were held already, the hold then its holder's.
+    pub fn hold_numbers(&mut self) -> bool {
+        if self.held.is_some() {
+            return false;
+        }
+        self.held = Some(Vec::new());
+        true
+    }
+
+    /// The numbers held given again, in the order they were let go of.
+    pub fn release_numbers(&mut self) {
+        if let Some(held) = self.held.take() {
+            self.free.extend(held);
+        }
     }
 
     /// A number for a folder to be made.
@@ -421,9 +445,9 @@ impl Tree {
 
     /// Remove `folder`'s subtree, and let go of its numbers.
     pub fn remove(&mut self, folder: FolderId) {
-        for block in self.take(folder) {
-            self.free.push(block.folder);
-        }
+        let taken = self.take(folder);
+        let free = self.held.as_mut().unwrap_or(&mut self.free);
+        free.extend(taken.iter().map(|block| block.folder));
     }
 
     /// Put `blocks` in place of the `remove` chunks at position `at` of

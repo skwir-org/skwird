@@ -230,6 +230,36 @@ pub struct Refreshed {
     pub cut: usize,
 }
 
+/// A refresh, an install or a reread that failed part way (cancelled, a
+/// crawl that failed): what it did before is in the index all the same,
+/// to be logged and its watches noted as any other's, or the log no
+/// longer replays to the index. No `From` makes it an [`Error`]: a `?`
+/// would drop what it did.
+#[derive(Debug)]
+pub struct Cut {
+    pub error: Error,
+    pub done: Box<Refreshed>,
+}
+
+/// `done`, or cut short by the error `result` gives.
+fn ended(result: Result<(), Error>, done: Refreshed) -> Result<Refreshed, Cut> {
+    match result {
+        Ok(()) => Ok(done),
+        Err(error) => Err(Cut {
+            error,
+            done: Box::new(done),
+        }),
+    }
+}
+
+/// Cut short before anything was done.
+fn at_once(error: Error) -> Cut {
+    Cut {
+        error,
+        done: Box::default(),
+    }
+}
+
 /// Whether `entry` is the folder whose block is `child`, by identity.
 fn same_folder(index: &Index, child: FolderId, item: &Item, entry: &Entry) -> bool {
     match index.facts_of(child) {
@@ -602,10 +632,11 @@ impl Index {
 /// Prove `index` current below `root`, where nothing watched: the mount
 /// table read again, every stored folder checked, each stale one read
 /// again, each new one crawled. Done, its names are checked as of when
-/// this began; on a filesystem whose change times do not tell (FUSE),
-/// as of then alone. Cancelled, the index stays sound, its proof as it
-/// was. A root replaced since it was opened is an error: open it again,
-/// and build again.
+/// this began; on a filesystem whose change times do not tell (FUSE,
+/// [`Root::times_tell`]), as of then alone. Cancelled, the index stays
+/// sound, its proof as it was, and what was done before is given with
+/// the error ([`Cut`]). A root replaced since it was opened is an error:
+/// open it again, and build again.
 ///
 /// With [`Options::watcher`], each folder read within the watcher's
 /// subtrees is watched before its entries are read: what came of each is
@@ -615,7 +646,7 @@ pub fn refresh(
     root: &mut Root,
     opts: &Options,
     cancel: &Cancel,
-) -> Result<Refreshed, Error> {
+) -> Result<Refreshed, Cut> {
     refresh_by(index, root, opts, cancel, &check)
 }
 
@@ -628,16 +659,16 @@ pub fn refresh_by(
     opts: &Options,
     cancel: &Cancel,
     prove: skwird_crawl::Checker<'_>,
-) -> Result<Refreshed, Error> {
+) -> Result<Refreshed, Cut> {
     let start = Time::now();
-    root.reread_mounts().map_err(Error::Root)?;
+    root.reread_mounts().map_err(|e| at_once(Error::Root(e)))?;
     let (ids, stored) = index.stored(|_| true);
-    let checked = prove(root, &stored, opts, cancel)?;
+    let checked = prove(root, &stored, opts, cancel).map_err(at_once)?;
     let mut done = Refreshed {
         checked: stored.len(),
         ..Refreshed::default()
     };
-    apply(
+    let applied = apply(
         index,
         root,
         opts,
@@ -647,8 +678,9 @@ pub fn refresh_by(
         &[],
         checked.stale,
         &mut done,
-    )?;
-    let tells = root.fs_name() != "fuse";
+    );
+    let done = ended(applied, done)?;
+    let tells = root.times_tell();
     index.set_proof(if tells {
         Proof::Checked(start)
     } else {
@@ -671,8 +703,8 @@ pub fn install(
     opts: &Options,
     cancel: &Cancel,
     scope: &Path,
-) -> Result<Refreshed, Error> {
-    root.reread_mounts().map_err(Error::Root)?;
+) -> Result<Refreshed, Cut> {
+    root.reread_mounts().map_err(|e| at_once(Error::Root(e)))?;
     let mut done = Refreshed::default();
     // A folder made since its parent was last read is not in the index:
     // the nearest folder above it held is read again first, so that it is
@@ -692,7 +724,15 @@ pub fn install(
         }
     }
     let (ids, stored) = index.stored(|rel| rel.starts_with(scope));
-    let (checked, watches) = check_watched(root, &stored, opts, cancel)?;
+    let (checked, watches) = match check_watched(root, &stored, opts, cancel) {
+        Ok(checked) => checked,
+        Err(error) => {
+            return Err(Cut {
+                error,
+                done: Box::new(done),
+            });
+        }
+    };
     done.checked += stored.len();
     done.watches.extend(
         ids.iter()
@@ -700,7 +740,7 @@ pub fn install(
             .zip(watches)
             .filter(|(_, w)| *w != Watch::Unasked),
     );
-    apply(
+    let applied = apply(
         index,
         root,
         opts,
@@ -710,8 +750,8 @@ pub fn install(
         &[],
         checked.stale,
         &mut done,
-    )?;
-    Ok(done)
+    );
+    ended(applied, done)
 }
 
 /// Read again each of `folders`, as a change heard in it asks, and crawl
@@ -722,7 +762,7 @@ pub fn reread_folders(
     opts: &Options,
     cancel: &Cancel,
     folders: &[FolderId],
-) -> Result<Refreshed, Error> {
+) -> Result<Refreshed, Cut> {
     let whole: Vec<HeardFolder> = folders.iter().map(|&f| (f, None)).collect();
     reread_named(index, root, opts, cancel, &whole)
 }
@@ -740,7 +780,7 @@ pub fn reread_named(
     opts: &Options,
     cancel: &Cancel,
     folders: &[HeardFolder],
-) -> Result<Refreshed, Error> {
+) -> Result<Refreshed, Cut> {
     let mut ids = Vec::with_capacity(folders.len());
     let mut named = Vec::with_capacity(folders.len());
     let mut stored = Stored::with_capacity(folders.len(), folders.len() * 64);
@@ -762,17 +802,44 @@ pub fn reread_named(
     }
     let stale = (0..ids.len()).map(|i| (i, Stale::Changed)).collect();
     let mut done = Refreshed::default();
-    apply(
+    let applied = apply(
         index, root, opts, cancel, &ids, &stored, &named, stale, &mut done,
-    )?;
-    Ok(done)
+    );
+    ended(applied, done)
 }
 
 /// Read again each folder of `stored` (numbered `ids`) the verdicts name,
-/// and crawl
-/// each folder new since; what changed in `done`.
+/// and crawl each folder new since; what changed in `done`, cut short or
+/// not. The numbers of the folders it lets go of are held until it ends
+/// ([`Tree::hold_numbers`](crate::tree::Tree::hold_numbers)): a verdict
+/// names its folder by its number, and a folder made by an earlier one
+/// was once given the number of a folder gone, and read in its place, at
+/// a path it never had.
 #[allow(clippy::too_many_arguments)] // the parts of one refresh, shared by three
 fn apply(
+    index: &mut Index,
+    root: &Root,
+    opts: &Options,
+    cancel: &Cancel,
+    ids: &[FolderId],
+    stored: &Stored,
+    named: &[Option<&HashSet<Box<[u8]>>>],
+    verdicts: Vec<(usize, Stale)>,
+    done: &mut Refreshed,
+) -> Result<(), Error> {
+    let held = index.tree_mut().hold_numbers();
+    let applied = apply_held(
+        index, root, opts, cancel, ids, stored, named, verdicts, done,
+    );
+    if held {
+        index.tree_mut().release_numbers();
+    }
+    applied
+}
+
+/// [`apply`], the numbers let go of held.
+#[allow(clippy::too_many_arguments)] // apply's own
+fn apply_held(
     index: &mut Index,
     root: &Root,
     opts: &Options,
