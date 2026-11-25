@@ -2760,6 +2760,63 @@ program alone since, as a release builds it.
     `release_at` of a running engine that says `volumes`, and it asks its
     user once a volume whether to keep it.
 
+**The review before 0.2** (2026-11-25, the user's go, while they
+slept): two rounds, each a review of correctness at its highest effort
+and one of reuse, simplification, efficiency and altitude, then the
+fixes, the gate and the machines after each batch. The first round read
+the whole of main, the second what the first changed. What each fixed is
+in its commits (`git log d770107..`); what they found and left, each
+for a reason of its own:
+- **The line limit is kept at each answer, not where a line is
+  written.** Results and children are batched by bytes, `changes` past a
+  line is answered too old, `totals` past it fails saying so. Unbounded
+  still: `totals`' `by_extension` (it sums to `size` and `alloc`: cutting
+  it needs a field for the rest, a protocol change), the coverage holes
+  of an answer, and `excluded`. The deeper change: `wire::write` refusing
+  a line past `MAX_LINE`, as `read` does, each answer giving its own
+  fallback.
+- **Only a kept volume's check runs off the writer.** Every other root's
+  check still runs on it (AGENTS.md, "Blocking", holds for openings and
+  kept volumes): a system service's root on a sleeping disk holds every
+  sync while its check stats. Each root given a cancel and a read of its
+  own, as a kept volume has, would make one path of the two.
+- **Folders readmitted by the exclusions** are read by each caller that
+  changes them (a change of the exclusions, a sync): the keeper lowering
+  the proof of the scope that holds them would leave no caller to
+  remember.
+- **Folder numbers are held within an apply alone** (`Tree::hold_numbers`),
+  the keeper's watches by a fix of their own: numbers freed parked until
+  the keeper has dropped what named them would make both one rule.
+- **Removable or the system's, decided in three places:** the crawl's
+  detection (one function since, for both engines), the system service's
+  roots, and on Windows a second listing of volumes (`plugged.rs` beside
+  `volumes.rs`) with a predicate of its own beside the system service's
+  `fixed && !removable`. One pass over the mount table giving each
+  filesystem once, with its verdict, would make the partition hold by
+  construction (rule 4).
+- **Windows' code written twice:** the overlapped read's cancel and wait
+  in `Reading` and `Follower`, the final path's loop (its FAT fallback in
+  one), the removal heard by `CM_Register_Notification` in a user's
+  engine and by `RegisterDeviceNotificationW` in the system service.
+- **Exclusions fold names on Windows and macOS by system,** not by
+  volume: a FAT or exFAT stick, or an ext4 folder that ignores case, on
+  Linux compares by case.
+- **Mounts listed again after 1 s (macOS) or 3 s (Windows),** a volume's
+  description or letter coming after its event: a slow device misses
+  both. The events that say it ready would need no constant.
+- **On Windows, a root's folders above it are not renamed** while it is
+  watched: Windows refuses to rename a folder below which one is held
+  open (proven on the runner). A root's own rename is heard in its
+  parent.
+- **On Windows, a file table holding records it could not read** is not
+  built from: the root is walked, the count logged. How often a healthy
+  volume holds one is not measured: the service's log on a machine says.
+- **Tried only on a runner or not at all:** an eject refused on Windows
+  (a file held open on the volume, the root back within
+  `RELEASED_FOR`); a kept volume released at a twin's mount point, and
+  forgotten during its first crawl, in the root tests' machine; FUSE
+  told on macOS and Windows by its volume's name alone.
+
 ## Later
 
 - Packages, beside skwir's: skwir.org's apt and dnf repositories, the

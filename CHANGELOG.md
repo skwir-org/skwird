@@ -6,11 +6,14 @@ the day it is released.
 
 ## 0.2.0 (unreleased)
 
-- **Names in both Unicode forms:** a term is matched composed and
-  decomposed (NFC and NFD), as skwir matches it, so that `café` typed
-  finds a name macOS wrote decomposed, and back. A glob is normalized in
-  its literal parts alone. No name is rewritten, and the index is
-  unchanged. The engine says so in its hello (`names-both-forms`).
+- **Names in both Unicode forms:** a term is matched as typed, composed
+  and decomposed (NFC and NFD), as skwir matches it, so that `café`
+  typed finds a name macOS wrote decomposed, and back, and a character
+  both forms change (U+F900) finds itself. Where case is ignored, a
+  final sigma is a sigma: `ΟΔΟΣ` finds `ΟΔΟΣ.txt`. A glob is normalized
+  in its literal parts alone, its escapes and classes folded where case
+  is ignored. No name is rewritten, and the index is unchanged. The
+  engine says so in its hello (`names-both-forms`).
 - **A sync answers at once on Windows and macOS:** on Windows, a sync of
   any root is a barrier, where one of a root that did not hold the
   engine's folders checked it whole; on macOS, a sync waits at most the
@@ -26,6 +29,24 @@ the day it is released.
   identity or where it is mounted, it is answered once nothing of it is
   held. On Linux, macOS and Windows; the system service keeps none. The
   engine says so in its hello (`volumes`).
+- **Nix:** a Home Manager module (`services.skwird`), for one user on
+  Linux or macOS: the package, their engine for the session, their
+  exclusions declared. The flake's package is offered on macOS too.
+- **Found by a review before this release,** among others:
+  - Linux's system service was never live on a btrfs mounted through a
+    subvolume (Fedora's `/home`): its unit hid the block devices its mark
+    needs.
+  - On Windows and macOS, an exclusion named before its folder existed
+    kept out no folder made with another case (`secret`, `Secret`).
+  - A client started a second engine beside one that answered with an
+    error, and Windows' pipe had no instance between two clients.
+  - On macOS, a volume mounted during a crawl was entered.
+  - On Windows, a root renamed stayed live, a change said by a short
+    name (`LONGFO~1`) was applied nowhere, and a file table holding
+    records it could not read was built from.
+  - `changes` never told the folder asked for removed.
+  - An answer could be longer than a client reads: results are batched
+    by size, and `changes` past a line is answered too old.
 
 ## 0.1.0 (2026-11-24)
 
