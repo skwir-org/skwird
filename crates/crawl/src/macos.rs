@@ -306,6 +306,14 @@ fn dev(dev: libc::dev_t) -> u64 {
     u64::from(dev as u32)
 }
 
+/// A file's device as the crawl keeps it ([`dev`]), from std's metadata,
+/// which widens the signed number with its sign.
+#[allow(clippy::cast_possible_truncation)] // a device number's 32 bits
+pub(crate) fn dev_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    u64::from(meta.dev() as u32)
+}
+
 /// The system's mount table (`getfsstat`), as it holds it now: asked
 /// without waiting on any volume (`MNT_NOWAIT`), a dead server's among
 /// them.

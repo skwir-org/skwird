@@ -163,9 +163,20 @@ impl Exclusions {
 
     #[cfg(any(windows, target_os = "macos"))]
     fn holds_folded(&self, path: &Path) -> bool {
-        path.file_name()
-            .is_some_and(|name| self.folded_names.contains(&fold(name)))
-            && self.folded.contains(&fold(path.as_os_str()))
+        let Some(name) = path.file_name() else {
+            return false;
+        };
+        let named = match name.to_str() {
+            // An ASCII name folds to its ASCII lowercase, which no name
+            // folded holding more than ASCII equals: compared as it is,
+            // nothing made for it, as nearly every folder read is.
+            Some(ascii) if ascii.is_ascii() => self
+                .folded_names
+                .iter()
+                .any(|folded| folded.eq_ignore_ascii_case(ascii)),
+            _ => !self.folded_names.is_empty() && self.folded_names.contains(&fold(name)),
+        };
+        named && self.folded.contains(&fold(path.as_os_str()))
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -223,12 +234,9 @@ fn resolve_one(path: &Path) -> Result<(PathBuf, Option<FileId>), Refused> {
 fn folder_id(path: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok()?;
-    // On macOS, std widens the signed device number with its sign, and
-    // the crawl's identities keep its bits (`macos::dev`): the same here,
-    // or the two never compare equal on a device whose high bit is set.
+    // As the crawl's identities keep it, or the two never compare equal.
     #[cfg(target_os = "macos")]
-    #[allow(clippy::cast_possible_truncation)] // a device number's 32 bits
-    let dev = u64::from(meta.dev() as u32);
+    let dev = crate::macos::dev_of(&meta);
     #[cfg(not(target_os = "macos"))]
     let dev = meta.dev();
     meta.is_dir().then(|| FileId {
@@ -268,6 +276,13 @@ fn an_exclusion_holds_whatever_the_case_of_the_folder_made_later() {
         cfg!(windows) || cfg!(target_os = "macos")
     );
     assert!(!ex.holds(None, &base.join("Secret")));
+    // A name of ASCII alone, compared as it is; one beyond it, folded.
+    let (ex, _) = Exclusions::resolve([base.join("Keys"), base.join("\u{c9}t\u{e9}")]);
+    let folds = cfg!(windows) || cfg!(target_os = "macos");
+    assert_eq!(ex.holds(None, &base.join("KEYS")), folds);
+    assert_eq!(ex.holds(None, &base.join("\u{c9}T\u{c9}")), folds);
+    assert!(!ex.holds(None, &base.join("Keyring")));
+    assert!(!ex.holds(None, &base.join("other").join("keys")));
 }
 
 #[cfg(all(test, unix))]

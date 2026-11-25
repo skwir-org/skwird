@@ -73,7 +73,12 @@ pub struct Removable {
 #[cfg(target_os = "linux")]
 pub fn mounted() -> Result<Vec<Removable>, String> {
     let table = Table::read().map_err(|e| format!("the mount table cannot be read: {e}"))?;
-    Ok(seen_in(&table, Path::new("/sys"), Path::new("/dev")))
+    Ok(seen_with(
+        &table,
+        Path::new("/sys"),
+        Path::new("/dev"),
+        &block_numbers,
+    ))
 }
 
 /// The removable volumes mounted, in the mount table's order.
@@ -158,19 +163,33 @@ const SYSTEM: &[&str] = &[
 #[cfg(target_os = "linux")]
 pub fn is_removable(m: &Mount) -> bool {
     let sys = Path::new("/sys");
-    let devices = crate::canonical(sys.join("devices")).unwrap_or_else(|_| sys.join("devices"));
-    !SYSTEM.iter().any(|p| m.point == Path::new(p))
-        && m.dev.0 != 7
-        && !m.network()
-        && block_device(m, sys, Path::new("/dev"), &block_numbers)
-            .is_some_and(|d| removable(sys, &devices, &d, 0))
+    candidate(m, sys, Path::new("/dev"), &block_numbers)
+        .is_some_and(|d| removable(sys, &devices_of(sys), &d, 0))
 }
 
-/// The removable volumes of `table`, sysfs read from `sys`, `/dev` from
-/// `dev`, udev's names from its `disk`.
+/// The block device of mount `m` where it may be a removable volume's:
+/// none for the running system's mounts, a loop device's, a network's, or
+/// one of no block device ([`block_device`]). The one test of a mount
+/// that [`is_removable`] and [`mounted`] both make.
 #[cfg(target_os = "linux")]
-pub fn seen_in(table: &Table, sys: &Path, dev: &Path) -> Vec<Removable> {
-    seen_with(table, sys, dev, &block_numbers)
+fn candidate(
+    m: &Mount,
+    sys: &Path,
+    dev: &Path,
+    numbers: &dyn Fn(&Path) -> Option<(u32, u32)>,
+) -> Option<PathBuf> {
+    let system = SYSTEM.iter().any(|p| m.point == Path::new(p));
+    if system || m.dev.0 == 7 || m.network() {
+        return None;
+    }
+    block_device(m, sys, dev, numbers)
+}
+
+/// Where `sys`'s `devices` resolves, which a removable device's path is
+/// read below.
+#[cfg(target_os = "linux")]
+fn devices_of(sys: &Path) -> PathBuf {
+    crate::canonical(sys.join("devices")).unwrap_or_else(|_| sys.join("devices"))
 }
 
 /// The numbers of the block device whose node is at `node`, links
@@ -187,8 +206,9 @@ fn block_numbers(node: &Path) -> Option<(u32, u32)> {
     Some((rustix::fs::major(rdev), rustix::fs::minor(rdev)))
 }
 
-/// [`seen_in`], a block device's numbers told by `numbers` (a test's own
-/// devices are no nodes of the system's).
+/// The removable volumes of `table`, sysfs read from `sys`, `/dev` from
+/// `dev`, udev's names from its `disk`, a block device's numbers told by
+/// `numbers` (a test's own devices are no nodes of the system's).
 #[cfg(target_os = "linux")]
 fn seen_with(
     table: &Table,
@@ -197,21 +217,24 @@ fn seen_with(
     numbers: &dyn Fn(&Path) -> Option<(u32, u32)>,
 ) -> Vec<Removable> {
     let disk = dev.join("disk");
-    let devices = crate::canonical(sys.join("devices")).unwrap_or_else(|_| sys.join("devices"));
+    let devices = devices_of(sys);
     let mounts = table.mounts();
-    // Each mount's block device, where it has one and is no loop device's,
-    // network's or the running system's; none for a mount a later one at
-    // the same point hides.
+    // A mount a later one at the same point hides, told from the last.
+    let mut later = std::collections::HashSet::new();
+    let mut hidden = vec![false; mounts.len()];
+    for (i, m) in mounts.iter().enumerate().rev() {
+        hidden[i] = !later.insert(m.point.as_path());
+    }
+    // Each mount's block device, where it may be a removable volume's;
+    // none for a hidden one.
     let of: Vec<Option<PathBuf>> = mounts
         .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let hidden = mounts[i + 1..].iter().any(|later| later.point == m.point);
-            let system = SYSTEM.iter().any(|p| m.point == Path::new(p));
-            if hidden || system || m.dev.0 == 7 || m.network() {
+        .zip(hidden)
+        .map(|(m, hidden)| {
+            if hidden {
                 return None;
             }
-            block_device(m, sys, dev, numbers)
+            candidate(m, sys, dev, numbers)
         })
         .collect();
     let mut seen: Vec<(PathBuf, Removable)> = Vec::new();

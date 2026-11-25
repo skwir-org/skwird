@@ -685,10 +685,7 @@ fn positions(roots: &[Followed], id: u64) -> Vec<Heard> {
 
 /// The device of the volume `path` is on, as the crawl keeps it.
 fn device_of(path: &Path) -> std::io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    #[allow(clippy::cast_possible_truncation)] // a device number's 32 bits, sign-extended by std
-    let dev = std::fs::metadata(path)?.dev() as u32;
-    Ok(u64::from(dev))
+    Ok(crate::macos::dev_of(&std::fs::metadata(path)?))
 }
 
 /// What one event says, put in `heard`.
