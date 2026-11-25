@@ -223,6 +223,10 @@ pub struct Root {
     /// Its volume, open while a folder's record is read, let go of with its
     /// folder ([`Root::let_go`]).
     volume: Mutex<Option<Arc<Handle>>>,
+    /// Its folder is a volume's mount point (a kept removable volume
+    /// mounted at a folder): opened through it, the volume's root is the
+    /// root.
+    mounted: bool,
 }
 
 impl Root {
@@ -243,8 +247,19 @@ impl Root {
         if on_network(&path) {
             return Err(Error::Network);
         }
-        let handle = open_path(&path).map_err(Error::Root)?;
-        let (stat, attributes) = stat_of(&handle).map_err(Error::Root)?;
+        let mut handle = open_path(&path).map_err(Error::Root)?;
+        let (mut stat, mut attributes) = stat_of(&handle).map_err(Error::Root)?;
+        // A root that is a volume's mount point is the volume, opened
+        // through it: opened as itself, it is an empty folder of the volume
+        // holding it. A link is never followed.
+        let mounted = matches!(
+            opened_kind(&handle, attributes),
+            Folder::NotCovered(Why::Mount)
+        );
+        if mounted {
+            handle = open_path_through(&path).map_err(Error::Root)?;
+            (stat, attributes) = stat_of(&handle).map_err(Error::Root)?;
+        }
         if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(Error::Root(std::io::Error::from_raw_os_error(267)));
         }
@@ -261,6 +276,7 @@ impl Root {
             inside,
             exclusions,
             volume: Mutex::new(None),
+            mounted,
         })
     }
 
@@ -333,7 +349,12 @@ impl Root {
         if let Some(handle) = held.as_ref() {
             return Ok(Arc::clone(handle));
         }
-        let handle = open_path(&self.path).map_err(|e| {
+        let opened = if self.mounted {
+            open_path_through(&self.path)
+        } else {
+            open_path(&self.path)
+        };
+        let handle = opened.map_err(|e| {
             Fail::of_error(
                 e.raw_os_error()
                     .and_then(|n| u32::try_from(n).ok())
@@ -554,6 +575,16 @@ pub fn verbatim(path: &Path) -> Vec<u16> {
 
 /// The folder at `path`, opened itself, never what it links to.
 fn open_path(path: &Path) -> std::io::Result<Handle> {
+    open_folder_path(path, FILE_FLAG_OPEN_REPARSE_POINT)
+}
+
+/// The folder at `path`, a volume's mount point opened through, to the
+/// volume's root.
+fn open_path_through(path: &Path) -> std::io::Result<Handle> {
+    open_folder_path(path, 0)
+}
+
+fn open_folder_path(path: &Path, reparse: u32) -> std::io::Result<Handle> {
     let name = verbatim(path);
     // SAFETY: a NUL-terminated name alive for the call, no security
     // attributes, no template; the handle given is ours to close.
@@ -564,7 +595,7 @@ fn open_path(path: &Path) -> std::io::Result<Handle> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS | reparse,
             std::ptr::null_mut(),
         )
     };
