@@ -2723,7 +2723,10 @@ program alone since, as a release builds it.
   does, holds to skwir's own cases, and reads a name where either form
   could match; globset moved to 0.4.22, skwir's, which reads POSIX
   classes. The engine says `names-both-forms` in its hello
-  (`skwird_protocol::NAMES_BOTH_FORMS`).
+  (`skwird_protocol::NAMES_BOTH_FORMS`). On 2026-11-25, as skwir's
+  session asked: a term matched as typed too (characters both forms
+  change), and a final sigma taken as a sigma where case is ignored
+  (DESIGN, open question 5).
 - **Removable volumes on request** (open question 8): the request
   (Protocol, "Removable volumes") checked by skwir's session on
   2026-11-24: the six points it found are in it since (letting go

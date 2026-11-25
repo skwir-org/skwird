@@ -24,40 +24,47 @@ fn matcher(term: &str, case_sensitive: bool) -> Matcher {
 }
 
 /// What skwir's `NameMatch` answers, written plainly from its rules (no
-/// mask, no byte-by-byte path), to hold the matcher to.
+/// mask, no byte-by-byte path), to hold the matcher to. A glob's classes
+/// and escapes are folded by the matcher's own `fold_part`, held to
+/// skwir's cases apart (`a_glob_folds_its_escapes_and_classes`).
 fn skwir_matches(text: &str, case_sensitive: bool, name: &[u8]) -> bool {
     let name = String::from_utf8_lossy(name);
     let typed = text
         .contains(['*', '?', '['])
         .then(|| compiled(text, case_sensitive).ok())
         .flatten();
-    let both = |t: &str| -> Vec<String> { vec![t.nfc().collect(), t.nfd().collect()] };
+    // As typed, composed, decomposed.
+    let three =
+        |t: &str| -> Vec<String> { vec![t.to_owned(), t.nfc().collect(), t.nfd().collect()] };
+    // Lowercased, a final sigma a sigma.
+    let low = |t: &str| t.to_lowercase().replace('ς', "σ");
     if let Some(typed) = typed {
-        let parts = glob_parts(text);
-        if parts
-            .iter()
-            .all(|(literal, part)| !literal || part.is_ascii())
-        {
+        if text.is_ascii() {
             return typed.compile_matcher().is_match(&*name);
         }
+        let parts = glob_parts(text);
         let hay = if case_sensitive {
             name.to_string()
         } else {
-            name.to_lowercase()
+            low(&name)
         };
-        return [0, 1].into_iter().any(|form| {
+        return [0, 1, 2].into_iter().any(|form| {
             let glob: String = parts
                 .iter()
                 .map(|&(literal, part)| {
                     if !literal {
-                        return part.to_owned();
+                        return if case_sensitive {
+                            part.to_owned()
+                        } else {
+                            fold_part(false, part).into_owned()
+                        };
                     }
                     let part = if case_sensitive {
                         part.to_owned()
                     } else {
-                        part.to_lowercase()
+                        low(part)
                     };
-                    both(&part).swap_remove(form)
+                    three(&part).swap_remove(form)
                 })
                 .collect();
             compiled(&glob, case_sensitive)
@@ -67,12 +74,10 @@ fn skwir_matches(text: &str, case_sensitive: bool, name: &[u8]) -> bool {
         });
     }
     if case_sensitive {
-        both(text).iter().any(|t| name.contains(t.as_str()))
+        three(text).iter().any(|t| name.contains(t.as_str()))
     } else {
-        let hay = name.to_lowercase();
-        both(&text.to_lowercase())
-            .iter()
-            .any(|t| hay.contains(t.as_str()))
+        let hay = low(&name);
+        three(&low(text)).iter().any(|t| hay.contains(t.as_str()))
     }
 }
 
@@ -95,6 +100,20 @@ const NAMES: &[&[u8]] = &[
     b"a[b",
     b"",
     b"UPPER",
+    // Characters that composing and decomposing both change.
+    "\u{f900}.txt".as_bytes(),   // a CJK compatibility ideograph
+    "\u{958}.txt".as_bytes(),    // Devanagari qa, excluded from composing
+    "\u{1f71}.txt".as_bytes(),   // alpha with oxia
+    "\u{212b} 1.txt".as_bytes(), // the Ångström sign
+    "\u{2126} 2.txt".as_bytes(), // the Ohm sign
+    "\u{fb2a}.txt".as_bytes(),   // a Hebrew presentation form
+    "ΟΔΟΣ".as_bytes(),           // its sigma final when lowercased
+    b"OK.txt",
+    "ΛΟΓΑΡΙΑΣΜΟΣ.pdf".as_bytes(),
+    "été.txt".as_bytes(),
+    "ÉTÉ.txt".as_bytes(),
+    "ς.txt".as_bytes(),
+    "ωmega.txt".as_bytes(),
 ];
 
 const TERMS: &[&str] = &[
@@ -141,6 +160,26 @@ const TERMS: &[&str] = &[
     "caf\u{e9}[",
     "\u{434}\u{43e}\u{43c}",
     "\u{434}\u{43e}\u{43c}*",
+    "\u{f900}",
+    "\u{958}",
+    "\u{1f71}",
+    "\u{212b}",
+    "\u{2126}",
+    "\u{fb2a}",
+    "*\u{f900}*",
+    "\u{2126} *",
+    "ΟΔΟΣ",
+    "*ΟΔΟΣ*",
+    "οδοσ",
+    "ΟΔΟΣ.txt",
+    "\u{212a}",
+    "λογαριασμος",
+    "ΟΔΟΣ*",
+    "\\É*",
+    "é*\\É*",
+    "[Ω]*",
+    "[!ÉΩ]*",
+    "[À-ÞÉ]*",
 ];
 
 /// For every term, both cases, every name: the matcher answers as
@@ -237,8 +276,174 @@ fn one_form_where_both_are_one() {
     for term in ["report", "\u{434}\u{43e}\u{43c}", "\u{65e5}\u{672c}"] {
         assert_eq!(forms(term), [term], "{term:?}");
     }
-    assert_eq!(forms("cafe\u{301}"), ["caf\u{e9}", "cafe\u{301}"]);
+    assert_eq!(forms("cafe\u{301}"), ["cafe\u{301}", "caf\u{e9}"]);
     assert_eq!(forms("caf\u{e9}"), ["caf\u{e9}", "cafe\u{301}"]);
+    // Both forms change it: as typed, then the two.
+    assert_eq!(forms("\u{1f71}"), ["\u{1f71}", "\u{3ac}", "\u{3b1}\u{301}"]);
+    assert_eq!(forms("\u{2126}"), ["\u{2126}", "\u{3a9}"]);
+}
+
+/// A term holding a character that composing and decomposing both change
+/// finds a name holding the very same character: it is matched as typed
+/// too. Each of those characters, with case ignored and with it counted.
+#[test]
+fn a_character_both_forms_change_finds_itself() {
+    for (term, name) in [
+        ("\u{f900}", "\u{f900}.txt"),
+        ("\u{958}", "\u{958}.txt"),
+        ("\u{1f71}", "\u{1f71}.txt"),
+        ("\u{212b}", "\u{212b} 1.txt"),
+        ("\u{2126}", "\u{2126} 2.txt"),
+        ("\u{fb2a}", "\u{fb2a}.txt"),
+        ("*\u{f900}*", "\u{f900}.txt"),
+        ("\u{2126} *", "\u{2126} 2.txt"),
+    ] {
+        for cs in [false, true] {
+            assert!(finds(term, cs, name), "{term:?} ({cs}) in {name:?}");
+        }
+    }
+    // And still the other forms: the Ohm sign typed finds omega.
+    assert!(finds("\u{2126}", true, "\u{3a9}.txt"));
+}
+
+/// Where case is ignored, a final sigma is a sigma: `ΟΔΟΣ` typed, which
+/// lowers alone to a final `ς`, finds `ΟΔΟΣ.txt`, whose `Σ` lowers to `σ`
+/// there, and back; a glob alike. Where case counts, the letters are as
+/// typed.
+#[test]
+fn a_final_sigma_is_a_sigma_where_case_is_ignored() {
+    for term in ["ΟΔΟΣ", "οδος", "οδοσ", "*ΟΔΟΣ*", "οδος*"] {
+        for name in ["ΟΔΟΣ.txt", "ΟΔΟΣ", "οδος.txt"] {
+            assert!(finds(term, false, name), "{term:?} in {name:?}");
+        }
+    }
+    assert!(finds("ΟΔΟΣ", true, "ΟΔΟΣ.txt"));
+    assert!(!finds("οδος", true, "οδοσ.txt"), "case counts: ς is not σ");
+}
+
+/// skwir's own cases (skwir-20, 2026-11-25, each checked through skwir's
+/// matcher), as (term, name, case counts, found), each matched as the
+/// index matches it: by the matcher, its mask letting it through.
+fn hold_to(cases: &[(&str, &str, bool, bool)]) {
+    for &(term, name, cs, expect) in cases {
+        assert_eq!(finds(term, cs, name), expect, "{term:?} ({cs}) in {name:?}");
+        assert_eq!(
+            skwir_matches(term, cs, name.as_bytes()),
+            expect,
+            "the reference: {term:?} ({cs}) in {name:?}"
+        );
+    }
+}
+
+/// NM-1: a term finds its own text where neither NFC nor NFD keeps it;
+/// an ASCII name is compared with the term's one ASCII form (the Kelvin
+/// sign's `K`, case counting).
+#[test]
+fn skwirs_cases_of_the_three_forms() {
+    hold_to(&[
+        ("\u{f900}", "\u{f900}.txt", false, true),
+        ("\u{f900}", "\u{f900}.txt", true, true),
+        ("\u{958}", "\u{958}.txt", false, true),
+        ("\u{1f71}", "\u{1f71}.txt", false, true),
+        ("\u{212b}", "\u{212b}.txt", true, true),
+        ("\u{2126}", "\u{2126}.txt", true, true),
+        ("\u{fb2a}", "\u{fb2a}.txt", false, true),
+        ("\u{212a}", "\u{212a}.txt", true, true),
+        ("\u{f900}*", "\u{f900}.txt", false, true),
+        ("\u{f900}*", "\u{f900}.txt", true, true),
+        ("*\u{958}.txt", "\u{958}.txt", false, true),
+        // Unchanged.
+        ("\u{f900}", "\u{8c48}.txt", false, true),
+        ("\u{212b}", "\u{c5}.txt", true, true),
+        ("\u{212b}", "A\u{30a}.txt", true, true),
+        ("\u{212a}", "OK.txt", true, true),
+        ("\u{212a}", "OK \u{e9}.txt", true, true),
+    ]);
+    assert_eq!(forms("\u{1f71}"), ["\u{1f71}", "\u{3ac}", "\u{3b1}\u{301}"]);
+    assert_eq!(forms("cafe\u{301}"), ["cafe\u{301}", "caf\u{e9}"]);
+    for (term, count) in [
+        ("\u{f900}", 2),
+        ("\u{1f71}", 3),
+        ("\u{1f71}*", 3),
+        ("caf\u{e9}", 2),
+        ("cafe\u{301}", 2),
+    ] {
+        assert_eq!(matcher(term, false).patterns(), count, "{term:?}");
+    }
+}
+
+/// NM-2: where case is ignored, `ς` is taken as `σ`, on the term and the
+/// name alike.
+#[test]
+fn skwirs_cases_of_the_final_sigma() {
+    hold_to(&[
+        ("ΟΔΟΣ", "ΟΔΟΣ.txt", false, true),
+        ("οδος", "ΟΔΟΣ.txt", false, true),
+        ("λογαριασμος", "ΛΟΓΑΡΙΑΣΜΟΣ.pdf", false, true),
+        ("οδοσ", "οδος.txt", false, true),
+        ("ΟΔΟΣ*", "ΟΔΟΣ.txt", false, true),
+        ("*οδος.txt", "ΟΔΟΣ.txt", false, true),
+        // Unchanged.
+        ("ΟΔΟΣ", "οδος.txt", false, true),
+        ("οδος", "ΟΔΟΣ ΜΟΥ.txt", false, true),
+        ("οδος", "οδοσ.txt", true, false),
+    ]);
+    assert_eq!(fold("ΟΔΟΣ"), "οδοσ");
+    assert_eq!(fold("ΣΑΣ"), "σασ");
+    assert_eq!(fold("Straße"), "straße");
+}
+
+/// NM-4: a glob with case ignored folds what its escapes escape, and its
+/// classes' single members, a range's ends left as typed. A backslash
+/// escapes in a glob where it separates no path: on Windows it is a
+/// literal, so the cases with an escape are not Windows' (skwir's
+/// `glob_parts` and globset read it so there too).
+#[test]
+fn a_glob_folds_its_escapes_and_classes() {
+    #[cfg(not(windows))]
+    hold_to(&[
+        ("é*\\É*", "étÉ.txt", false, true),
+        ("é*\\É*", "ÉTÉ.txt", false, true),
+        ("\\É*", "été.txt", false, true),
+        ("\\Σ*", "ς.txt", false, true),
+        // Unchanged.
+        ("\\É*", "été.txt", true, false),
+        ("\\É*", "Été.txt", true, true),
+    ]);
+    hold_to(&[
+        ("[Ω]*", "ωmega.txt", false, true),
+        // Unchanged.
+        ("[Ω]*", "Ωmega.txt", false, true),
+    ]);
+    for (class, folded) in [
+        ("[É]", "[é]"),
+        ("[!ÉΩ]", "[!éω]"),
+        ("[^Σ]", "[^σ]"),
+        ("[]É]", "[]é]"),
+        ("[É-]", "[é-]"),
+        ("[-É]", "[-é]"),
+        ("[a-cÉ]", "[a-cé]"),
+        ("[[:alpha:]É]", "[[:alpha:]é]"),
+        ("[À-ÞÉ]", "[À-Þé]"),
+        // Unchanged: a range's ends, what folds to two, what is folded.
+        ("[É-Ω]", "[É-Ω]"),
+        ("[a-É]", "[a-É]"),
+        ("[a-c-É]", "[a-c-É]"),
+        ("[İ]", "[İ]"),
+        ("[é]", "[é]"),
+    ] {
+        assert_eq!(fold_class(class), folded, "{class:?}");
+    }
+    let glob = |text: &str| {
+        Matcher::new(&NameQuery {
+            pattern: Pattern::Glob(text.to_owned()),
+            case_sensitive: false,
+        })
+    };
+    assert!(
+        glob("[Ω-ΰ]*").is_ok(),
+        "a range's ends, unfolded, do not cross"
+    );
 }
 
 /// A name that is not UTF-8 is matched as it reads.

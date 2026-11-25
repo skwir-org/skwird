@@ -6,19 +6,28 @@
 //!   `[` and compiles as one (globset, no separator rule), else a
 //!   substring, searched for as written (`a[b`);
 //! - **case** is ignored unless asked to count: both sides lowercased
-//!   with `str::to_lowercase` (`ß` is not `ss`). A glob whose literal
-//!   parts are ASCII folds case as globset does, in ASCII alone, on the
-//!   name as it is; one whose literal parts hold more, with case ignored,
-//!   is matched on the name lowercased, those parts lowercased first;
-//! - **both Unicode forms** (open question 5, decided for 0.2): a term is
-//!   matched in its composed and its decomposed form (NFC and NFD),
-//!   lowercased first where case is ignored, then normalized; a glob in
-//!   its literal parts alone, its wildcards, classes and escapes left as
-//!   typed. macOS' programs often write names decomposed, and keyboards
-//!   type them composed. No name is rewritten, and the index is
-//!   unchanged: a name is matched as it is against the two;
-//! - **one pattern where both forms are the same:** every ASCII term, and
-//!   most others (Cyrillic, Han);
+//!   with `str::to_lowercase` (`ß` is not `ss`), then a final sigma (`ς`)
+//!   taken as `σ`: lowercased alone, `ΟΔΟΣ` ends in `ς`, and in the name
+//!   `ΟΔΟΣ.txt` in `σ`, so the word typed would miss its own file
+//!   ([`fold`]). A glob of ASCII folds case as globset does, in ASCII
+//!   alone, on the name as it is; one holding more, with case ignored, is
+//!   matched on the name folded, itself folded first: its literal parts,
+//!   what its escapes escape, its classes' single members, a range's ends
+//!   left as typed (globset reads a class beyond ASCII as bytes, and folded
+//!   ends may cross);
+//! - **its Unicode forms** (open question 5, decided for 0.2): a term is
+//!   matched as typed (lowercased where case is ignored), composed and
+//!   decomposed (NFC and NFD), lowercased first, then normalized; a glob
+//!   in its literal parts alone, its wildcards, classes and escapes left
+//!   as typed. macOS' programs often write names decomposed, and
+//!   keyboards type them composed; and some characters both forms change
+//!   (a CJK compatibility ideograph, the Ohm sign) are found as typed
+//!   alone. No name is rewritten, and the index is unchanged: a name is
+//!   matched as it is against the three;
+//! - **one pattern where the three are the same:** every ASCII term, and
+//!   most others (Cyrillic, Han). An ASCII name is compared byte by byte
+//!   with the term's one ASCII form, if it has one (the Kelvin sign's `K`,
+//!   composed), never lowercased into a string of its own;
 //! - on the name's lossy UTF-8 form.
 //!
 //! Each matcher also says which [`mask`](crate::names::mask) bits a name
@@ -26,7 +35,7 @@
 //! may let a name through that does not match, never keep out one that
 //! does:
 //!
-//! - a term's bits are those both its forms hold (a decomposed `é` holds
+//! - a term's bits are those all its forms hold (a decomposed `é` holds
 //!   an `e`, a composed one does not);
 //! - a substring's bits come from it lowercased as the names were, and
 //!   lowercasing keeps every character's bits but sigma's, whose forms
@@ -67,6 +76,10 @@ enum How {
     /// unless case counts.
     Substring {
         forms: Vec<String>,
+        /// Its one ASCII form, if any: what an ASCII name is compared
+        /// with. Never two: an ASCII text is its own NFC and NFD, and a
+        /// text's NFD is its NFC's.
+        ascii: Option<String>,
         case_sensitive: bool,
     },
     /// The glob in its forms, matched on the name lowercased where
@@ -83,15 +96,23 @@ enum How {
 
 enum Globs {
     One(GlobMatcher),
-    /// Its two forms, matched in one pass.
-    Two(GlobSet),
+    /// Its forms, two or three, matched in one pass.
+    Many(GlobSet),
 }
 
 impl Globs {
     fn is_match(&self, text: &str) -> bool {
         match self {
             Globs::One(glob) => glob.is_match(text),
-            Globs::Two(set) => set.is_match(text),
+            Globs::Many(set) => set.is_match(text),
+        }
+    }
+
+    #[cfg(test)]
+    fn count(&self) -> usize {
+        match self {
+            Globs::One(_) => 1,
+            Globs::Many(set) => set.len(),
         }
     }
 }
@@ -105,18 +126,37 @@ pub struct Matcher {
     read_not_ascii: bool,
 }
 
-/// `text` in its composed and decomposed forms (NFC, then NFD), one where
-/// they are the same: every ASCII text, given back as it is.
+/// `text` in its forms: as it is, composed and decomposed (NFC, then
+/// NFD), each once: one where the three are the same, every ASCII text.
 pub fn forms(text: &str) -> Vec<String> {
+    let mut out = vec![text.to_owned()];
     if text.is_ascii() {
-        return vec![text.to_owned()];
+        return out;
     }
-    let composed: String = text.nfc().collect();
-    let decomposed: String = text.nfd().collect();
-    if composed == decomposed {
-        vec![composed]
+    for form in [text.nfc().collect::<String>(), text.nfd().collect()] {
+        if !out.contains(&form) {
+            out.push(form);
+        }
+    }
+    out
+}
+
+/// What case ignored makes of a text, a term's and a name's alike:
+/// lowercased as `str::to_lowercase` lowercases it (`ß` is not `ss`), and
+/// a final sigma `ς` taken as `σ`. `to_lowercase` writes `Σ` as `ς` only
+/// at a word's end, which a word typed alone (`ΟΔΟΣ`) has where the same
+/// word in a name goes on to its extension (`ΟΔΟΣ.txt`). The same as
+/// lowercasing each character alone, then taking `ς` as `σ`. skwir's.
+pub fn fold(text: &str) -> String {
+    folded(text.to_lowercase())
+}
+
+/// [`fold`], of a text already lowercased.
+fn folded(lowered: String) -> String {
+    if lowered.contains('ς') {
+        lowered.replace('ς', "σ")
     } else {
-        vec![composed, decomposed]
+        lowered
     }
 }
 
@@ -193,7 +233,7 @@ impl Matcher {
         let base = if case_sensitive {
             Cow::Borrowed(text)
         } else {
-            Cow::Owned(text.to_lowercase())
+            Cow::Owned(fold(text))
         };
         let forms = forms(&base);
         Matcher {
@@ -201,6 +241,7 @@ impl Matcher {
                 mask(&f.to_lowercase())
             }),
             how: How::Substring {
+                ascii: forms.iter().find(|f| f.is_ascii()).cloned(),
                 forms,
                 case_sensitive,
             },
@@ -211,12 +252,8 @@ impl Matcher {
     /// `text` as a glob in its forms, or why it does not compile as typed.
     fn glob(text: &str, case_sensitive: bool) -> Result<Matcher, globset::Error> {
         let typed = compiled(text, case_sensitive)?;
-        let parts = glob_parts(text);
-        if parts
-            .iter()
-            .all(|(literal, part)| !literal || part.is_ascii())
-        {
-            // Nothing to lowercase or normalize: the glob as typed.
+        if text.is_ascii() {
+            // Nothing to fold or normalize: the glob as typed.
             return Ok(Matcher {
                 how: How::Glob {
                     globs: Globs::One(typed.compile_matcher()),
@@ -227,34 +264,69 @@ impl Matcher {
             });
         }
         let lowered = !case_sensitive;
+        // Each part as it is matched: folded where case is ignored, a
+        // literal one then normalized in each form.
+        let parts: Vec<(bool, Cow<'_, str>)> = glob_parts(text)
+            .into_iter()
+            .map(|(literal, part)| {
+                let part = if lowered {
+                    fold_part(literal, part)
+                } else {
+                    Cow::Borrowed(part)
+                };
+                (literal, part)
+            })
+            .collect();
         let form = |normalize: fn(&str) -> String| -> String {
             parts
                 .iter()
-                .map(|&(literal, part)| match (literal, lowered) {
-                    (false, _) => Cow::Borrowed(part),
-                    (true, false) => Cow::Owned(normalize(part)),
-                    (true, true) => Cow::Owned(normalize(&part.to_lowercase())),
+                .map(|(literal, part)| {
+                    if *literal {
+                        Cow::Owned(normalize(part))
+                    } else {
+                        Cow::Borrowed(&**part)
+                    }
                 })
                 .collect()
         };
-        let composed = form(|part| part.nfc().collect());
-        let decomposed = form(|part| part.nfd().collect());
-        let required = shared_mask([composed.as_str(), decomposed.as_str()], |f| {
+        let mut globs: Vec<String> = Vec::with_capacity(3);
+        for made in [
+            form(str::to_owned),
+            form(|part| part.nfc().collect()),
+            form(|part| part.nfd().collect()),
+        ] {
+            if !globs.contains(&made) {
+                globs.push(made);
+            }
+        }
+        let required = shared_mask(globs.iter().map(String::as_str), |f| {
             mask(&glob_literals(f))
         });
-        let globs = if composed == decomposed {
-            Globs::One(compiled(&composed, case_sensitive)?.compile_matcher())
+        let globs = if let [one] = globs.as_slice() {
+            Globs::One(compiled(one, case_sensitive)?.compile_matcher())
         } else {
             let mut set = GlobSetBuilder::new();
-            set.add(compiled(&composed, case_sensitive)?)
-                .add(compiled(&decomposed, case_sensitive)?);
-            Globs::Two(set.build()?)
+            for glob in &globs {
+                set.add(compiled(glob, case_sensitive)?);
+            }
+            Globs::Many(set.build()?)
         };
         Ok(Matcher {
             how: How::Glob { globs, lowered },
             required,
             read_not_ascii: true,
         })
+    }
+
+    /// How many patterns it matches a name against: more than one only
+    /// where the term's forms differ.
+    #[cfg(test)]
+    fn patterns(&self) -> usize {
+        match &self.how {
+            How::Substring { forms, .. } => forms.len(),
+            How::Glob { globs, .. } => globs.count(),
+            How::Exact { .. } => 1,
+        }
     }
 
     /// Whether a name with this mask may match: if not, it does not.
@@ -268,29 +340,29 @@ impl Matcher {
         match &self.how {
             How::Substring {
                 forms,
+                ascii,
                 case_sensitive,
             } => {
                 if name.is_ascii() {
-                    // An ASCII name lowercases to ASCII alone, and a term
-                    // of two forms has no ASCII one: only an ASCII form
-                    // can be in it, compared byte by byte, case folded as
-                    // it goes where it is ignored.
-                    let needle = forms[0].as_bytes();
-                    return forms.len() == 1
-                        && needle.is_ascii()
-                        && ascii_contains(name, needle, *case_sensitive);
+                    // An ASCII name folds to ASCII alone: only an ASCII
+                    // form can be in it (most terms' one form; the Kelvin
+                    // sign's, `K`, composed), compared byte by byte, case
+                    // folded as it goes where it is ignored.
+                    return ascii.as_ref().is_some_and(|needle| {
+                        ascii_contains(name, needle.as_bytes(), *case_sensitive)
+                    });
                 }
                 let hay = if *case_sensitive {
                     String::from_utf8_lossy(name)
                 } else {
-                    Cow::Owned(lowered(name))
+                    Cow::Owned(folded(lowered(name)))
                 };
                 forms.iter().any(|form| hay.contains(form.as_str()))
             }
             How::Glob {
                 globs,
                 lowered: true,
-            } => globs.is_match(&lowered(name)),
+            } => globs.is_match(&folded(lowered(name))),
             How::Glob {
                 globs,
                 lowered: false,
@@ -322,6 +394,95 @@ fn ascii_contains(name: &[u8], needle: &[u8], case_sensitive: bool) -> bool {
                 .all(|(a, b)| a.to_ascii_lowercase() == *b)
         }
     })
+}
+
+/// A part of a glob ([`glob_parts`]) as case ignored folds it: a literal
+/// run whole ([`fold`]), what an escape escapes (each character it folds
+/// to escaped again), a class's single members ([`fold_class`]); what is
+/// ASCII as it is, which globset folds. skwir's.
+fn fold_part(literal: bool, part: &str) -> Cow<'_, str> {
+    if part.is_ascii() {
+        Cow::Borrowed(part)
+    } else if literal {
+        Cow::Owned(fold(part))
+    } else if let Some(escaped) = part.strip_prefix('\\') {
+        Cow::Owned(fold(escaped).chars().flat_map(|c| ['\\', c]).collect())
+    } else if part.starts_with('[') {
+        fold_class(part)
+    } else {
+        Cow::Borrowed(part)
+    }
+}
+
+/// `class`, a class as [`glob_parts`] parts it (its brackets, closed), with
+/// each single member beyond ASCII folded where it folds to one character
+/// (a class matches one: `İ`, which folds to two, stays). A range's ends
+/// stay as typed: globset reads a range beyond ASCII as one of bytes,
+/// which folding its ends would not mend, and folded they may cross (`Ω`
+/// folds past `ΰ`), which globset refuses. Read as globset reads a class
+/// ([`class_end`]). skwir's.
+fn fold_class(class: &str) -> Cow<'_, str> {
+    let mut at = 1;
+    if class[at..].starts_with(['!', '^']) {
+        at += 1;
+    }
+    let body = at;
+    // Where each range's ends are, by their first byte.
+    let mut ends = vec![false; class.len()];
+    // The last member, where a range may yet extend it: none after a
+    // POSIX class, whose ends are ASCII.
+    let mut last: Option<usize> = None;
+    let (mut first, mut in_range) = (true, false);
+    let mut close = class.len();
+    while let Some(c) = class[at..].chars().next() {
+        let here = at;
+        at += c.len_utf8();
+        match c {
+            ']' if !first => {
+                close = here;
+                break;
+            }
+            '-' if !first && !in_range => in_range = true,
+            '[' if !in_range && posix_class(&class[at..]).is_some() => {
+                at += posix_class(&class[at..]).unwrap_or(0);
+                last = None;
+            }
+            _ if in_range => {
+                if let Some(start) = last {
+                    ends[start] = true;
+                }
+                ends[here] = true;
+                in_range = false;
+            }
+            _ => last = Some(here),
+        }
+        first = false;
+    }
+    let mut folded = String::with_capacity(class.len());
+    folded.push_str(&class[..body]);
+    let mut changed = false;
+    for (offset, c) in class[body..close].char_indices() {
+        if !c.is_ascii() && !ends[body + offset] {
+            // As `fold` folds it, a character alone.
+            let mut lower = c
+                .to_lowercase()
+                .map(|lower| if lower == 'ς' { 'σ' } else { lower });
+            if let (Some(one), None) = (lower.next(), lower.next())
+                && one != c
+            {
+                folded.push(one);
+                changed = true;
+                continue;
+            }
+        }
+        folded.push(c);
+    }
+    folded.push_str(&class[close..]);
+    if changed {
+        Cow::Owned(folded)
+    } else {
+        Cow::Borrowed(class)
+    }
 }
 
 /// `glob` in its parts, as globset reads it: runs of literal characters
