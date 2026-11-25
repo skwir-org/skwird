@@ -119,10 +119,10 @@ fn points_of(name: &[u16]) -> Vec<String> {
 }
 
 /// Whether `at` (`E:\`, `C:\mnt\stick\`) is where `volume` is mounted
-/// now. The system's list of a volume's paths may keep a folder whose
-/// mount point is gone or names another volume (the runner's virtual disk,
-/// detached and attached again): a root there would be the folder, not
-/// the volume, and answer the volume's index for it.
+/// now: a guard, never seen needed. Were the system's list of a
+/// volume's paths to keep a folder whose mount point is gone or names
+/// another volume, a root there would be the folder, not the volume, and
+/// answer the volume's index for it.
 fn resolves(at: &str, volume: &str) -> bool {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
     let point = wide(at);

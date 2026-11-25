@@ -718,7 +718,7 @@ fn ask_removal(at: &Path) -> Result<(), String> {
         (ok != 0).then(|| text(&name))
     };
     let mut point: Vec<u16> = at.as_os_str().encode_wide().collect();
-    point.extend("\\0".encode_utf16());
+    point.extend("\\\0".encode_utf16());
     let target = name_of(&point).ok_or_else(|| {
         format!(
             "no volume mounted there: {}",
@@ -753,7 +753,7 @@ fn ask_removal(at: &Path) -> Result<(), String> {
     }
     for interface in list.split(|&c| c == 0).take_while(|i| !i.is_empty()) {
         let mut path = interface.to_vec();
-        path.extend("\\0".encode_utf16());
+        path.extend("\\\0".encode_utf16());
         if name_of(&path).as_deref() != Some(target.as_str()) {
             continue;
         }
