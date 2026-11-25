@@ -79,8 +79,8 @@ pub fn mounted() -> Result<Vec<Removable>, String> {
     let mut out = Vec::new();
     loop {
         let volume = text(&name);
-        for at in points_of(&name) {
-            if let Some(r) = removable_at(&volume, &at) {
+        for at in points_of(&name).iter().filter(|at| resolves(at, &volume)) {
+            if let Some(r) = removable_at(&volume, at) {
                 out.push(r);
             }
         }
@@ -116,6 +116,21 @@ fn points_of(name: &[u16]) -> Vec<String> {
         buf.resize(needed as usize, 0);
     }
     Vec::new()
+}
+
+/// Whether `at` (`E:\`, `C:\mnt\stick\`) is where `volume` is mounted
+/// now. The system's list of a volume's paths may keep a folder whose
+/// mount point is gone or names another volume (the runner's virtual disk,
+/// detached and attached again): a root there would be the folder, not
+/// the volume, and answer the volume's index for it.
+fn resolves(at: &str, volume: &str) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    let point = wide(at);
+    let mut name = [0u16; 64];
+    // SAFETY: a NUL-ended path, and a buffer of its length.
+    let ok =
+        unsafe { GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), 64) } != 0;
+    ok && text(&name).eq_ignore_ascii_case(volume)
 }
 
 /// The volume `volume` (`\\?\Volume{…}\`) at `at` (`E:\`), if it is

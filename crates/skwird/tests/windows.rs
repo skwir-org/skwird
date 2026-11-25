@@ -805,6 +805,77 @@ fn ask_removal(at: &Path) -> Result<(), String> {
     Err("no device of the volume".into())
 }
 
+/// A FAT32 virtual disk of a test's, mounted at a folder (`diskpart`).
+struct VDisk {
+    file: PathBuf,
+    at: PathBuf,
+}
+
+impl VDisk {
+    /// Made, attached, formatted `TESTSTICK` and mounted at `at`.
+    fn make(env: &Env, at: &Path) -> VDisk {
+        let disk = VDisk {
+            file: env.s.join("stick.vhdx"),
+            at: at.to_path_buf(),
+        };
+        let made = diskpart(
+            env,
+            "make",
+            &[
+                format!(
+                    "create vdisk file=\"{}\" maximum=64 type=expandable",
+                    disk.file.display()
+                ),
+                disk.select(),
+                "attach vdisk".into(),
+                "create partition primary".into(),
+                "format fs=fat32 quick label=TESTSTICK".into(),
+                disk.mount(),
+            ],
+        );
+        assert!(made, "diskpart: made");
+        disk
+    }
+
+    fn select(&self) -> String {
+        format!("select vdisk file=\"{}\"", self.file.display())
+    }
+
+    fn mount(&self) -> String {
+        format!("assign mount=\"{}\"", self.at.display())
+    }
+
+    /// Attached again, and mounted at its folder.
+    fn attach(&self, env: &Env) -> bool {
+        diskpart(
+            env,
+            "attach",
+            &[
+                self.select(),
+                "attach vdisk".into(),
+                "select partition 1".into(),
+                self.mount(),
+            ],
+        )
+    }
+
+    /// Detached, its folder's mount point taken away too: attached again,
+    /// the disk may come back under another volume's name, and the folder
+    /// would name the one gone.
+    fn detach(&self, env: &Env) -> bool {
+        let detached = diskpart(env, "detach", &[self.select(), "detach vdisk".into()]);
+        let mut point = self.at.as_os_str().to_owned();
+        point.push("\\");
+        let _ = Command::new("mountvol")
+            .arg(&point)
+            .arg("/D")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        detached
+    }
+}
+
 /// A removable volume a client keeps (DESIGN, Protocol, "Removable
 /// volumes"), on Windows: a FAT32 virtual disk attached and mounted at a
 /// folder, seen by its serial with its label, not indexed until kept.
@@ -824,41 +895,10 @@ fn a_kept_virtual_disk_is_a_root_while_it_is_attached() {
     }
     let mut env = Env::new("win-volumes");
     tree(&env);
-    let disk = env.s.join("stick.vhdx");
     let at = env.s.dir("stick");
-    let vdisk = format!("select vdisk file=\"{}\"", disk.display());
-    let mount = format!("assign mount=\"{}\"", at.display());
-    assert!(
-        diskpart(
-            &env,
-            "make",
-            &[
-                format!(
-                    "create vdisk file=\"{}\" maximum=64 type=expandable",
-                    disk.display()
-                ),
-                vdisk.clone(),
-                "attach vdisk".into(),
-                "create partition primary".into(),
-                "format fs=fat32 quick label=TESTSTICK".into(),
-                mount.clone(),
-            ]
-        ),
-        "diskpart: made"
-    );
-    let attach = |env: &Env| {
-        diskpart(
-            env,
-            "attach",
-            &[
-                vdisk.clone(),
-                "attach vdisk".into(),
-                "select partition 1".into(),
-                mount.clone(),
-            ],
-        )
-    };
-    let detach = |env: &Env| diskpart(env, "detach", &[vdisk.clone(), "detach vdisk".into()]);
+    let disk = VDisk::make(&env, &at);
+    let attach = |env: &Env| disk.attach(env);
+    let detach = |env: &Env| disk.detach(env);
     std::fs::write(at.join("on the stick.txt"), b"x").unwrap();
     env.engine(60);
     let mut c = env.client();
@@ -898,9 +938,7 @@ fn a_kept_virtual_disk_is_a_root_while_it_is_attached() {
         c.volumes(&[], &[], &[])
             .is_ok_and(|v| v.kept[0].standing == skwird_protocol::Standing::Away)
     });
-    // `assign` may find the folder still holds its mount point: it says so,
-    // and the volume is mounted there all the same.
-    let _ = attach(&env);
+    assert!(attach(&env), "diskpart: attached again");
     wait_for(30, "the disk indexed again", || {
         answered(&mut c, &named(&at, "on the stick")) == [file.clone()].into()
     });
