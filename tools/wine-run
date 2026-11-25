@@ -8,9 +8,16 @@
 # of its installers (Mono, Gecko), which would ask.
 set -euo pipefail
 base=${SKWIRD_WINE:?tools/wine-run is run by tools/wine-tests}
+# A Wine tool (`--tool wineserver --wait`), a program of the host's, run
+# as itself in the same setting, not as a Windows program.
+run=wine
+if [ "${1:-}" = --tool ]; then
+  run=${2:?--tool takes a tool}
+  shift 2
+fi
 
 exec env -u DISPLAY -u WAYLAND_DISPLAY \
   -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_CACHE_HOME -u XDG_STATE_HOME \
   HOME="$base/home" WINEPREFIX="$base/prefix" WINEDEBUG=-all \
   WINEDLLOVERRIDES="winemenubuilder.exe=d;mscoree=d;mshtml=d" \
-  wine "$@"
+  "$run" "$@"

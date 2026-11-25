@@ -34,6 +34,10 @@ while [ $# -gt 0 ]; do
     case $1 in
     --no-root) use_root=0 ;;
     --only)
+        if [ $# -lt 2 ]; then
+            echo "--only takes walk, check, fanotify, index, engine, live or system, or several with commas ($usage)" >&2
+            exit 2
+        fi
         # One step, or several with commas between: engine,live.
         for step in ${2//,/ }; do
             case $step in
@@ -165,16 +169,28 @@ cpu() { awk -v hz="$(getconf CLK_TCK)" '{ printf "%.2f", ($14 + $15) / hz }' "/p
 # What a process's status on stdin says of its memory: resident now, of it
 # its own (the allocator's) and its files' mapped (the index's, the page
 # cache's to drop), and at most.
+# KiB as the kernel counts them, in decimal MB.
 status_memory() {
     awk '/^VmRSS/ { now = $2 } /^VmHWM/ { most = $2 } /^RssAnon/ { own = $2 } /^RssFile/ { mapped = $2 }
-        END { printf "%.0f MB now (%.0f MB its own, %.0f MB of files mapped), %.0f MB at most", now / 1000, own / 1000, mapped / 1000, most / 1000 }'
+        END { printf "%.0f MB now (%.0f MB its own, %.0f MB of files mapped), %.0f MB at most", now * 1.024 / 1000, own * 1.024 / 1000, mapped * 1.024 / 1000, most * 1.024 / 1000 }'
 }
 
 memory() {
     status_memory < "/proc/$1/status"
 }
 
+# A system service answers here: every client finds it first, so what a
+# step of a user's engine asks would be the service's answer.
+system_answers() {
+    if [ -S /run/skwird/socket ]; then
+        echo "(a system service runs here: not measured, as every client asks it first)"
+        return 0
+    fi
+    return 1
+}
+
 measure_engine() {
+    if system_answers; then return 0; fi
     rm -rf "$engine_dir"
     mkdir -p "$engine_dir/run" "$engine_dir/cache" "$engine_dir/state"
     local start pid
@@ -234,6 +250,7 @@ watches() {
 # watched, as far as the engine's share of watches goes (the most a
 # user's engine holds), and what that costs.
 measure_live() {
+    if system_answers; then return 0; fi
     rm -rf "$engine_dir"
     mkdir -p "$engine_dir/run" "$engine_dir/cache" "$engine_dir/state"
     local start pid before
@@ -537,13 +554,17 @@ disk() {
     esac
 }
 
-{
-    section "machine"
+# What is said goes to the report too, the body run in this shell (not a
+# pipeline's subshell), so that the cleanup's trap knows the engines it
+# started.
+exec > >(tee "$out") 2>&1
+
+section "machine"
     changed=$(git -C "$here" status --porcelain 2>/dev/null || true)
     echo "skwird: $(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)${changed:+ (changed)}"
     echo "kernel: $(uname -r)"
     echo "threads: $(nproc)"
-    echo "memory: $(awk '/^MemTotal/ { printf "%.0f GB", $2 / 1e6 }' /proc/meminfo)"
+    echo "memory: $(awk '/^MemTotal/ { printf "%.0f GB", $2 * 1024 / 1e9 }' /proc/meminfo)"
     echo "disk: $(disk)"
     echo "load before: $(cut -d' ' -f1-3 /proc/loadavg)"
 
@@ -619,7 +640,6 @@ disk() {
 
     echo
     echo "load after: $(cut -d' ' -f1-3 /proc/loadavg)"
-} 2>&1 | tee "$out"
 
 echo
 echo "Saved in $out"

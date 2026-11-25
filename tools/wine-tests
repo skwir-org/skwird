@@ -30,13 +30,16 @@ export SKWIRD_WINE="$base"
 # The prefix, made once, before any test runs in it.
 if [ ! -d "$base/prefix" ]; then
   tools/wine-run wineboot --init
-  tools/wine-run wineserver --wait
+  tools/wine-run --tool wineserver --wait
 fi
 # Every link Wine made in it leads into the tests' folder.
 # Each resolved from its own folder: a relative link is judged by where
 # it leads.
+# Judged against the folder resolved too: a home reached through a link
+# (Silverblue's /home) resolves elsewhere.
+inside=$(readlink -m "$base")
 outside=$(find "$base/prefix/drive_c" -type l -print0 | xargs -0 -r readlink -m |
-  grep -vc "^$base/" || true)
+  grep -vc "^$inside/" || true)
 if [ "$outside" != 0 ]; then
   echo "tools/wine-tests: $outside links in Wine's prefix lead out of $base: remove it and run again" >&2
   exit 1
