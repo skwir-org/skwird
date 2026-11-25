@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::sys::{self, Root};
@@ -89,7 +89,7 @@ struct Queue {
 
 impl Queue {
     fn next(&self) -> Option<Job> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(job) = state.0.pop() {
                 state.1 += 1;
@@ -98,15 +98,32 @@ impl Queue {
             if state.1 == 0 {
                 return None;
             }
-            state = self.turn.wait(state).unwrap();
+            state = self
+                .turn
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     fn done(&self, found: Vec<Job>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.1 -= 1;
         state.0.extend(found);
         self.turn.notify_all();
+    }
+}
+
+/// A job taken, given back to its queue however its visit ends: one a
+/// reader's panic cut short would stay counted, and every other thread
+/// wait on it for ever, the crawl never ending.
+struct Taken<'a> {
+    queue: &'a Queue,
+    found: Vec<Job>,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        self.queue.done(std::mem::take(&mut self.found));
     }
 }
 
@@ -167,13 +184,15 @@ pub fn crawl_by(
                     crate::pace::background();
                 }
                 while let Some(job) = queue.next() {
+                    let mut taken = Taken {
+                        queue: &queue,
+                        found: Vec::new(),
+                    };
                     if cancel.is_cancelled() {
                         stopped.store(true, Ordering::Relaxed);
-                        queue.done(Vec::new());
                         continue;
                     }
-                    let found = visit(root, job, opts, &next_slot, sink, reader);
-                    queue.done(found);
+                    taken.found = visit(root, job, opts, &next_slot, sink, reader);
                 }
             });
         }

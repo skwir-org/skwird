@@ -488,3 +488,39 @@ fn a_files_count_of_names_is_its_stats() {
     assert_eq!(links("first.txt"), Some(two));
     assert_eq!(links("second.txt"), Some(two));
 }
+
+/// A reader that panics on one folder ends the crawl, its panic given on:
+/// the job it took is given back, and no other thread waits on it.
+#[test]
+fn a_reader_that_panics_ends_the_crawl() {
+    let s = Scratch::new("walk-panic");
+    for rel in ["a/1", "a/2", "b/1", "b/2", "c"] {
+        s.dir(rel);
+    }
+    let root = Root::open(s.path(), Exclusions::none()).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ended = std::panic::catch_unwind(|| {
+            crate::walk::crawl_by(
+                &root,
+                Path::new(""),
+                None,
+                &Options {
+                    threads: 4,
+                    ..Options::default()
+                },
+                &Cancel::default(),
+                &|_, _| {},
+                &|root, rel, _, opts| {
+                    assert!(rel != Path::new("b"), "a reader's bug");
+                    crate::walk::read_folder_watched(root, rel, opts)
+                },
+            )
+        });
+        let _ = tx.send(ended.is_err());
+    });
+    let panicked = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the crawl ended");
+    assert!(panicked, "the reader's panic is given on");
+}

@@ -76,7 +76,7 @@ impl Root {
         if mounts::lexical(path).is_some_and(|p| on_network(&p)) {
             return Err(Error::Network);
         }
-        let path = std::fs::canonicalize(path).map_err(Error::Root)?;
+        let path = crate::canonical(path).map_err(Error::Root)?;
         if on_network(&path) {
             return Err(Error::Network);
         }
@@ -86,7 +86,9 @@ impl Root {
         if st.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
             return Err(Error::Kernel("statx's mount id (Linux 5.8)"));
         }
-        if let Err(Errno::NOSYS) = openat2(&fd, Path::new(".")) {
+        // Refused with EPERM by an older container runtime's filter, which a
+        // folder just opened never is otherwise.
+        if let Err(Errno::NOSYS | Errno::PERM) = openat2(&fd, Path::new(".")) {
             return Err(Error::Kernel(
                 "openat2 (Linux 5.6), or lets a system call filter refuse it",
             ));

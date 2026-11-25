@@ -505,6 +505,10 @@ fn events(read: &[u8], cookies: Option<&Folder>, heard: &mut Vec<Heard>) -> std:
             heard.push(Heard::Overflow);
         } else if let Some((folder, name)) = named(&read[at..end], meta.metadata_len as usize) {
             heard.push(said(folder, name, meta.mask, cookies));
+        } else {
+            // An event whose folder could not be read: what it changed is
+            // not known, so nothing it may have changed is live.
+            heard.push(Heard::Overflow);
         }
         at = end;
     }
@@ -607,6 +611,28 @@ mod tests {
         let r = record(&[9, 9, 9], b"a b.txt");
         assert_eq!(handle_in(&r), Some(&r[..11]));
         assert_eq!(handle_in(&r[..10]), None, "a handle cut short");
+    }
+
+    /// An event whose folder cannot be read is heard as an overflow, never
+    /// dropped: what it changed is not known.
+    #[test]
+    fn an_event_not_understood_is_an_overflow() {
+        let meta_len = size_of::<libc::fanotify_event_metadata>();
+        let mut event = Vec::new();
+        event.extend_from_slice(&u32::try_from(meta_len + 4).unwrap().to_ne_bytes());
+        event.push(libc::FANOTIFY_METADATA_VERSION);
+        event.push(0);
+        event.extend_from_slice(&u16::try_from(meta_len).unwrap().to_ne_bytes());
+        event.extend_from_slice(&libc::FAN_CREATE.to_ne_bytes());
+        event.extend_from_slice(&libc::FAN_NOFD.to_ne_bytes());
+        event.extend_from_slice(&0_i32.to_ne_bytes());
+        assert_eq!(event.len(), meta_len);
+        // One record of a type it does not know.
+        event.extend_from_slice(&[99, 0]);
+        event.extend_from_slice(&4_u16.to_ne_bytes());
+        let mut heard = Vec::new();
+        events(&event, None, &mut heard).unwrap();
+        assert_eq!(heard, [Heard::Overflow]);
     }
 
     /// A cookie is heard in its folder alone, made; a name is an entry, and

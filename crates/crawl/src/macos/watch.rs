@@ -420,7 +420,7 @@ impl Watcher {
     /// [`Heard::Cookie`], in its turn: `dir` is heard in the roots' stream.
     pub fn watch_cookies(&self, dir: &Path) -> std::io::Result<()> {
         // As the system names it in its events: `/var` is `/private/var`.
-        let dir = std::fs::canonicalize(dir)?;
+        let dir = crate::canonical(dir)?;
         let mut w = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         w.cookies = Some(dir);
         self.restart(&mut w)

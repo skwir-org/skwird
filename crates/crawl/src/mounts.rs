@@ -315,16 +315,18 @@ const FUSE_NETWORK: &[&str] = &[
 /// Whether a mount of `fstype` from `source` reaches a network, as skwir
 /// tells it (`skwir_core::fs::reach::network`): one of the kernel's
 /// network filesystems, a FUSE subtype known to reach one, or a FUSE
-/// source that names a server (`me@host:/srv`, `host:path`).
+/// source that names a server (`me@host:/srv`, `host:path`,
+/// `https://host/dav`). A FUSE mount said with no subtype (davfs2's, an
+/// older libfuse's `sshfs#me@host:/`) is told by its source alone.
 pub fn network(fstype: &str, source: &OsStr) -> bool {
     if KERNEL_NETWORK.contains(&fstype) {
         return true;
     }
-    let Some(subtype) = fstype.strip_prefix("fuse.") else {
-        return false;
-    };
-    if FUSE_NETWORK.contains(&subtype) {
-        return true;
+    match fstype.strip_prefix("fuse.") {
+        Some(subtype) if FUSE_NETWORK.contains(&subtype) => return true,
+        Some(_) => {}
+        None if fstype == "fuse" => {}
+        None => return false,
     }
     let source = source.to_string_lossy();
     !source.starts_with('/')
@@ -423,6 +425,9 @@ this line is not a mount
             "a server's source"
         );
         assert!(!network("fuseblk", os("/dev/sde1")), "ntfs-3g");
+        assert!(network("fuse", os("https://dav.example/files")), "davfs2");
+        assert!(network("fuse", os("sshfs#me@host:/")), "libfuse2's sshfs");
+        assert!(!network("fuse", os("/dev/fuse")));
         assert!(!network("fuse.portal", os("portal")));
         assert!(!network("fuse.someday", os("/home/me/archive.zip")));
         assert!(!network("btrfs", os("/dev/nvme0n1p2")));
