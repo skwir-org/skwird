@@ -224,12 +224,13 @@ pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
 
 #[cfg(windows)]
 pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
-    let mut out = Vec::new();
-    skwird_crawl::wtf8::push(path, &mut out);
-    std::borrow::Cow::Owned(out)
+    skwird_crawl::wtf8::bytes(path)
 }
 
 #[cfg(not(any(unix, windows)))]
+// Where neither Unix's bytes nor WTF-8 are, Rust's own are all there is:
+// no engine serves there (rule 7).
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Borrowed(path.as_os_str().as_encoded_bytes())
 }

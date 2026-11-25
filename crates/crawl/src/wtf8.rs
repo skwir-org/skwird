@@ -89,8 +89,20 @@ fn point_at(bytes: &[u8]) -> Option<(u32, usize)> {
 /// `path`'s WTF-8, put at the end of `out`.
 #[cfg(windows)]
 pub fn push(path: &std::path::Path, out: &mut Vec<u8>) {
+    out.extend_from_slice(&bytes(path));
+}
+
+/// `path`'s WTF-8: a valid path's UTF-8 borrowed as it is, as nearly
+/// every one is; one holding an unpaired surrogate encoded.
+#[cfg(windows)]
+pub fn bytes(path: &std::path::Path) -> std::borrow::Cow<'_, [u8]> {
     use std::os::windows::ffi::OsStrExt;
-    encode(path.as_os_str().encode_wide(), out);
+    if let Some(text) = path.to_str() {
+        return std::borrow::Cow::Borrowed(text.as_bytes());
+    }
+    let mut out = Vec::with_capacity(path.as_os_str().len());
+    encode(path.as_os_str().encode_wide(), &mut out);
+    std::borrow::Cow::Owned(out)
 }
 
 /// The path WTF-8 `bytes` name.

@@ -76,10 +76,17 @@ impl WirePath {
     pub fn of(path: &Path) -> WirePath {
         #[cfg(unix)]
         return WirePath(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec());
+        // A valid path's UTF-8 is its WTF-8, as nearly every one is: copied
+        // as it is, encoded only where it holds an unpaired surrogate.
         #[cfg(windows)]
-        return WirePath(wtf8::encode(std::os::windows::ffi::OsStrExt::encode_wide(
-            path.as_os_str(),
-        )));
+        return WirePath(path.to_str().map_or_else(
+            || {
+                wtf8::encode(std::os::windows::ffi::OsStrExt::encode_wide(
+                    path.as_os_str(),
+                ))
+            },
+            |text| text.as_bytes().to_vec(),
+        ));
         #[cfg(not(any(unix, windows)))]
         WirePath(path.to_string_lossy().into_owned().into_bytes())
     }
@@ -613,29 +620,31 @@ impl Totals {
     /// What `child` adds to the totals of the folder holding it: a folder
     /// with what it holds, a file as itself.
     pub fn add_child(&mut self, child: &Child) {
-        self.add_child_unsorted(child);
-        self.sort_extensions();
-    }
-
-    /// `other`'s totals added to these, by extension too.
-    pub fn add(&mut self, other: &Totals) {
-        self.add_unsorted(other);
-        self.sort_extensions();
-    }
-
-    /// [`Totals::add_child`], the extensions left unsorted.
-    fn add_child_unsorted(&mut self, child: &Child) {
-        self.add_unsorted(&child.totals);
+        self.add(&child.totals);
         if child.kind == Kind::Folder {
             self.folders += 1;
         }
     }
 
-    /// `other`'s totals added to these, the extensions left unsorted: each
-    /// of these finds its match among `other`'s by a map, not by a search
-    /// of them all, and many summed, as a folder's rest is ([`largest`]),
-    /// are sorted once.
-    fn add_unsorted(&mut self, other: &Totals) {
+    /// `other`'s totals added to these, by extension too: each extension
+    /// finds its match by a map.
+    pub fn add(&mut self, other: &Totals) {
+        self.add_counts(other);
+        if other.by_extension.is_empty() {
+            return;
+        }
+        let mut sum = Extensions::default();
+        for e in std::mem::take(&mut self.by_extension) {
+            sum.add(e);
+        }
+        for e in &other.by_extension {
+            sum.add(e.clone());
+        }
+        self.by_extension = sum.into_sorted();
+    }
+
+    /// `other`'s totals added to these, but for their extensions.
+    fn add_counts(&mut self, other: &Totals) {
         self.size += other.size;
         self.alloc += other.alloc;
         self.files += other.files;
@@ -646,31 +655,33 @@ impl Totals {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
-        if other.by_extension.is_empty() {
-            return;
-        }
-        let mut theirs: std::collections::HashMap<&Option<WirePath>, &Extension> =
-            other.by_extension.iter().map(|e| (&e.ext, e)).collect();
-        for m in &mut self.by_extension {
-            if let Some(e) = theirs.remove(&m.ext) {
-                m.files += e.files;
-                m.alloc += e.alloc;
-            }
-        }
-        // What is left is new here.
-        for e in &other.by_extension {
-            if theirs.contains_key(&e.ext) {
-                self.by_extension.push(e.clone());
-            }
-        }
+    }
+}
+
+/// Files by extension as they are summed: each extension found by a map,
+/// the list built and sorted once, however many are summed (a folder's
+/// rest of tens of thousands of children, [`largest`]).
+#[derive(Default)]
+struct Extensions(std::collections::HashMap<Option<WirePath>, (u64, u64)>);
+
+impl Extensions {
+    fn add(&mut self, e: Extension) {
+        let (files, alloc) = self.0.entry(e.ext).or_default();
+        *files += e.files;
+        *alloc += e.alloc;
     }
 
     /// The extensions in their order: the largest alloc first, then by
     /// extension. Each is there once, so the order is the same whatever
     /// they were added in.
-    fn sort_extensions(&mut self) {
-        self.by_extension
-            .sort_by(|a, b| b.alloc.cmp(&a.alloc).then_with(|| a.ext.cmp(&b.ext)));
+    fn into_sorted(self) -> Vec<Extension> {
+        let mut out: Vec<Extension> = self
+            .0
+            .into_iter()
+            .map(|(ext, (files, alloc))| Extension { ext, files, alloc })
+            .collect();
+        out.sort_by(|a, b| b.alloc.cmp(&a.alloc).then_with(|| a.ext.cmp(&b.ext)));
+        out
     }
 }
 
@@ -697,15 +708,24 @@ pub fn largest(children: Vec<Child>, largest: Largest) -> (Vec<Child>, Option<Re
         count: 0,
         totals: Totals::default(),
     };
-    for (child, kept) in children.into_iter().zip(keep) {
+    // Each child's extensions moved into one sum, not merged into the
+    // rest's list one child at a time.
+    let mut extensions = Extensions::default();
+    for (mut child, kept) in children.into_iter().zip(keep) {
         if kept {
             sent.push(child);
         } else {
             rest.count += 1;
-            rest.totals.add_child_unsorted(&child);
+            rest.totals.add_counts(&child.totals);
+            if child.kind == Kind::Folder {
+                rest.totals.folders += 1;
+            }
+            for e in std::mem::take(&mut child.totals.by_extension) {
+                extensions.add(e);
+            }
         }
     }
-    rest.totals.sort_extensions();
+    rest.totals.by_extension = extensions.into_sorted();
     (sent, (rest.count > 0).then_some(rest))
 }
 
@@ -1266,6 +1286,26 @@ mod tests {
         }
         assert_eq!(rest.unwrap().totals, summed);
         assert_eq!(summed.by_extension.len(), 13);
+        // Many children of many extensions each: their rest sums each
+        // extension once, as the same children added one by one.
+        let many: Vec<Child> = (0..400u64)
+            .map(|i| {
+                let mut c = child(&format!("m{i}"), Kind::Folder, i, 1, "");
+                c.totals.by_extension = (0..20u64)
+                    .map(|j| ext(&format!("x{}", (i * 7 + j) % 1_000), 1, j))
+                    .collect();
+                c
+            })
+            .collect();
+        let (sent, rest) = largest(many.clone(), Largest { alloc: 1, files: 0 });
+        let mut summed = Totals::default();
+        for c in many.iter().filter(|c| c.path != sent[0].path) {
+            summed.add_child(c);
+        }
+        let rest = rest.unwrap();
+        assert_eq!(rest.count, 399);
+        assert_eq!(rest.totals, summed);
+        assert_eq!(rest.totals.by_extension.len(), 1_000);
     }
 
     /// A name on Windows travels as its WTF-8: a valid one as its UTF-8,
