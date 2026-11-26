@@ -129,11 +129,15 @@ pub fn remove() -> Result<String, String> {
 /// holds inheritable (AGENTS.md: a process skwird starts inherits no
 /// handle). Safe here alone: `skwird logon` is a command a user runs, not
 /// an engine; it waits for `schtasks` to end, which holds nothing after,
-/// and reading its output needs the pipes `Command` gives it.
+/// and reading its output needs the pipes `Command` gives it. With no
+/// console window: `schtasks` is a console program, and one started by a
+/// program that has none (`skwirdw.exe`, an installer) opens its own.
 #[cfg(windows)]
 fn schtasks(args: &[&str]) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("schtasks")
         .args(args)
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("cannot run schtasks: {e}"))?;
     let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
