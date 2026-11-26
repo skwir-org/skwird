@@ -2946,8 +2946,8 @@ the `.rpm` signed by skwir's repositories' key and read back as signed;
 the draft's Windows and macOS programs tried on the runners
 (`try.yml`); published. The AUR's `skwird` is at 0.3.0, and its
 `skwird-bin` made, its source the release's plain build. Homebrew's
-formula is at 0.3.0 on the tap's `skwird-0.3.0` branch, its build
-passed, its merge into the tap's `main` the user's.
+formula is at 0.3.0, merged into the tap's `main` by the user, its build
+passed on the tap's `skwird-0.3.0` branch.
 
 ## Later
 
