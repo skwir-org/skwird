@@ -72,6 +72,7 @@
           ./dist/sysusers
           ./dist/windows
           ./dist/macos
+          ./dist/notices
           ./LICENSE-MIT
           ./LICENSE-APACHE
         ];

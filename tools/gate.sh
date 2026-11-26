@@ -29,6 +29,8 @@ step() { printf '\n== %s\n' "$*"; }
 
 step "rustfmt"
 cargo fmt --all --check
+step "third-party notices"
+tools/notices check
 step "clippy, this system"
 cargo clippy --workspace --all-targets -- -D warnings
 if [ "$run_tests" = 1 ]; then

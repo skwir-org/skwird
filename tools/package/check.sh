@@ -39,7 +39,7 @@ installed)
         [ -x "$program" ] || fail "$unit runs $program, which is not installed"
     done
     # The licences, where the system keeps them.
-    for licence in LICENSE-MIT LICENSE-APACHE; do
+    for licence in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES; do
         [ -f "/usr/share/doc/skwird/$licence" ] || [ -f "/usr/share/licenses/skwird/$licence" ] ||
             fail "no $licence"
     done
@@ -88,7 +88,8 @@ engine)
     rm -rf "$run"
     ;;
 removed)
-    for f in $files /usr/share/doc/skwird/LICENSE-MIT /usr/share/licenses/skwird/LICENSE-MIT; do
+    for f in $files /usr/share/doc/skwird/LICENSE-MIT /usr/share/licenses/skwird/LICENSE-MIT \
+        /usr/share/doc/skwird/THIRD-PARTY-NOTICES /usr/share/licenses/skwird/THIRD-PARTY-NOTICES; do
         [ ! -e "$f" ] || fail "$f is left"
     done
     [ ! -e /var/cache/skwird ] || fail "the system service's index is left"

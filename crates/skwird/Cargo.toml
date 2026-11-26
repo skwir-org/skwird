@@ -92,6 +92,7 @@ assets = [
     ["../../dist/sysusers/skwird.conf", "usr/lib/sysusers.d/", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/skwird/", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/skwird/", "644"],
+    ["../../dist/notices/linux.txt", "usr/share/doc/skwird/THIRD-PARTY-NOTICES", "644"],
     ["../../README.md", "usr/share/doc/skwird/", "644"],
 ]
 
@@ -113,5 +114,6 @@ assets = [
     { source = "../../dist/sysusers/skwird.conf", dest = "/usr/lib/sysusers.d/skwird.conf", mode = "644" },
     { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/skwird/LICENSE-MIT", mode = "644" },
     { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/skwird/LICENSE-APACHE", mode = "644" },
+    { source = "../../dist/notices/linux.txt", dest = "/usr/share/licenses/skwird/THIRD-PARTY-NOTICES", mode = "644" },
     { source = "../../README.md", dest = "/usr/share/doc/skwird/README.md", mode = "644", doc = true },
 ]

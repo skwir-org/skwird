@@ -1,0 +1,126 @@
+#!/bin/sh
+# Third-party notices (docs/PLAN.md, 0.3.0, step 4): the code of others
+# each of skwird's programs holds, and what its licences ask a copy of it
+# to carry. Each crate built into the program, its licence, and the text
+# of each of its licence files as the crate gives it; Rust's standard
+# library; on Windows, MinGW-w64's runtime, linked into every program
+# built with it, whose makers wrote the notices such a program carries
+# (dist/notices/mingw-w64-runtime.txt, from mingw-w64 14.0.0's source,
+# the version the flake's MinGW is built from).
+#
+# Written from the lock into dist/notices/{linux,windows,macos}.txt, which
+# a release gives beside each program (THIRD-PARTY-NOTICES), and checked
+# against it by the gate:
+#
+#     tools/notices write
+#     tools/notices check
+#
+# What runs as the program is built alone is left out: a procedural macro
+# and what it alone takes (cargo tree's no-proc-macro). The workspace's
+# crates are skwird's own, under its licence. Nothing of this machine's
+# is written: a crate's name, version, licence and files' texts alone.
+set -eu
+export LC_ALL=C
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+mkdir -p target
+dir=dist/notices
+
+# The notices of the program for target $1, the system $2 names, to
+# stdout.
+notices() {
+    target="$1" system="$2"
+    work="$(mktemp -d "$root/target/notices.XXXXXX")"
+    # Each crate of the lock: its name, version, licence and folder.
+    cargo metadata --format-version 1 --locked --filter-platform "$target" |
+        jq -r '.packages[] | select(.source != null)
+            | [.name, .version, (.license // "none"), (.manifest_path | sub("/Cargo.toml$"; ""))]
+            | @tsv' >"$work/crates"
+    # Those built into the program, by name and version.
+    cargo tree --locked -p skwird -e normal,no-proc-macro --target "$target" --prefix none -f '{p}' |
+        sed 's/ (\*)$//' | grep -v '^skwird' | sed 's/ v/\t/' | sort -u >"$work/built"
+    built="$(awk -F'\t' 'NR == FNR { in_[$1 "\t" $2] = 1; next } ($1 "\t" $2) in in_' \
+        "$work/built" "$work/crates" | sort)"
+    cat <<EOF
+Third-party notices: skwird's program for $system
+
+The program holds the code of the crates below, built into it, each
+under the licence it names; the text of each of their licence files
+follows, as the crate gives it. skwird's own code is under its licence:
+LICENSE-MIT or LICENSE-APACHE, beside this file.
+
+EOF
+    echo "$built" | awk -F'\t' '{ print "  " $1 " " $2 ": " $3 }'
+    cat <<'EOF'
+
+Rust's standard library is built into every Rust program: MIT OR
+Apache-2.0, its copyrights its contributors' (the Rust project,
+https://www.rust-lang.org/policies/licenses), on the terms of
+LICENSE-MIT and LICENSE-APACHE, beside this file.
+EOF
+    if [ "$system" = Windows ]; then
+        cat <<'EOF'
+
+MinGW-w64's runtime is built into the program too, as into every
+program built with MinGW-w64: its notices are at the end, as its makers
+give them.
+EOF
+    fi
+    echo "$built" | while IFS="$(printf '\t')" read -r name version _ folder; do
+        find "$folder" -maxdepth 1 -type f |
+            grep -i -E '/(licen[cs]e|copying|unlicense|notice|copyright)[^/]*$' | sort |
+            while read -r file; do
+                sum="$(sha256sum <"$file" | cut -d' ' -f1)"
+                printf '\n%s\n%s %s: %s\n%s\n\n' "========================================================================" \
+                    "$name" "$version" "${file##*/}" "========================================================================"
+                if [ -f "$work/$sum" ]; then
+                    echo "The same text as $(cat "$work/$sum")."
+                else
+                    echo "$name $version's ${file##*/}" >"$work/$sum"
+                    # Its own line endings, a crate's CRLF among them, as LF.
+                    tr -d '\r' <"$file"
+                fi
+            done
+    done
+    if [ "$system" = Windows ]; then
+        printf '\n%s\n%s\n%s\n\n' "========================================================================" \
+            "MinGW-w64's runtime" "========================================================================"
+        cat "$dir/mingw-w64-runtime.txt"
+    fi
+    rm -rf "$work"
+}
+
+# Each system's file, its program's target.
+each() {
+    echo "linux x86_64-unknown-linux-gnu Linux"
+    echo "windows x86_64-pc-windows-gnu Windows"
+    echo "macos aarch64-apple-darwin macOS"
+}
+
+case "${1:-}" in
+write)
+    each | while read -r file target system; do
+        notices "$target" "$system" >"$dir/$file.txt"
+        echo "notices: $dir/$file.txt"
+    done
+    ;;
+check)
+    stale=0
+    tmp="$(mktemp "$root/target/notices-check.XXXXXX")"
+    for line in $(each | tr ' ' ':'); do
+        file="${line%%:*}" rest="${line#*:}"
+        notices "${rest%%:*}" "${rest#*:}" >"$tmp"
+        if ! cmp -s "$tmp" "$dir/$file.txt"; then
+            echo "$dir/$file.txt is not what the lock gives: run tools/notices write" >&2
+            stale=1
+        fi
+    done
+    rm -f "$tmp"
+    [ "$stale" = 0 ] && echo "notices: each as the lock gives it"
+    exit "$stale"
+    ;;
+*)
+    echo "usage: tools/notices write|check" >&2
+    exit 2
+    ;;
+esac

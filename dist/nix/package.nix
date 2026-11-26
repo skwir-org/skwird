@@ -8,6 +8,7 @@
 # their place; the rest is written to stand there as it is.
 {
   lib,
+  stdenv,
   rustPlatform,
   # The flake's (see above).
   src,
@@ -43,6 +44,11 @@ rustPlatform.buildRustPackage {
       --replace-fail /usr/bin/skwird $out/bin/skwird
     install -Dm644 dist/sysusers/skwird.conf -t $out/lib/sysusers.d
     install -Dm644 LICENSE-MIT LICENSE-APACHE -t $out/share/licenses/skwird
+    install -Dm644 dist/notices/${
+      if stdenv.hostPlatform.isDarwin
+      then "macos"
+      else "linux"
+    }.txt $out/share/licenses/skwird/THIRD-PARTY-NOTICES
   '';
 
   # The toolchain stays out of what is installed: rustc writes the paths

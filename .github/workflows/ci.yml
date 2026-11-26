@@ -27,6 +27,8 @@ jobs:
       # client's copies are checked offline for Windows too (tests/vendored.rs).
       - name: fetch
         run: cargo fetch --locked
+      - name: third-party notices
+        run: tools/notices check
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy, this system

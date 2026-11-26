@@ -17,6 +17,11 @@ the day it is released.
   or the LaunchAgent, taken back only where it runs this copy of skwird,
   its engine stopped first; one that runs another copy's is left, and
   named. `logon remove` alone takes back whichever, as before.
+- **Third-party notices** beside every program: each crate built into
+  it, its licence and its licence files' texts, Rust's standard library,
+  and on Windows MinGW-w64's runtime (`THIRD-PARTY-NOTICES`, in the
+  Windows and macOS archives, and where each package keeps its
+  licences).
 - **Quiet on Windows:** `skwird logon` starts `schtasks` with no console
   window, and `skwirdw.exe` makes its state folder and log only to
   serve: an installer runs it unseen, and leaves nothing of skwird's.

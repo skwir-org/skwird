@@ -140,6 +140,7 @@ windows() {
     rm -rf "${dir:?}/$name" "$dir/$name.zip"
     mkdir -p "$dir/$name"
     cp "$dir/$target/dist/skwird.exe" "$dir/$target/dist/skwirdw.exe" LICENSE-MIT LICENSE-APACHE "$dir/$name/"
+    cp dist/notices/windows.txt "$dir/$name/THIRD-PARTY-NOTICES.txt"
     no_home "$dir/$name/skwird.exe" "$dir/$name/skwirdw.exe"
     (cd "$dir" && zip -q -r -X "$name.zip" "$name")
     mv "$dir/$name.zip" "$stage/"
@@ -164,6 +165,7 @@ macos() {
     rm -rf "${dir:?}/$name"
     mkdir -p "$dir/$name"
     cp "$dir/$target/dist/skwird" LICENSE-MIT LICENSE-APACHE "$dir/$name/"
+    cp dist/notices/macos.txt "$dir/$name/THIRD-PARTY-NOTICES.txt"
     rcodesign sign "$dir/$name/skwird" >/dev/null
     no_home "$dir/$name/skwird"
     tar -C "$dir" --owner=0 --group=0 --numeric-owner -czf "$stage/$name.tar.gz" "$name"

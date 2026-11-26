@@ -31,6 +31,11 @@ home folder's path is refused), and stages them with `SHA256SUMS`, the
 notes and what was checked in `target/releases/v0.1.0`, which is never
 replaced. macOS' program needs Apple's SDK, which skwir's `just
 macos-sdk` keeps (Apple's licence is the maintainer's to accept).
+Each program is given its third-party notices (`dist/notices`, beside it
+as `THIRD-PARTY-NOTICES`): what the crates built into it, Rust's standard
+library and, on Windows, MinGW-w64's runtime ask a copy of it to carry.
+The gate checks them against the lock; after a dependency changes,
+`tools/notices write` makes them again.
 
 `tools/release/release.sh programs DIR` builds Windows' and macOS'
 programs alone, to try that part before a tag.
