@@ -935,8 +935,10 @@ impl Client {
             let left = deadline
                 .saturating_duration_since(std::time::Instant::now())
                 .max(Duration::from_millis(1));
+            // macOS refuses a timeout on a socket whose other end closed
+            // (EINVAL): the read after says it closed, at once.
             #[cfg(unix)]
-            self.reader.get_ref().set_read_timeout(Some(left))?;
+            let _ = self.reader.get_ref().set_read_timeout(Some(left));
             #[cfg(windows)]
             self.reader.get_mut().set_timeout(Some(left));
             match protocol::read::<_, protocol::Response>(&mut self.reader) {
