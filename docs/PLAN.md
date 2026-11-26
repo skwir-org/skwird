@@ -52,7 +52,8 @@ Windows' index mapped, a Home Manager module; it was published the same
 day, with skwir 0.7.0, and skwird's AUR package made with it. 0.3.0 was
 made on 2026-11-26, what a program that carries skwird needs (below,
 "0.3.0"): `skwird stop`, `logon remove --if-mine`, third-party notices,
-a plain Linux build with `skwird-bin`, the `.rpm` signed.
+a plain Linux build with `skwird-bin`, the `.rpm` signed; published the
+same day, with both AUR packages at it.
 
 ## Phase 0: measure (done)
 
@@ -2939,10 +2940,14 @@ on the three systems where it touches their code:
 6. **Signing:** `release.sh sign`, tried with a throwaway key. The real
    key signs at the release, the user's passphrase asked then.
 
-Left for 0.3.0 itself: the version and the changelog's date, the
-release (RELEASING.md), then `skwird-bin` on the AUR and skwir told of
-what it can use (`stop`, `--if-mine`, the plain build, the signed
-`.rpm`).
+**Released on 2026-11-26** (`v0.3.0`, at the user's word): built and
+tried as RELEASING.md says, the six Linux kinds in their roots among it;
+the `.rpm` signed by skwir's repositories' key and read back as signed;
+the draft's Windows and macOS programs tried on the runners
+(`try.yml`); published. The AUR's `skwird` is at 0.3.0, and its
+`skwird-bin` made, its source the release's plain build. Homebrew's
+formula is at 0.3.0 on the tap's `skwird-0.3.0` branch, its build
+passed, its merge into the tap's `main` the user's.
 
 ## Later
 
