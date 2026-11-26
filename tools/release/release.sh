@@ -6,18 +6,22 @@
 #     tools/release/release.sh notes         the release's notes, as GitHub shows them
 #     tools/release/release.sh build TAG     the bundle, in target/releases
 #     tools/release/release.sh verify TAG    the bundle is what it was
+#     tools/release/release.sh sign TAG KEY  its .rpm signed by the repositories' key
 #     tools/release/release.sh upload TAG    a GitHub draft of it
 #     tools/release/release.sh programs DIR  Windows' and macOS' programs alone, a try
 #
 # `check` reads files alone, so that a tag's workflow runs it
 # (.github/workflows/release.yml). `build` needs the tagged commit checked
 # out, its tree clean; it runs the gate and the flake's machines, tries the
-# four Linux packages in their roots (tools/package/try.sh), builds
-# Windows' and macOS' programs here, their build paths rewritten, and
-# stages it all, with checksums, notes and what was checked, in
+# four Linux packages and the plain build in their roots
+# (tools/package/try.sh), builds Windows' and macOS' programs here, their
+# build paths rewritten, and stages it all, with checksums, notes and what
+# was checked, in
 # target/releases/TAG, which is never replaced. macOS' needs Apple's SDK,
 # which skwir's `just macos-sdk` keeps in
 # ~/.local/share/skwir-build/macos-sdk (Apple's licence the user's).
+# `sign` signs the bundle's .rpm by skwir's repositories' key, its
+# passphrase the user's, and makes its checksums again.
 # `upload` makes or completes a draft by `gh`: it never publishes one, and
 # never moves a tag. Publishing is the user's.
 set -euo pipefail
@@ -242,6 +246,26 @@ verify() {
     echo "release: $out is as it was built"
 }
 
+# The bundle's `.rpm` signed by skwir's repositories' key, whose public
+# file is $2 (skwir's tools/package/repository/skwir.asc), so that skwir's
+# dnf repository lists it (tools/release/rpm-sign.sh): GnuPG's agent asks
+# for the key's passphrase, the maintainer's alone. Dated as the tag's
+# commit, so that a package signed again is the same file; its checksums
+# made again, and the manifest saying by which key.
+sign() {
+    local tag="${1:?usage: release.sh sign TAG KEY.asc}" key="${2:?usage: release.sh sign TAG KEY.asc}"
+    local v="${tag#v}" out="target/releases/$tag" at fingerprint
+    verify "$tag"
+    at="$(git log -1 --format=%ct "$tag^{commit}")"
+    tools/release/rpm-sign.sh "$key" --at "$at" "$out/skwird-$v-1.x86_64.rpm"
+    fingerprint="$(gpg --batch --with-colons --show-keys "$key" | awk -F: '$1 == "fpr" { print $10; exit }')"
+    # shellcheck disable=SC2046 # one name a line, none with a space
+    (cd "$out" && sha256sum -- $(assets "$v") >SHA256SUMS)
+    grep -q '^signed: ' "$out/manifest.txt" ||
+        echo "signed: the .rpm, by skwir's repositories' key $fingerprint" >>"$out/manifest.txt"
+    echo "release: $out's .rpm signed, SHA256SUMS made again"
+}
+
 upload() {
     local tag="${1:?usage: release.sh upload TAG}" v out commit remote
     v="${tag#v}"
@@ -282,6 +306,12 @@ programs)
     ;;
 build) build "${2:-}" ;;
 verify) verify "${2:-}" ;;
+sign)
+    if ! command -v rpmsign >/dev/null; then
+        exec nix develop "$tree#release" --command "$0" "$@"
+    fi
+    sign "${2:-}" "${3:-}"
+    ;;
 upload) upload "${2:-}" ;;
 *)
     sed -n 's/^#     //p' "$0" >&2

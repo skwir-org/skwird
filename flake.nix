@@ -148,6 +148,9 @@
           old.nativeBuildInputs
           ++ [
             pkgs.rcodesign
+            # rpmsign and rpmkeys (tools/release/rpm-sign.sh); gpg is the
+            # system's, its agent the one holding the key.
+            pkgs.rpm
             pkgs.zip
           ];
         XMAC_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";

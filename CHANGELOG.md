@@ -29,6 +29,8 @@ the day it is released.
   tried installed so on Ubuntu 22.04, Debian 13, Ubuntu 24.04, Fedora 44
   and Arch. **`skwird-bin`** on the AUR installs it, for a system with no
   Rust to build skwird.
+- **The `.rpm` is signed** by skwir's repositories' key, so that skwir's
+  dnf repository lists it, and dnf checks it.
 - **Quiet on Windows:** `skwird logon` starts `schtasks` with no console
   window, and `skwirdw.exe` makes its state folder and log only to
   serve: an installer runs it unseen, and leaves nothing of skwird's.

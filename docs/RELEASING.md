@@ -41,6 +41,21 @@ The gate checks them against the lock; after a dependency changes,
 `tools/release/release.sh programs DIR` builds Windows' and macOS'
 programs alone, to try that part before a tag.
 
+## Sign
+
+```sh
+tools/release/release.sh sign v0.1.0 ../skwir/tools/package/repository/skwir.asc
+```
+
+The bundle's `.rpm` is signed by skwir's repositories' key, named by its
+public file (skwir's `tools/package/repository/skwir.asc`), so that
+skwir's dnf repository lists it (`gpgcheck=1`): GnuPG's agent asks for
+the key's passphrase, the maintainer's alone, and each signature is
+read back with the public file alone. It is dated as the tag's commit,
+so that a package signed again is the same file; `SHA256SUMS` is made
+again, and the manifest says by which key. The build stays the
+maintainer's to leave running: signing is this step alone.
+
 ## Upload, try, publish
 
 ```sh
