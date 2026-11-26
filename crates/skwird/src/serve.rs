@@ -130,14 +130,96 @@ pub fn volume_leaving(root: usize) {
     }
 }
 
-/// Stop serving on `pipe` (Windows' service manager's stop): the loop
-/// that waits for clients is woken by a connection to its own pipe, and
-/// ends as when idle, the writer applying what it heard and saving every
-/// root, its journal's position among it, before [`serve`] gives back.
-#[cfg(windows)]
-pub fn stop(pipe: &Path) {
+/// Stop serving on `socket` (Windows' service manager's stop, a client's
+/// `stop`): the loop that waits for clients is woken by a connection to
+/// its own socket, and ends as when idle, the writer applying what it
+/// heard and saving every root, its journal's position among it, before
+/// [`serve`] gives back.
+pub fn stop(socket: &Path) {
     STOPPING.store(true, Ordering::Release);
-    let _ = skwird_client::pipe::Stream::connect(pipe.as_os_str(), Some(Duration::from_secs(1)));
+    #[cfg(windows)]
+    let _ = skwird_client::pipe::Stream::connect(socket.as_os_str(), Some(Duration::from_secs(1)));
+    #[cfg(unix)]
+    let _ = std::os::unix::net::UnixStream::connect(socket);
+}
+
+/// The socket this engine serves on, and the program it runs, as it began
+/// to serve: for a client's `stop`. Taken then, before a package's upgrade
+/// may replace the program's file.
+static SERVING: std::sync::OnceLock<(std::path::PathBuf, Option<std::path::PathBuf>)> =
+    std::sync::OnceLock::new();
+
+/// What the writer answers `command`, made with the channel for its
+/// reply: none where the engine is going.
+fn asked<T>(commands: &Sender<Command>, command: impl FnOnce(Sender<T>) -> Command) -> Option<T> {
+    let (reply, answer) = channel();
+    commands.send(command(reply)).ok()?;
+    answer.recv().ok()
+}
+
+/// A request's paths, as the writer takes them.
+fn paths(wire: &[WirePath]) -> Vec<std::path::PathBuf> {
+    wire.iter().map(WirePath::to_path).collect()
+}
+
+/// What a request the writer did not answer is answered.
+fn going() -> Answer {
+    failure("internal", "the engine is going")
+}
+
+/// A client's `stop`, naming its program: answered `stopping`, and the
+/// engine stopped, where this engine's program is in that one's folder,
+/// or none is named; otherwise `other_copy`, naming this one's. The
+/// system service refuses it: no user stops every user's engine, its
+/// service manager does. False where the answer could not be sent.
+fn stop_asked(writer: &Writer, id: u64, program: Option<WirePath>, system: bool) -> bool {
+    if system {
+        let refused = "the system service is stopped by its service manager";
+        return send(writer, id, failure("refused", refused));
+    }
+    let Some((socket, runs)) = SERVING.get() else {
+        return send(
+            writer,
+            id,
+            failure("internal", "this engine is not serving"),
+        );
+    };
+    let answer = match (runs, program) {
+        (Some(runs), Some(program)) if !one_folder(runs, &program.to_path()) => Answer::OtherCopy {
+            program: WirePath::of(runs),
+        },
+        (None, Some(_)) => failure("internal", "this engine cannot tell its own program"),
+        _ => {
+            let sent = send(writer, id, Answer::Stopping {});
+            log("asked to stop by a client");
+            stop(socket);
+            return sent;
+        }
+    };
+    send(writer, id, answer)
+}
+
+/// Whether programs `a` and `b` are in one folder: one copy of skwird. On
+/// Unix by the folders' identities, which no spelling of their paths
+/// changes; on Windows by their paths resolved, as the system names the
+/// folders.
+fn one_folder(a: &Path, b: &Path) -> bool {
+    let (Some(a), Some(b)) = (a.parent(), b.parent()) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+        id(a).is_some_and(|a| Some(a) == id(b))
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (skwird_crawl::canonical(a), skwird_crawl::canonical(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+    }
 }
 
 /// How many clients are connected, and since when none is.
@@ -205,6 +287,7 @@ pub fn serve(config: &Config) -> Result<(), String> {
     }
     let lock = crate::os::lock(&config.dirs.lock())?;
     let (listener, bound) = listen(config, &socket)?;
+    let _ = SERVING.set((socket.clone(), std::env::current_exe().ok()));
     log(&format!("serving {} roots", config.roots.len()));
     // What this engine may not read without asking (DESIGN 4), decided once.
     #[cfg(target_os = "macos")]
@@ -946,37 +1029,34 @@ fn connection(stream: Stream, shared: &Arc<Shared>, commands: &Sender<Command>, 
             Ask::Watch { add, .. } if shared.system => watching_all(shared, add, who),
             Ask::Changes { root, since } => changes(shared, commands, &root, since, who),
             Ask::Exclude { add, remove } => {
-                let (reply, answer) = channel();
-                let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
-                let asked = commands.send(Command::Exclude {
+                let uid = shared.system.then_some(who.uid);
+                let excluded = asked(commands, |reply| Command::Exclude {
                     client: client.clone(),
-                    uid: shared.system.then_some(who.uid),
-                    add: to_path(add),
-                    remove: to_path(remove),
+                    uid,
+                    add: paths(&add),
+                    remove: paths(&remove),
                     reply,
                 });
-                match asked.ok().and_then(|()| answer.recv().ok()) {
-                    Some(folders) => Answer::Excluded {
-                        folders: folders.iter().map(|p| WirePath::of(p)).collect(),
-                    },
-                    None => failure("internal", "the engine is going"),
-                }
+                excluded.map_or_else(going, |folders| Answer::Excluded {
+                    folders: folders.iter().map(|p| WirePath::of(p)).collect(),
+                })
             }
             ask @ Ask::Volumes { .. } => volumes(shared, commands, &client, ask, who),
-            Ask::Watch { add, remove } => {
-                let (reply, answer) = channel();
-                let to_path = |v: Vec<WirePath>| v.iter().map(WirePath::to_path).collect();
-                let asked = commands.send(Command::Watch {
-                    client: client.clone(),
-                    add: to_path(add),
-                    remove: to_path(remove),
-                    reply,
-                });
-                match asked.ok().and_then(|()| answer.recv().ok()) {
-                    Some(watching) => Answer::Watching(watching),
-                    None => failure("internal", "the engine is going"),
+            // Its connection is kept as it was: it closes as the engine's
+            // process ends, which the client waits for.
+            Ask::Stop { program } => {
+                if !stop_asked(&writer, id, program, shared.system) {
+                    break;
                 }
+                continue;
             }
+            Ask::Watch { add, remove } => asked(commands, |reply| Command::Watch {
+                client: client.clone(),
+                add: paths(&add),
+                remove: paths(&remove),
+                reply,
+            })
+            .map_or_else(going, Answer::Watching),
         };
         if !send(&writer, id, answer) {
             break;
@@ -1303,12 +1383,12 @@ pub(crate) fn named<T: Send + 'static>(
 }
 
 /// What this engine says it does beyond its version (`Welcome::features`):
-/// names in both forms everywhere; removable volumes at a user's engine
-/// (`skwird_crawl::removable`).
+/// names in both forms everywhere; at a user's engine, removable volumes
+/// (`skwird_crawl::removable`) and `stop`.
 fn features(system: bool) -> Vec<String> {
     let mut said = vec![wire::NAMES_BOTH_FORMS.to_owned()];
     if !system {
-        said.push(wire::VOLUMES.to_owned());
+        said.extend([wire::VOLUMES.to_owned(), wire::STOP.to_owned()]);
     }
     said
 }

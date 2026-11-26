@@ -31,6 +31,7 @@ pub mod os;
 pub mod serve;
 #[cfg(windows)]
 pub mod service;
+pub mod stop;
 pub mod system;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod totals;

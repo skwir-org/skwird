@@ -2185,6 +2185,19 @@ ADR-053, 074, 075):
     on each system: Linux's idle class, which a thread made after
     inherits; macOS' throttled policy and Windows' background mode, each
     thread's own.
+  - `stop {program}` (0.3, its feature word `stop`): the user's engine
+    stops as when idle, what it heard applied and every root saved,
+    where it runs a program in the folder of `program`, the client's own
+    as its system names it. It is answered `stopping`, and the
+    connection then ends as the engine's process does, which the client
+    waits for; on Windows, the process itself, whose program's file is
+    free once it ended. Where the engine runs another folder's program,
+    it is answered `other_copy {program}`, naming its own, and left
+    running: a program that carries skwird stops its own copy's engine
+    (an installer about to replace it), never one another install runs.
+    Without `program`, it stops whichever it runs. The system service
+    refuses it (`refused`): its service manager stops it, and no user
+    stops every user's engine.
 - **Versions.** The protocol is experimental: a version may change
   until it is declared stable. Once stable, skwird keeps speaking the
   older versions. A client and an engine with no version in common do

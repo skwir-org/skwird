@@ -4,6 +4,19 @@ skwird's releases. Each section is its release's notes on GitHub
 (`tools/release/release.sh`): the first is the release being made, dated
 the day it is released.
 
+## 0.3.0 (unreleased)
+
+- **`skwird stop`:** the user's engine stops as when idle, what it heard
+  applied and its index saved, where it runs this copy of skwird (a
+  program in the same folder); the command gives back once it ended, 10
+  s at most, so that an installer may replace its files. An engine of
+  another copy is left running, and named. On every system; the system
+  service is its service manager's to stop. A request of the protocol,
+  `stop`, which the engine says in its hello.
+- **Quiet on Windows:** `skwird logon` starts `schtasks` with no console
+  window, and `skwirdw.exe` makes its state folder and log only to
+  serve: an installer runs it unseen, and leaves nothing of skwird's.
+
 ## 0.2.0 (2026-11-25)
 
 - **Names in both Unicode forms:** a term is matched as typed, composed

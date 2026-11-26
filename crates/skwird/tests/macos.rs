@@ -46,7 +46,13 @@ impl Env {
 
     /// The program, with every folder it may reach this test's own.
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_skwird"));
+        self.command_of(Path::new(env!("CARGO_BIN_EXE_skwird")), args)
+    }
+
+    /// A copy of the program at `program`, run as [`Env::command`] runs
+    /// it.
+    fn command_of(&self, program: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(program);
         c.args(args)
             .env("HOME", self.home())
             .env("XDG_RUNTIME_DIR", self.s.join("run"))
@@ -298,6 +304,51 @@ fn the_private_defaults_hold() {
             "{private}: {holes:?}"
         );
     }
+}
+
+/// `skwird stop` from another copy of the program, in a folder of its
+/// own, leaves the engine running and says so; from this copy's, it stops
+/// it, and gives back once it ended, its socket let go of; with none
+/// running, it says so. Each exits 0: this copy's engine runs no more.
+#[test]
+fn stop_ends_this_copys_engine_alone() {
+    let mut env = Env::new("macos-stop");
+    tree(&env);
+    env.engine(600);
+    drop(env.client());
+    let other = env.s.join("elsewhere/skwird");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_skwird"), &other).unwrap();
+    let said = stop_by(&env, &other);
+    assert!(
+        said.contains("another copy of skwird, left running"),
+        "{said}"
+    );
+    assert!(env.engines[0].try_wait().unwrap().is_none(), "it stayed");
+    drop(env.client());
+    let this = Path::new(env!("CARGO_BIN_EXE_skwird"));
+    assert_eq!(stop_by(&env, this), "your engine stopped");
+    // Its files closed: its process exits at once.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while env.engines[0].try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "it stayed:\n{}", env.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!env.socket().exists(), "its socket let go of");
+    assert_eq!(stop_by(&env, &other), "no engine of yours answers");
+}
+
+/// What `skwird stop` said, run from the program at `program`, which
+/// exited 0.
+fn stop_by(env: &Env, program: &Path) -> String {
+    let out = env.command_of(program, &["stop"]).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    assert!(
+        out.status.success(),
+        "{said} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    said
 }
 
 /// Wait until `done` holds, up to `seconds`; or say what `env` logged.

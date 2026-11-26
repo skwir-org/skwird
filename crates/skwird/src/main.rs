@@ -31,6 +31,9 @@ sync      prove PATH current now, then say how far it can be trusted
 watch     keep FOLDER live: changes in it heard and applied as they come,
           within the engine's share of watches (--remove: take it back)
 status    what the engine says of itself
+stop      stop your engine, where it runs this copy of skwird (a program
+          in this one's folder): what it heard applied, its index saved,
+          its end waited for, 10 s at most; another copy's left running
 logon     on Windows and macOS, start the engine at your logon (add), or
           no more (remove): on Windows a task of yours, running skwirdw.exe,
           skwird with no console window; on macOS a LaunchAgent of yours
@@ -285,6 +288,10 @@ fn run(args: &Args) -> Result<(), String> {
             Ok(())
         }
         "watch" => watch(args),
+        "stop" => {
+            println!("{}", skwird::stop::this_copys()?.said());
+            Ok(())
+        }
         "status" => {
             let c = client()?;
             let w = c.welcome();

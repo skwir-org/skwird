@@ -489,6 +489,56 @@ fn a_sync_of_any_root_is_a_barrier() {
 
 /// skwirdw, skwird with no console window, serves as skwird does, and
 /// logs to the engine's log in its state folder, having no console.
+/// `skwird stop` from another copy of the program, in a folder of its
+/// own, leaves the engine running and says so; from this copy's, it stops
+/// it, and gives back once its process ended, whose program's file is
+/// then free; with none running, it says so. Each exits 0: this copy's
+/// engine runs no more. Run as an installer runs it, `skwirdw.exe stop`
+/// makes no folder of skwird's.
+#[test]
+fn stop_ends_this_copys_engine_alone() {
+    let mut env = Env::new("win-stop");
+    tree(&env);
+    let skwirdw = windows_path(env!("CARGO_BIN_EXE_skwirdw"));
+    assert_eq!(stop_by(&env, skwirdw), "no engine of yours answers");
+    assert!(!env.local.join("skwird").exists(), "a folder of skwird's");
+    let engine = env.engine(600);
+    drop(env.client());
+    let other = env.s.join(r"elsewhere\skwird.exe");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::copy(program(), &other).unwrap();
+    let said = stop_by(&env, other.clone());
+    assert!(
+        said.contains("another copy of skwird, left running"),
+        "{said}"
+    );
+    assert!(
+        env.engines[engine].try_wait().unwrap().is_none(),
+        "it stayed"
+    );
+    drop(env.client());
+    assert_eq!(stop_by(&env, program()), "your engine stopped");
+    assert!(
+        env.engines[engine].try_wait().unwrap().is_some(),
+        "its process ended first:\n{}",
+        env.logs()
+    );
+    assert_eq!(stop_by(&env, other), "no engine of yours answers");
+}
+
+/// What `skwird stop` said, run from the program at `program`, which
+/// exited 0.
+fn stop_by(env: &Env, program: PathBuf) -> String {
+    let out = env.command_of(program, &["stop"]).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    assert!(
+        out.status.success(),
+        "{said} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    said
+}
+
 #[test]
 fn skwirdw_serves_and_logs_with_no_console() {
     let env = Env::new("win-skwirdw");
