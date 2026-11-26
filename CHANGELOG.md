@@ -13,6 +13,10 @@ the day it is released.
   another copy is left running, and named. On every system; the system
   service is its service manager's to stop. A request of the protocol,
   `stop`, which the engine says in its hello.
+- **`skwird logon remove --if-mine`** (Windows, macOS): the logon task,
+  or the LaunchAgent, taken back only where it runs this copy of skwird,
+  its engine stopped first; one that runs another copy's is left, and
+  named. `logon remove` alone takes back whichever, as before.
 - **Quiet on Windows:** `skwird logon` starts `schtasks` with no console
   window, and `skwirdw.exe` makes its state folder and log only to
   serve: an installer runs it unseen, and leaves nothing of skwird's.

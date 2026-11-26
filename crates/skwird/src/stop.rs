@@ -4,7 +4,7 @@
 //! (an installer's upgrade), and `logon remove --if-mine` before it takes
 //! the logon task back.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use skwird_client::{Client, Error, Find, Stopped};
@@ -34,6 +34,29 @@ impl Outcome {
                 program.display()
             ),
         }
+    }
+}
+
+/// Whether programs `a` and `b` are in one folder: one copy of skwird (on
+/// Windows, `skwird.exe` and `skwirdw.exe`). On Unix by the folders'
+/// identities, which no spelling of their paths changes; on Windows by
+/// their paths resolved, as the system names the folders.
+pub fn one_copy(a: &Path, b: &Path) -> bool {
+    let (Some(a), Some(b)) = (a.parent(), b.parent()) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+        id(a).is_some_and(|a| Some(a) == id(b))
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (skwird_crawl::canonical(a), skwird_crawl::canonical(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
     }
 }
 

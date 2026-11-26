@@ -561,6 +561,14 @@ fn skwirdw_serves_and_logs_with_no_console() {
     let _ = child.wait();
 }
 
+/// The user's logon task, held by one test at a time: it is the user's
+/// one, by its name, and cargo runs a binary's tests at once.
+fn one_task() -> std::sync::MutexGuard<'static, ()> {
+    static TASK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TASK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// `skwird logon add` writes the task's definition, in UTF-16, its
 /// program skwirdw.exe and its user the one running it, and has
 /// `schtasks` register it; `remove` takes it back. Wine's `schtasks` keeps
@@ -570,6 +578,7 @@ fn skwirdw_serves_and_logs_with_no_console() {
 /// prefix. Skipped on any other Windows.
 #[test]
 fn the_logon_task_is_written_and_registered() {
+    let _one = one_task();
     let throwaway = skwird_testkit::throwaway();
     if !skwird_testkit::under_wine() && !throwaway {
         eprintln!("skipped: it would register a task of the user running it (SKWIRD_TEST_MACHINE)");
@@ -623,6 +632,63 @@ fn the_logon_task_is_written_and_registered() {
     run("remove");
     if throwaway {
         assert!(!query().status.success(), "the task is taken back");
+    }
+}
+
+/// `logon remove --if-mine` takes back a task that runs another copy of
+/// skwird alone where that copy asks: from this one, it is left, and its
+/// program named. On a machine of the tests' own, and under Wine, whose
+/// `schtasks` keeps a task made from its definition and says it, but
+/// takes none back: that it is taken back is proven on Windows alone.
+/// Skipped on any other Windows.
+#[test]
+fn logon_remove_if_mine_leaves_another_copys_task() {
+    let _one = one_task();
+    let throwaway = skwird_testkit::throwaway();
+    if !skwird_testkit::under_wine() && !throwaway {
+        eprintln!("skipped: it would register a task of the user running it (SKWIRD_TEST_MACHINE)");
+        return;
+    }
+    let env = Env::new("win-logon-mine");
+    let other = env.s.dir("elsewhere");
+    for built in [env!("CARGO_BIN_EXE_skwird"), env!("CARGO_BIN_EXE_skwirdw")] {
+        let built = windows_path(built);
+        std::fs::copy(&built, other.join(built.file_name().unwrap())).unwrap();
+    }
+    let run = |program: PathBuf, args: &[&str]| {
+        let out = env.command_of(program, args).output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        assert!(
+            out.status.success(),
+            "{said} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        said
+    };
+    run(other.join("skwird.exe"), &["logon", "add"]);
+    let user = skwird_client::pipe::user_sid().unwrap();
+    let task = skwird::logon::name(&user);
+    let kept = || {
+        std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", &task])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let said = run(program(), &["logon", "remove", "--if-mine"]);
+    assert!(said.contains("another copy of skwird, left"), "{said}");
+    assert!(said.contains("elsewhere"), "{said}");
+    assert!(kept(), "another copy's task is left");
+    let said = run(other.join("skwird.exe"), &["logon", "remove", "--if-mine"]);
+    assert!(
+        said.ends_with("the engine starts at your logon no more"),
+        "{said}"
+    );
+    if throwaway {
+        assert!(!kept(), "the task is taken back");
+        let said = run(other.join("skwird.exe"), &["logon", "remove", "--if-mine"]);
+        assert_eq!(said, "no logon task of yours");
     }
 }
 

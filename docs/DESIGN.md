@@ -63,7 +63,14 @@ On Windows, the logon task (phase 4, step 6) is the user's own, named by
 their SID, registered by `skwird logon add`
 (`dist/windows/skwird-logon.xml`). It runs `skwirdw.exe`, skwird built
 for Windows' GUI subsystem: a console program a task starts opens a
-window.
+window. `skwird logon remove --if-mine` (0.3) takes it back only where
+it runs this copy's `skwirdw.exe`, the program in this one's folder, its
+engine stopped first (`stop`, then the task's run ended): an installer
+that removes its copy leaves a task another install registered. The
+program is read from what `schtasks` says of the task where its text
+names it whole; otherwise, from the definition `logon add` recorded in
+UTF-16, as a code page spells what it lacks as `?`. macOS' LaunchAgent is
+taken back so too, its program the first of its arguments.
 
 How clients find an engine, in this order:
 

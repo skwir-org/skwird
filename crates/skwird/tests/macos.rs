@@ -538,6 +538,7 @@ fn folders_asked_consent_for_are_read_with_full_disk_access_alone() {
 /// that engine with the user's own home, not the test's.
 #[test]
 fn the_login_agent_is_written_and_taken() {
+    let _one = one_agent();
     if !skwird_testkit::throwaway() {
         eprintln!(
             "skipped: it would have launchd start an engine of the user running it (SKWIRD_TEST_MACHINE)"
@@ -581,6 +582,63 @@ fn the_login_agent_is_written_and_taken() {
     run("remove");
     assert!(!print().status.success(), "the agent is taken back");
     assert!(!file.exists());
+}
+
+/// The user's `LaunchAgent`, held by one test at a time: launchd knows it
+/// by its label, the user's one, and cargo runs a binary's tests at once.
+fn one_agent() -> std::sync::MutexGuard<'static, ()> {
+    static AGENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    AGENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `logon remove --if-mine` takes back a `LaunchAgent` that runs another
+/// copy of skwird alone where that copy asks: from this one, it is left,
+/// and its program named. On a machine thrown away after its tests alone,
+/// as `the_login_agent_is_written_and_taken`.
+#[test]
+fn logon_remove_if_mine_leaves_another_copys_agent() {
+    let _one = one_agent();
+    if !skwird_testkit::throwaway() {
+        eprintln!(
+            "skipped: it would have launchd start an engine of the user running it (SKWIRD_TEST_MACHINE)"
+        );
+        return;
+    }
+    let env = Env::new("mac-agent-mine");
+    let other = env.s.join("elsewhere/skwird");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_skwird"), &other).unwrap();
+    let run = |program: &Path, args: &[&str]| {
+        let out = env.command_of(program, args).output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        assert!(
+            out.status.success(),
+            "{said} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        said
+    };
+    run(&other, &["logon", "add"]);
+    let file = env
+        .home()
+        .join("Library/LaunchAgents/org.skwir.skwird.plist");
+    let this = Path::new(env!("CARGO_BIN_EXE_skwird"));
+    let said = run(this, &["logon", "remove", "--if-mine"]);
+    assert!(said.contains("another copy of skwird, left"), "{said}");
+    assert!(said.contains("elsewhere"), "{said}");
+    assert!(file.exists(), "another copy's agent is left");
+    let said = run(&other, &["logon", "remove", "--if-mine"]);
+    assert!(
+        said.ends_with("the engine starts at your login no more"),
+        "{said}"
+    );
+    assert!(!file.exists(), "the agent is taken back");
+    assert_eq!(
+        run(&other, &["logon", "remove", "--if-mine"]),
+        "no LaunchAgent of skwird's"
+    );
 }
 
 /// A name written decomposed, as macOS' programs often write them, is

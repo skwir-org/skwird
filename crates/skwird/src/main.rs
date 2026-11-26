@@ -36,7 +36,9 @@ stop      stop your engine, where it runs this copy of skwird (a program
           its end waited for, 10 s at most; another copy's left running
 logon     on Windows and macOS, start the engine at your logon (add), or
           no more (remove): on Windows a task of yours, running skwirdw.exe,
-          skwird with no console window; on macOS a LaunchAgent of yours
+          skwird with no console window; on macOS a LaunchAgent of yours.
+          remove --if-mine takes it back only where it runs this copy of
+          skwird, its engine stopped first; another copy's is left
 service   on Windows and macOS, the system service (add, as an
           administrator; on macOS with sudo): every user's files indexed,
           each user answered what they could list, started at boot as
@@ -47,6 +49,8 @@ The commands that ask start the engine where none answers, unless
 SKWIRD_NO_START is set. SKWIRD_WATCHES sets the most folders an engine
 watches (a quarter of the user's inotify watches by default).";
 
+// A command line's flags, each a yes or a no of its own: no state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     command: String,
     roots: Vec<PathBuf>,
@@ -57,6 +61,8 @@ struct Args {
     /// The folders `watch` names, and whether it takes them back.
     folders: Vec<PathBuf>,
     remove: bool,
+    /// `logon remove --if-mine`: only where it runs this copy.
+    if_mine: bool,
     /// `serve --system`: the system service.
     system: bool,
     limit: Option<u64>,
@@ -86,6 +92,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         folders: Vec::new(),
         remove: false,
         system: false,
+        if_mine: false,
     };
     let number = |v: Option<&String>, what: &str| -> Result<u64, String> {
         v.and_then(|v| v.parse().ok())
@@ -104,6 +111,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--case" => parsed.case = true,
             "--remove" => parsed.remove = true,
             "--system" => parsed.system = true,
+            "--if-mine" => parsed.if_mine = true,
             "-h" | "--help" => return Err(USAGE.into()),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
@@ -133,12 +141,15 @@ pub(crate) fn main() -> ExitCode {
     }
 }
 
-/// Start the engine at the user's logon, or no more (Windows, macOS).
+/// Start the engine at the user's logon, or no more (Windows, macOS); with
+/// `if_mine`, no more where it starts this copy of skwird.
 #[cfg(any(windows, target_os = "macos"))]
-fn logon(what: Option<&str>) -> Result<(), String> {
-    let said = match what {
-        Some("add") => skwird::logon::add()?,
-        Some("remove") => skwird::logon::remove()?,
+fn logon(what: Option<&str>, if_mine: bool) -> Result<(), String> {
+    let said = match (what, if_mine) {
+        (Some("add"), false) => skwird::logon::add()?,
+        (Some("remove"), false) => skwird::logon::remove()?,
+        (Some("remove"), true) => skwird::logon::remove_if_mine()?,
+        (Some("add"), true) => return Err("--if-mine goes with logon remove".into()),
         _ => return Err("logon takes add or remove".into()),
     };
     println!("{said}");
@@ -185,7 +196,7 @@ fn service(_: &Args) -> Result<(), String> {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn logon(_: Option<&str>) -> Result<(), String> {
+fn logon(_: Option<&str>, _: bool) -> Result<(), String> {
     Err(
         "logon is Windows' and macOS': elsewhere, a service manager starts the engine \
          (dist/systemd/skwird.service)"
@@ -235,7 +246,8 @@ fn print_coverage(c: &Coverage) {
 fn run(args: &Args) -> Result<(), String> {
     match args.command.as_str() {
         "serve" => serve(args),
-        "logon" => logon(args.term.as_deref()),
+        "logon" => logon(args.term.as_deref(), args.if_mine),
+        _ if args.if_mine => Err("--if-mine goes with logon remove".into()),
         "service" => service(args),
         "find" => {
             let term = args.term.clone().ok_or("find takes a term")?;

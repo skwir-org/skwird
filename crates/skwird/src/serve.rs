@@ -185,9 +185,11 @@ fn stop_asked(writer: &Writer, id: u64, program: Option<WirePath>, system: bool)
         );
     };
     let answer = match (runs, program) {
-        (Some(runs), Some(program)) if !one_folder(runs, &program.to_path()) => Answer::OtherCopy {
-            program: WirePath::of(runs),
-        },
+        (Some(runs), Some(program)) if !crate::stop::one_copy(runs, &program.to_path()) => {
+            Answer::OtherCopy {
+                program: WirePath::of(runs),
+            }
+        }
         (None, Some(_)) => failure("internal", "this engine cannot tell its own program"),
         _ => {
             let sent = send(writer, id, Answer::Stopping {});
@@ -197,29 +199,6 @@ fn stop_asked(writer: &Writer, id: u64, program: Option<WirePath>, system: bool)
         }
     };
     send(writer, id, answer)
-}
-
-/// Whether programs `a` and `b` are in one folder: one copy of skwird. On
-/// Unix by the folders' identities, which no spelling of their paths
-/// changes; on Windows by their paths resolved, as the system names the
-/// folders.
-fn one_folder(a: &Path, b: &Path) -> bool {
-    let (Some(a), Some(b)) = (a.parent(), b.parent()) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
-        id(a).is_some_and(|a| Some(a) == id(b))
-    }
-    #[cfg(not(unix))]
-    {
-        matches!(
-            (skwird_crawl::canonical(a), skwird_crawl::canonical(b)),
-            (Ok(a), Ok(b)) if a == b
-        )
-    }
 }
 
 /// How many clients are connected, and since when none is.
