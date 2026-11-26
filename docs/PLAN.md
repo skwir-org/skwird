@@ -49,8 +49,10 @@ and a Homebrew formula built from its source. 0.2.0 was made on
 2026-11-25, after a review of two rounds (below, "The review before
 0.2"): names in skwir's three forms, removable volumes on request,
 Windows' index mapped, a Home Manager module; it was published the same
-day, with skwir 0.7.0, and skwird's AUR package made with it. 0.3.0 is
-what a program that carries skwird needs (below, planned 2026-11-26).
+day, with skwir 0.7.0, and skwird's AUR package made with it. 0.3.0 was
+made on 2026-11-26, what a program that carries skwird needs (below,
+"0.3.0"): `skwird stop`, `logon remove --if-mine`, third-party notices,
+a plain Linux build with `skwird-bin`, the `.rpm` signed.
 
 ## Phase 0: measure (done)
 

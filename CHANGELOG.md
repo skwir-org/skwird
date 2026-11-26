@@ -4,7 +4,7 @@ skwird's releases. Each section is its release's notes on GitHub
 (`tools/release/release.sh`): the first is the release being made, dated
 the day it is released.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-26)
 
 - **`skwird stop`:** the user's engine stops as when idle, what it heard
   applied and its index saved, where it runs this copy of skwird (a

@@ -11,7 +11,7 @@ description = "skwird's client: finds or starts an engine, and asks it; and a fa
 # Windows, so that the copies a client keeps build on their own
 # (docs/DESIGN.md, Protocol).
 [dependencies]
-skwird-protocol = { path = "../protocol", version = "0.2.0" }
+skwird-protocol = { path = "../protocol", version = "0.3.0" }
 
 # A connect that does not wait on Linux, which holds one while the
 # engine's queue is full (`connect_to`): a version skwir's lockfile

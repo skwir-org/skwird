@@ -9,7 +9,7 @@
 # Maintainer: The skwir authors
 
 pkgname=skwird-bin
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='An index of file names kept current, answered over a local socket (its release'"'"'s build)'
 arch=('x86_64')

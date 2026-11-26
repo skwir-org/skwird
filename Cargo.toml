@@ -6,7 +6,7 @@ members = ["crates/*"]
 # skwird's own, every crate's alike (docs/DESIGN.md, decision 11,
 # "Versions"): not skwir's, and below 1.0 while the protocol is
 # experimental.
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

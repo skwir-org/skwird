@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "skwird"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "rustix",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "rustix",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "rustix",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-crawl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "rustix",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-index"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "globset",
  "rustix",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "skwird-testkit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rustix",
  "windows-sys",
