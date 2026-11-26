@@ -49,7 +49,8 @@ and a Homebrew formula built from its source. 0.2.0 was made on
 2026-11-25, after a review of two rounds (below, "The review before
 0.2"): names in skwir's three forms, removable volumes on request,
 Windows' index mapped, a Home Manager module; it was published the same
-day, with skwir 0.7.0, and skwird's AUR package made with it.
+day, with skwir 0.7.0, and skwird's AUR package made with it. 0.3.0 is
+what a program that carries skwird needs (below, planned 2026-11-26).
 
 ## Phase 0: measure (done)
 
@@ -2864,6 +2865,50 @@ for a reason of its own:
     publish. On macOS, the mounts found by a listing are forgotten at
     each check, a mount the table spells otherwise than the root's path
     found again by its next listing alone.
+
+## 0.3.0: what a program that carries skwird needs (planned 2026-11-26)
+
+skwir 0.7.1, published on 2026-11-26, carries skwird 0.2.0:
+- Windows' and macOS' programs in its own MSI, zip and dmg, started on
+  demand where no `skwird` is on the `PATH`;
+- skwird built from its tag in skwir's Linux tarball;
+- `Recommends: skwird` in its packages, and skwird's `.deb` in skwir's
+  apt repository.
+
+What carrying it showed missing, and the user's decisions of
+2026-11-26:
+1. **`skwird stop`**, on every system: the user's engine stopped as when
+   idle (what was heard applied, every root saved), only where it runs
+   this copy's program (a program in the same folder: `skwird`, or
+   Windows' `skwirdw.exe`). It waits up to 10 s for the engine's process
+   to end, so that its program's file is free: an MSI that upgrades
+   skwir otherwise finds `skwird.exe` in use, and `taskkill` ends any
+   copy's. A request of the protocol, `stop`, naming the client's
+   program; the system service refuses it, its service manager's to stop.
+2. **`skwird logon remove --if-mine`** (Windows, macOS): the logon task,
+   or the LaunchAgent, taken back only where it runs this copy's
+   program, its engine stopped first (as `stop`, then `schtasks /End`).
+   Otherwise it says which program it runs, and leaves it. `logon
+   remove` alone keeps its meaning; 0.2's refuses the flag, removing
+   nothing.
+3. **Quiet on Windows:** `schtasks` started with no console window, and
+   `skwirdw.exe` making its state folder and its log for `serve` alone,
+   so that an installer runs `skwirdw.exe stop` and `logon remove
+   --if-mine` unseen.
+4. **Third-party notices** beside every program the release gives: each
+   dependency's licence, from the lock, for the system it is built for.
+5. **A plain Linux build** (x86-64, built in an Ubuntu 22.04 root:
+   glibc 2.35 and later), with the licences, the notices and the systemd
+   units for a setup by hand, tried in every distribution root; for
+   AppImage users, other distributions, and a program that carries it.
+   **`skwird-bin`** on the AUR installs it.
+6. **The `.rpm` signed** with skwir's repositories' key, as skwir's are
+   (its `tools/package/rpm-sign.sh`), so that skwir's dnf repository
+   lists it (`gpgcheck=1`): a step of its own after the build, the
+   passphrase being the user's.
+
+Not: `skwird-git` (skwir pins skwird's client; no one asks for skwird's
+`main` packaged); nixpkgs (later, perhaps, the user's call).
 
 ## Later
 
