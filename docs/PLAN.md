@@ -2910,6 +2910,38 @@ What carrying it showed missing, and the user's decisions of
 Not: `skwird-git` (skwir pins skwird's client; no one asks for skwird's
 `main` packaged); nixpkgs (later, perhaps, the user's call).
 
+**Built on 2026-11-26** (`ci/all/0.3`), each step through the gate, CI
+on the three systems where it touches their code:
+1. **`stop`:** the protocol's request (DESIGN, Protocol, `stop`), the
+   client's `Client::stop`, and `skwird stop`, exit 0 where this copy's
+   engine runs no more. Tested against the fake engine, and on each
+   system with a second copy of the program in a folder of its own: on
+   Windows (Wine and the runner) the engine's process had ended when the
+   command gave back, and `skwirdw.exe stop` made no folder. macOS
+   refused a timeout on a socket its peer had closed (EINVAL): passed
+   over.
+2. **`logon remove --if-mine`:** Windows' task and macOS' LaunchAgent.
+   Tested: the parsing everywhere; with two copies, under Wine and on
+   both runners (that the task is gone, on Windows alone: Wine's
+   `schtasks` takes no task back). Not tried: a path a code page cannot
+   spell on Windows, whose program is then read from the definition
+   `logon add` recorded.
+3. **Quiet on Windows:** done; that no console flashes is not tested (a
+   runner shows no screen).
+4. **Notices:** `tools/notices`, checked by the gate and CI; given in
+   every archive and package, the Nix package's among them.
+5. **The plain build** and `skwird-bin`: tried by hand on five
+   distributions, and `skwird-bin` installed, checked and removed on
+   Arch; the four packages tried again with the notices. The AUR's
+   `skwird-bin` is made at the release, from its archive.
+6. **Signing:** `release.sh sign`, tried with a throwaway key. The real
+   key signs at the release, the user's passphrase asked then.
+
+Left for 0.3.0 itself: the version and the changelog's date, the
+release (RELEASING.md), then `skwird-bin` on the AUR and skwir told of
+what it can use (`stop`, `--if-mine`, the plain build, the signed
+`.rpm`).
+
 ## Later
 
 - Packages, beside skwir's: skwir.org's apt and dnf repositories, the
