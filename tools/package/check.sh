@@ -6,6 +6,7 @@
 #     tools/package/check.sh installed    # as root, once installed
 #     tools/package/check.sh engine       # as a user, once installed
 #     tools/package/check.sh removed      # as root, once removed
+#     tools/package/check.sh plain DIR    # as root, the plain build at DIR
 #
 # - installed: the program, where each unit runs it; the user's units and
 #   the system service's, the system service's user (made by the
@@ -16,6 +17,10 @@
 #   link), answers them, and never a private folder's.
 # - removed: no file of the package's left, nor the system service's
 #   index.
+# - plain: the plain Linux build (tools/package/linux.sh) as its archive,
+#   unpacked at DIR, holds it: the program, which runs here, its licences
+#   and notices, and every file its INSTALL.txt installs; and skwird
+#   installed by hand.
 set -eu
 failed=0
 fail() {
@@ -39,9 +44,10 @@ installed)
         [ -x "$program" ] || fail "$unit runs $program, which is not installed"
     done
     # The licences, where the system keeps them.
+    # skwird-bin's, as Arch keeps them, by the package's name.
     for licence in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES; do
         [ -f "/usr/share/doc/skwird/$licence" ] || [ -f "/usr/share/licenses/skwird/$licence" ] ||
-            fail "no $licence"
+            [ -f "/usr/share/licenses/skwird-bin/$licence" ] || fail "no $licence"
     done
     # The system service's user, with no login.
     if entry="$(getent passwd skwird)"; then
@@ -89,13 +95,30 @@ engine)
     ;;
 removed)
     for f in $files /usr/share/doc/skwird/LICENSE-MIT /usr/share/licenses/skwird/LICENSE-MIT \
-        /usr/share/doc/skwird/THIRD-PARTY-NOTICES /usr/share/licenses/skwird/THIRD-PARTY-NOTICES; do
+        /usr/share/doc/skwird/THIRD-PARTY-NOTICES /usr/share/licenses/skwird/THIRD-PARTY-NOTICES \
+        /usr/share/licenses/skwird-bin; do
         [ ! -e "$f" ] || fail "$f is left"
     done
     [ ! -e /var/cache/skwird ] || fail "the system service's index is left"
     ;;
+plain)
+    dir="${2:?the folder the plain build is unpacked in}"
+    for f in skwird LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.txt INSTALL.txt README.md \
+        systemd/skwird.service systemd/skwird.socket systemd/skwird-system.service \
+        sysusers/skwird.conf; do
+        [ -f "$dir/$f" ] || fail "the archive holds no $f"
+    done
+    # Every file INSTALL.txt installs, the archive holds: the words after
+    # `install`'s mode, but its place (after -t, or its last word).
+    sed -n 's/^ *install -Dm[0-9]* //p' "$dir/INSTALL.txt" | sed '/ -t /{s/ -t .*//;b;};s/ [^ ]*$//' |
+        tr ' ' '\n' | while read -r f; do
+        [ -f "$dir/$f" ] || { echo "FAIL: INSTALL.txt installs $f, which the archive does not hold" >&2; exit 1; }
+    done || failed=1
+    "$dir/skwird" --help 2>&1 | grep -q "^serve " || fail "the program does not run here"
+    [ -x /usr/local/bin/skwird ] || fail "skwird is not installed by hand"
+    ;;
 *)
-    echo "usage: $0 installed|engine|removed" >&2
+    echo "usage: $0 installed|engine|removed|plain DIR" >&2
     exit 2
     ;;
 esac

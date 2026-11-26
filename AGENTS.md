@@ -189,6 +189,9 @@ and `docs/PLAN.md` (the phases and where they stand) first.
   user's: no home, no runtime folder. A try downloads, so it is not in
   the gate: run it when a package's files change (`dist/`, the
   manifest's metadata, `tools/package`), and before a release.
+  `try.sh linux` builds the plain Linux build in Ubuntu 22.04's root and
+  checks it installed by hand in a fresh root of every distribution;
+  `try.sh arch-bin` then builds the AUR's skwird-bin from it.
 - Assert what an answer holds, not merely that it parses.
 
 ## Disk

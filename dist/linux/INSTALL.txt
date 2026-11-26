@@ -1,0 +1,43 @@
+skwird for Linux on x86-64, with glibc 2.35 or later
+====================================================
+
+skwird is an index of file names kept current by the system's change
+notifications, answered over a local socket. Nothing here is set up for
+you: what follows is each way to run it, by hand.
+
+On demand
+---------
+
+A client (skwir, or skwird's own commands) starts the engine where none
+answers, if skwird is on your PATH; it goes a minute after its last
+client:
+
+    install -Dm755 skwird ~/.local/bin/skwird
+
+With your session (systemd)
+---------------------------
+
+The user service and its socket, the service pointed at where skwird is
+(%h is your home, as systemd spells it):
+
+    install -Dm644 systemd/skwird.service systemd/skwird.socket -t ~/.config/systemd/user
+    sed -i 's|/usr/bin/skwird|%h/.local/bin/skwird|' ~/.config/systemd/user/skwird.service
+    systemctl --user daemon-reload
+    systemctl --user enable --now skwird.socket
+
+The system service (systemd, as root)
+-------------------------------------
+
+Every user's files indexed, each user answered only what they could
+list. It needs its user (sysusers), and skwird where its unit runs it:
+
+    install -Dm755 skwird /usr/bin/skwird
+    install -Dm644 systemd/skwird-system.service -t /usr/lib/systemd/system
+    install -Dm644 sysusers/skwird.conf -t /usr/lib/sysusers.d
+    systemd-sysusers
+    systemctl daemon-reload
+    systemctl enable --now skwird-system.service
+
+To stop your engine where it runs this copy: skwird stop. skwird --help
+says the rest. Its licences are LICENSE-MIT and LICENSE-APACHE; what it
+holds of others', THIRD-PARTY-NOTICES.txt.

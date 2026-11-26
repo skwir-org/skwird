@@ -5,9 +5,11 @@
 # at the channel the tree's checks run (RUSTUP_TOOLCHAIN, which try.sh
 # reads from rust-toolchain.toml; a distribution's may be older than
 # skwird needs), and the packaging tool. Arch builds with its own Rust
-# (the PKGBUILD's makedepends), as a user of its own, `builder`.
+# (the PKGBUILD's makedepends), as a user of its own, `builder`. The
+# plain Linux build (`linux`, Ubuntu 22.04's root) needs no packaging
+# tool: it is an archive.
 #
-#     RUSTUP_TOOLCHAIN=1.99.1 tools/package/prepare.sh debian|ubuntu|fedora|arch
+#     RUSTUP_TOOLCHAIN=1.99.1 tools/package/prepare.sh debian|ubuntu|fedora|arch|linux
 set -eu
 PATH="$HOME/.cargo/bin:$PATH"
 rust() {
@@ -26,6 +28,12 @@ debian | ubuntu)
     rust
     command -v cargo-deb >/dev/null || cargo install --locked cargo-deb
     ;;
+linux)
+    apt-get update -q
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+        build-essential curl ca-certificates
+    rust
+    ;;
 fedora)
     dnf -y -q install --setopt=install_weak_deps=False gcc curl ca-certificates
     rust
@@ -43,7 +51,7 @@ arch)
     id builder >/dev/null 2>&1 || useradd -m builder
     ;;
 *)
-    echo "usage: $0 debian|ubuntu|fedora|arch" >&2
+    echo "usage: $0 debian|ubuntu|fedora|arch|linux" >&2
     exit 2
     ;;
 esac

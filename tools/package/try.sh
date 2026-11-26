@@ -14,16 +14,22 @@
 # engine, as a user; then the package removed. The package lands in
 # target/package/linux once it passed.
 #
-#     tools/package/try.sh debian|ubuntu|fedora|arch
+# Two more (docs/PLAN.md, 0.3.0, step 5):
+# - `linux`, the plain Linux build (linux.sh), built in Ubuntu 22.04's
+#   root, the oldest C library it is built against; installed by hand,
+#   as its INSTALL.txt says, in a fresh root of that Ubuntu and of each
+#   distribution above, and its engine checked in each;
+# - `arch-bin`, the AUR's skwird-bin (aur-bin.sh), built in Arch's root
+#   from the plain build a `linux` try left, and tried as `arch` is.
+#
+#     tools/package/try.sh debian|ubuntu|fedora|arch|linux|arch-bin
 set -eu
 distribution="${1:-}"
 case "$distribution" in
-debian) image=debian/trixie/amd64/default ;;
-ubuntu) image=ubuntu/noble/amd64/default ;;
-fedora) image=fedora/44/amd64/default ;;
-arch) image=archlinux/current/amd64/default ;;
+debian | ubuntu | fedora | arch | linux) family="$distribution" ;;
+arch-bin) family=arch ;;
 *)
-    echo "usage: $0 debian|ubuntu|fedora|arch" >&2
+    echo "usage: $0 debian|ubuntu|fedora|arch|linux|arch-bin" >&2
     exit 2
     ;;
 esac
@@ -31,30 +37,44 @@ tree="$(cd "$(dirname "$0")/../.." && pwd)"
 roots="$HOME/.cache/skwird-tests/roots"
 out="$tree/target/package/linux"
 mkdir -p "$roots" "$out"
-exec 9>"$roots/$distribution.lock"
-flock -n 9 || { echo "a $distribution package build is already running" >&2; exit 1; }
+exec 9>"$roots/$family.lock"
+flock -n 9 || { echo "a $family package build is already running" >&2; exit 1; }
 # The Rust the tree's checks run, for the packages built with rustup's.
 toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$tree/rust-toolchain.toml")"
+version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$tree/Cargo.toml")"
+plain="skwird-$version-linux-x86_64.tar.gz"
 
-# The image, once: its root filesystem, checked against its sum.
-tarball="$roots/$distribution.rootfs.tar.xz"
-if [ ! -f "$tarball" ]; then
-    index="https://images.linuxcontainers.org/images/$image"
-    build="$(curl -fsSL "$index/" | grep -o 'href="[0-9][^"]*/"' | tail -1 | cut -d'"' -f2)"
-    curl -fsSL -o "$tarball.part" "$index/${build}rootfs.tar.xz"
-    sum="$(curl -fsSL "$index/${build}SHA256SUMS" | awk '$2 == "rootfs.tar.xz" { print $1 }')"
-    if [ "$(sha256sum "$tarball.part" | cut -d' ' -f1)" != "$sum" ]; then
-        echo "$tarball.part: not the image's published sum" >&2
-        exit 1
+# The image of the distribution $1, once: its root filesystem, checked
+# against its sum. Its path.
+image() {
+    case "$1" in
+    debian) at=debian/trixie/amd64/default ;;
+    ubuntu) at=ubuntu/noble/amd64/default ;;
+    fedora) at=fedora/44/amd64/default ;;
+    arch) at=archlinux/current/amd64/default ;;
+    linux) at=ubuntu/jammy/amd64/default ;;
+    esac
+    file="$roots/$1.rootfs.tar.xz"
+    if [ ! -f "$file" ]; then
+        index="https://images.linuxcontainers.org/images/$at"
+        build="$(curl -fsSL "$index/" | grep -o 'href="[0-9][^"]*/"' | tail -1 | cut -d'"' -f2)"
+        curl -fsSL -o "$file.part" "$index/${build}rootfs.tar.xz"
+        sum="$(curl -fsSL "$index/${build}SHA256SUMS" | awk '$2 == "rootfs.tar.xz" { print $1 }')"
+        if [ "$(sha256sum "$file.part" | cut -d' ' -f1)" != "$sum" ]; then
+            echo "$file.part: not the image's published sum" >&2
+            exit 1
+        fi
+        mv "$file.part" "$file"
     fi
-    mv "$tarball.part" "$tarball"
-fi
+    echo "$file"
+}
 
-# A root of it at $1, as unpacked by someone who is not root: folders
-# their owner may write, this system's DNS, and the package managers' own
-# sandboxes off (they would drop to users a namespace of one user does
-# not have).
+# A root of the distribution $2 at $1, as unpacked by someone who is not
+# root: folders their owner may write, this system's DNS, and the package
+# managers' own sandboxes off (they would drop to users a namespace of one
+# user does not have).
 unpack() {
+    tarball="$(image "$2")"
     if [ -d "$1" ]; then
         chmod -R u+rwX "$1"
         rm -rf "${1:?}"
@@ -64,8 +84,8 @@ unpack() {
     chmod u+rwx "$1" "$1/root"
     rm -f "$1/etc/resolv.conf"
     cp -L /etc/resolv.conf "$1/etc/resolv.conf"
-    case "$distribution" in
-    debian | ubuntu)
+    case "$2" in
+    debian | ubuntu | linux)
         echo 'APT::Sandbox::User "root";' > "$1/etc/apt/apt.conf.d/99skwird-sandbox"
         ;;
     arch)
@@ -107,24 +127,25 @@ enter() {
         "$@"
 }
 
+# The root $1 of the distribution $2 made fit for a user namespace.
 rootless() {
-    case "$distribution" in
-    debian | ubuntu) enter "$1" 0 /tools/package/rootless-apt.sh >/dev/null ;;
+    case "$2" in
+    debian | ubuntu | linux) enter "$1" 0 /tools/package/rootless-apt.sh >/dev/null ;;
     esac
 }
 
 # The build root, unpacked once and kept; what the build needs installed
 # on every try, which passes over what is there in a second or two.
-builder="$roots/$distribution-build"
+builder="$roots/$family-build"
 if [ ! -f "$builder/.skwird-prepared" ]; then
-    unpack "$builder"
-    if [ "$distribution" = arch ]; then
+    unpack "$builder" "$family"
+    if [ "$family" = arch ]; then
         enter "$builder" 0 sh -c 'pacman-key --init && pacman-key --populate archlinux' >/dev/null
     fi
-    rootless "$builder"
+    rootless "$builder" "$family"
     touch "$builder/.skwird-prepared"
 fi
-enter "$builder" 0 /tools/package/prepare.sh "$distribution"
+enter "$builder" 0 /tools/package/prepare.sh "$family"
 chmod u+rwx "$builder" "$builder/root"
 
 # The tree's files, fresh; the build's target kept between tries.
@@ -152,13 +173,49 @@ arch)
     made="$builder/src/target/aur"
     pattern='skwird-[0-9]*.pkg.tar.zst'
     ;;
+arch-bin)
+    [ -f "$out/$plain" ] || { echo "no $out/$plain: try.sh linux makes it" >&2; exit 1; }
+    cp "$out/$plain" "$builder/src/"
+    enter "$builder" 1000 sh -c "cd /src && tools/package/aur-bin.sh /src/$plain"
+    made="$builder/src/target/aur-bin"
+    pattern='skwird-bin-[0-9]*.pkg.tar.zst'
+    ;;
+linux)
+    rm -rf "$builder/build/target/linux"
+    enter "$builder" 0 env CARGO_TARGET_DIR=/build/target sh -c 'cd /src && tools/package/linux.sh'
+    made="$builder/build/target/linux"
+    pattern="$plain"
+    ;;
 esac
+
+# The plain build: installed by hand, as its INSTALL.txt says, in a fresh
+# root of each distribution, its files checked as root and its engine as
+# a user; then it lands with the packages.
+if [ "$distribution" = linux ]; then
+    for on in linux debian ubuntu fedora arch; do
+        fresh="$roots/linux-on-$on"
+        unpack "$fresh" "$on"
+        rootless "$fresh" "$on"
+        mkdir -p "$fresh/package"
+        cp "$made/$plain" "$fresh/package/"
+        enter "$fresh" 0 sh -c "cd /package && tar -xzf $plain && install -Dm755 skwird-*/skwird /usr/local/bin/skwird"
+        echo "== linux, on $on: installed by hand"
+        enter "$fresh" 0 /tools/package/check.sh plain "/package/${plain%.tar.gz}"
+        echo "== linux, on $on: a user's engine"
+        enter "$fresh" 1000 /tools/package/check.sh engine
+        chmod -R u+rwX "$fresh"
+        rm -rf "${fresh:?}"
+    done
+    cp "$made/$plain" "$out/"
+    echo "built and checked: $out/$plain"
+    exit 0
+fi
 
 # A fresh root installs it, with what it depends on alone, and checks it:
 # as root, then as a user; then removes it, and checks what is left.
-fresh="$roots/$distribution-try"
-unpack "$fresh"
-rootless "$fresh"
+fresh="$roots/$family-try"
+unpack "$fresh" "$family"
+rootless "$fresh" "$family"
 mkdir -p "$fresh/package"
 # shellcheck disable=SC2086 # the name is a pattern
 for package in "$made"/$pattern; do
@@ -176,9 +233,9 @@ fedora)
     enter "$fresh" 0 sh -c 'dnf -y -q install --setopt=install_weak_deps=False /package/*.rpm' >/dev/null
     remove='dnf -y -q remove skwird'
     ;;
-arch)
+arch | arch-bin)
     enter "$fresh" 0 sh -c 'pacman-key --init && pacman-key --populate archlinux && pacman -Syu --noconfirm && pacman -U --noconfirm /package/*.pkg.tar.zst' >/dev/null
-    remove='pacman -R --noconfirm skwird'
+    remove="pacman -R --noconfirm skwird${distribution#arch}"
     ;;
 esac
 echo "== $distribution: installed"

@@ -1808,6 +1808,20 @@ checks it there (`tools/package/check.sh`):
 The system service itself needs fanotify, which no user namespace
 grants: the flake's machines prove it (`checks`).
 
+**A plain Linux build beside them** (0.3, the user's choice of
+2026-11-26): the program in an archive, with the licences, the
+third-party notices and the same units and sysusers file, for a setup
+by hand that its `INSTALL.txt` says (on demand, with the session, the
+system service). For AppImage users, whose image dies with its program
+and carries no engine, other distributions, and a program that carries
+skwird. It is built in Ubuntu 22.04's root, against glibc 2.35, the
+oldest C library a release builds against: every later one runs it.
+Not static against musl, whose allocator is slow, and the index leans
+on its allocator (decision 10). `try.sh linux` installs it by hand in a
+fresh root of every distribution above and that Ubuntu, and checks its
+engine in each. The AUR's `skwird-bin` installs it, as `skwird`
+installs its own build, for a system with no Rust to build skwird.
+
 **Versions** (the user's choice, 2026-11-23). skwird's version is its
 own, not skwir's, one for every crate (the workspace's), and it starts
 at 0.1.0. The reasons:

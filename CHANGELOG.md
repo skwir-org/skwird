@@ -22,6 +22,13 @@ the day it is released.
   and on Windows MinGW-w64's runtime (`THIRD-PARTY-NOTICES`, in the
   Windows and macOS archives, and where each package keeps its
   licences).
+- **A plain Linux build** (`skwird-<version>-linux-x86_64.tar.gz`), for
+  any Linux on x86-64 with glibc 2.35 or later (Ubuntu 22.04 and every
+  distribution since): the program, its licences and notices, and the
+  systemd units for a setup by hand, which its `INSTALL.txt` says. It is
+  tried installed so on Ubuntu 22.04, Debian 13, Ubuntu 24.04, Fedora 44
+  and Arch. **`skwird-bin`** on the AUR installs it, for a system with no
+  Rust to build skwird.
 - **Quiet on Windows:** `skwird logon` starts `schtasks` with no console
   window, and `skwirdw.exe` makes its state folder and log only to
   serve: an installer runs it unseen, and leaves nothing of skwird's.

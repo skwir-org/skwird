@@ -7,7 +7,8 @@ pushes or publishes on its own: each of those is the maintainer's.
 ## Prepare the source
 
 1. Set the version in `Cargo.toml` (the workspace's) and `pkgver` in
-   `dist/aur/PKGBUILD`, then `cargo update --workspace`, which writes the
+   `dist/aur/PKGBUILD` and `dist/aur/skwird-bin/PKGBUILD`, then `cargo
+   update --workspace`, which writes the
    workspace's crates into `Cargo.lock` at that version.
 2. Date the version's section of `CHANGELOG.md`: `## 0.1.0 (2026-11-30)`.
    It must be the first section: it is the release's notes.
@@ -64,4 +65,10 @@ the draft.
   `.SRCINFO` made again (`makepkg --printsrcinfo`), pushed with the
   maintainer's AUR key. The repository's checksum stays `SKIP`, which
   `tools/package/aur.sh` needs, building an archive of the tree.
+- The AUR's `skwird-bin` (`ssh://aur@aur.archlinux.org/skwird-bin.git`,
+  from 0.3.0) is taken so too, from `dist/aur/skwird-bin/PKGBUILD` and
+  `skwird.install`, its checksum the release's plain Linux build's, as
+  `SHA256SUMS` says it; the repository's stays `SKIP`, for
+  `tools/package/aur-bin.sh`, which builds it from the plain build a try
+  made.
 - nixpkgs is not asked yet: the maintainer's call, perhaps later.

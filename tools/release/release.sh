@@ -38,13 +38,14 @@ version() {
 }
 
 # The assets a bundle of version $1 holds, but its checksums: each Linux
-# package tried, Windows' programs, macOS' program.
+# package tried, the plain Linux build, Windows' programs, macOS' program.
 assets() {
     printf '%s\n' \
         "skwird_$1-1_amd64.deb" \
         "skwird_$1-1ubuntu24.04_amd64.deb" \
         "skwird-$1-1.x86_64.rpm" \
         "skwird-$1-1-x86_64.pkg.tar.zst" \
+        "skwird-$1-linux-x86_64.tar.gz" \
         "skwird-$1-windows-x86_64.zip" \
         "skwird-$1-macos-arm64.tar.gz"
 }
@@ -69,11 +70,13 @@ check() {
     local pkgver
     pkgver="$(sed -n 's/^pkgver=//p' dist/aur/PKGBUILD)"
     [ "$pkgver" = "$v" ] || die "dist/aur/PKGBUILD's pkgver is $pkgver, not $v"
+    pkgver="$(sed -n 's/^pkgver=//p' dist/aur/skwird-bin/PKGBUILD)"
+    [ "$pkgver" = "$v" ] || die "dist/aur/skwird-bin/PKGBUILD's pkgver is $pkgver, not $v"
     [ -f CHANGELOG.md ] || die "no CHANGELOG.md"
     first="$(grep -m1 '^## ' CHANGELOG.md || true)"
     echo "$first" | grep -Eq "^## ${v//./\\.} \([0-9]{4}-[0-9]{2}-[0-9]{2}\)$" ||
         die "CHANGELOG.md's first section is \"$first\", not \"## $v (YYYY-MM-DD)\", dated as released"
-    echo "release: $v agrees in Cargo.toml, Cargo.lock, the PKGBUILD and CHANGELOG.md ($first)"
+    echo "release: $v agrees in Cargo.toml, Cargo.lock, the PKGBUILDs and CHANGELOG.md ($first)"
 }
 
 # The first section of CHANGELOG.md, its heading left out: the release's
@@ -195,7 +198,8 @@ build() {
     step "the Linux packages, each tried in its distribution's roots"
     rm -f target/package/linux/*
     local d
-    for d in debian ubuntu fedora arch; do
+    # The plain build before skwird-bin, which is built from it.
+    for d in debian ubuntu fedora arch linux arch-bin; do
         tools/package/try.sh "$d"
     done
     local a
@@ -213,7 +217,7 @@ build() {
         echo "skwird $v"
         echo "tag $tag, commit $commit"
         echo "made $(date -u +%Y-%m-%dT%H:%M:%SZ) with $(rustc --version)"
-        echo "checked: the gate (tools/gate.sh), the flake's machines (root, system-service, user-service), each Linux package installed and checked in a fresh root of its distribution (tools/package/try.sh)"
+        echo "checked: the gate (tools/gate.sh), the flake's machines (root, system-service, user-service), each Linux package installed and checked in a fresh root of its distribution, the plain build installed by hand and checked in a fresh root of each, skwird-bin built from it and checked in Arch's (tools/package/try.sh)"
         echo "built here: Windows' programs (MinGW) and macOS' (Apple's SDK, signed ad hoc, not notarized), their build paths rewritten"
     } >"$stage/manifest.txt"
     # shellcheck disable=SC2046 # one name a line, none with a space
